@@ -2,9 +2,9 @@
  * installEngramTools — 模型面工具注册。
  *
  * 工具：
- *  - engram_recall：主动查询记忆（带因果链展开）
- *  - engram_store：显式写入一条记忆（绕过自动蒸馏）
- *  - engram_status：查看存储统计与唤醒情况
+ *  - engram_recall：主动查询外置 engram 记忆（N-gram 哈希寻址 + 因果链）
+ *  - engram_store：显式写入一条记忆（全局/项目/规则，绕过自动蒸馏）
+ *  - engram_status：查看存储统计、槽位占用与唤醒情况
  */
 
 import type { Context as CordisContext } from 'cordis'
@@ -13,6 +13,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import z from 'schemastery'
 
 import { EngramRelay } from './relay.js'
+import type { EngramKind } from './engram/store.js'
 
 type ToolsContext = CordisContext & { tools: ToolRegistry }
 
@@ -21,17 +22,19 @@ const TEXT_OUTPUT = {
   render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: String(value) }],
 }
 
+const KINDS: EngramKind[] = ['fact', 'decision', 'event', 'preference', 'global', 'project', 'rule']
+
 export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () => void {
   const disposers: Array<() => void> = []
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '查询外置 engram 记忆（带因果链展开）。当你需要回忆之前会话里的事实、决策、事件时调用；返回按因果激活排序的记忆痕迹。',
+    description: '查询外置 engram 条件记忆（N-gram 哈希确定性寻址 + 因果链展开）。当你需要回忆之前会话的事实、决策、事件，或跨会话的全局记忆/项目记忆/规则时调用；返回按哈希命中 + 因果激活排序的记忆。',
     parameters: {
       query: {
         type: 'string',
         required: true,
-        description: '要回忆的内容描述（越具体召回越准）',
+        description: '要回忆的内容（越具体命中越准，与写入时的表述一致最好）',
       },
       limit: {
         type: 'number',
@@ -42,19 +45,19 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     isConcurrencySafe: () => true,
     execute: async (args) => {
       const hit = await relay.recall(String(args.query), Number(args.limit ?? 3))
-      if (hit.engrams.length === 0) return `（无相关记忆，reason=${hit.reason}）`
+      if (hit.engrams.length === 0) return `（无命中，reason=${hit.reason}）`
       return hit.engrams.map((e) => `- [${e.kind}] ${e.label}: ${e.text}`).join('\n')
     },
   })))
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '显式写入一条 engram 记忆（事实/决策/事件/偏好），绕过自动蒸馏。适合需要立即固化、不想等蒸馏节奏的内容。',
+    description: '显式写入一条 engram 记忆，绕过自动蒸馏。支持跨会话记忆：kind=global（全局记忆）/project（项目记忆）/rule（规则）用于长期跨会话；fact/decision/event/preference 用于对话内蒸馏补充。',
     parameters: {
       kind: {
         type: 'string',
         required: true,
-        description: '记忆类型：fact（事实）/ decision（决策）/ event（事件）/ preference（偏好）',
+        description: '记忆类型：fact/decision/event/preference/global/project/rule',
       },
       label: {
         type: 'string',
@@ -64,7 +67,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       text: {
         type: 'string',
         required: true,
-        description: '记忆正文（小模型可蒸馏的精炼描述）',
+        description: '记忆正文（写入后按此文本哈希寻址，相同主题永远命中）',
       },
       causes: {
         type: 'array',
@@ -79,21 +82,30 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const label = String(args.label)
       const text = String(args.text)
       const causes = Array.isArray(args.causes) ? args.causes.map(String) : []
-      if (!['fact', 'decision', 'event', 'preference'].includes(kind)) {
-        return `错误：kind 必须是 fact/decision/event/preference（收到 ${kind}）`
+      if (!KINDS.includes(kind as EngramKind)) {
+        return `错误：kind 必须是 ${KINDS.join('/')}（收到 ${kind}）`
       }
-      const e = relay.store.add({ kind: kind as 'fact', label, text, sessionId: null, turn: 0, causes, effects: [], importance: 1 })
-      // 因果边入图
+      const e = relay.store.add({
+        kind: kind as EngramKind,
+        label,
+        text,
+        scope: kind === 'global' ? null : kind === 'project' ? 'project' : kind === 'rule' ? 'rule' : null,
+        sessionId: null,
+        turn: 0,
+        causes,
+        effects: [],
+        importance: 1,
+      })
       for (const causeId of causes) {
         relay.graph.addEdge(causeId, e.id, 'causes', 1)
       }
-      return `已写入 engram ${e.id}（${kind}）`
+      return `已写入 engram ${e.id}（${kind}，哈希槽位 ${e.slots.length} 个）`
     },
   })))
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_status',
-    description: '查看 engram 存储统计与唤醒情况（条数、图边数、模型状态、预算）。',
+    description: '查看 engram 条件记忆表状态：条目数、哈希槽位数、因果图边数、模型状态、注入预算。',
     parameters: {},
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,

@@ -1,0 +1,8 @@
+# Python 依赖（魔改模型服务）
+# 安装：pip install -r requirements.txt
+torch>=2.0
+transformers>=4.40
+safetensors
+sympy
+numpy
+huggingface_hub

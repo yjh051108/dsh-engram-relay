@@ -40,13 +40,15 @@ export interface Config {
   maxWakePerTurn: number
   distillEveryTurns: number
   enabled: boolean
+  pythonPath: string
+  pythonTimeoutMs: number
 }
 
 export const Config: z<Config> = z.object({
-  modelId: z.string().default('onnx-community/Qwen2.5-0.5B-Instruct')
-    .description('内置转接模型 id（<1B，transformers.js/ONNX 格式）'),
-  dtype: z.string().default('q8')
-    .description('ONNX 量化档（q8/q4/fp32）'),
+  modelId: z.string().default('Qwen/Qwen3-0.6B')
+    .description('内置转接模型 id（<1B，Python torch 魔改：Engram 条件记忆 + DSA 稀疏路由）'),
+  dtype: z.string().default('bfloat16')
+    .description('模型精度（bfloat16/float16/float32）'),
   storeDir: z.string().default('')
     .description('engram 持久化目录（空 = ~/.dsh/engram-relay/）'),
   injectBudgetTokens: z.number().min(0).max(8192).default(600)
@@ -57,6 +59,10 @@ export const Config: z<Config> = z.object({
     .description('每 N 回合蒸馏一次（0 = 关闭自动蒸馏）'),
   enabled: z.boolean().default(true)
     .description('总开关'),
+  pythonPath: z.string().default('python')
+    .description('Python 解释器路径（spawn 魔改模型服务用）'),
+  pythonTimeoutMs: z.number().min(1000).max(600000).default(120000)
+    .description('Python 服务预热超时'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -68,6 +74,8 @@ export function apply(ctx: Context, config: Config): void {
     maxWakePerTurn: config.maxWakePerTurn,
     distillEveryTurns: config.distillEveryTurns,
     enabled: config.enabled,
+    pythonPath: config.pythonPath,
+    pythonTimeoutMs: config.pythonTimeoutMs,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入

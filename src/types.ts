@@ -8,4 +8,8 @@ export interface EngramRelayConfig {
   maxWakePerTurn: number
   distillEveryTurns: number
   enabled: boolean
+  /** Python 解释器路径（spawn 魔改模型服务用）。 */
+  pythonPath: string
+  /** Python 模型服务超时（预热等）。 */
+  pythonTimeoutMs: number
 }

@@ -1,70 +1,85 @@
 # dsh-engram-relay
 
-> 外置 engram 转接模型插件：内置 <1B 本地模型，作为 DSH 主模型与外部记忆之间的转接层。
+> 大 engram 小 KV：魔改 <1B 模型（Engram 条件记忆 × DSA 稀疏路由），为 DSH 主模型实现超长上下文记忆稀疏路由。
 
 ## 是什么
 
-`dsh-engram-relay` 为 DeepSeek Harness 主模型提供一个 **<1B 参数的内置转接模型**（transformers.js/ONNX 本地推理，无需外部服务），它负责：
+`dsh-engram-relay` 融合 DeepSeek 开源的两项技术，做一个**模型级**的外置记忆转接层：
 
-1. **外置 engram 存储**：把会话中值得记住的事实、决策、事件，经小模型蒸馏为结构化记忆痕迹（engram），持久化到 harness 之外的本地存储；
-2. **超长记忆**：通过 engram 转接层将主模型 100k 上下文**等效延展至少 10 倍**——历史不再全部塞进上下文，而是沉淀为外置 engram，按需唤醒；
-3. **超稀疏精准主动唤醒**：每次请求前，转接层用小模型判断「现在该唤醒哪些记忆」，沿 **engram 因果图**传播激活（谁导致了谁、谁依赖谁），只注入极少数最相关的痕迹——比纯向量索引更强的因果检索；
-4. **模型 API 底层转接**：经 `llm/stream` waterfall 拦截每个模型调用，在请求发出前注入唤醒的记忆，在回合结束后蒸馏新记忆，零核心改动。
+1. **[Engram（条件记忆，[deepseek-ai/Engram](https://github.com/deepseek-ai/Engram)）](https://arxiv.org/abs/2601.07372)**：N-gram 哈希 O(1) 确定性寻址 → 巨大静态记忆表 → gate 融合。为 Transformer 补上「知识查找原语」（MoE 扩计算容量，Engram 扩静态记忆容量）。
+2. **[DSA（DeepSeek Sparse Attention，[deepseek-ai/DeepSeek-V3.2-Exp](https://github.com/deepseek-ai/DeepSeek-V3.2-Exp)）](https://github.com/huggingface/transformers/blob/main/src/transformers/models/deepseek_v32/modular_deepseek_v32.py)**：Lightning Indexer（轻量多头打分器，`ReLU(q·k)` 门控聚合）+ Token Selector（top-K 稀疏选择）。把 O(L²) 注意力降到 O(L·k)。
+
+**融合点**：用 DSA 的 Lightning Indexer 做 **KV 参与 engram 寻址后的路由**——当前上下文的 KV/query 表示对 engram 候选（哈希寻址结果）打分，top-K 超稀疏选择，只有被选中的记忆参与 gate 融合。哈希粗筛（精确模式匹配）+ KV 精筛（学习过的打分器）+ top-K 超稀疏 = **比普通向量索引更强**。
+
+## 架构
+
+```
+┌────────────────────────────────────────────────────────┐
+│ 云端 API 主模型（100k 上下文，KV 保持小）                 │
+│   ↑ 超稀疏文本注入（systemPrompt 记忆段，预算 600 token）  │
+├────────────────────────────────────────────────────────┤
+│ Node 插件（llm/stream 转接）                            │
+│  ├─ 请求前：哈希寻址 → 唤醒 → 注入                      │
+│  ├─ 回合后：蒸馏 → 写入 engram 表                        │
+│  └─ 历史折叠：早期历史 → engram 摘要 → compact 出 KV     │
+├────────────────────────────────────────────────────────┤
+│ Python 魔改 <1B 模型（Qwen3-0.6B torch）                │
+│  ├─ EngramModule：哈希记忆表 + gate 融合（hidden states 级）│
+│  └─ DSA Indexer：KV 打分路由 + top-K 稀疏选择            │
+└────────────────────────────────────────────────────────┘
+```
+
+- **大 engram**：外置记忆表（哈希槽 → 记忆嵌入），容量无限、可运行时写入；
+- **小 KV**：主模型 KV 只装工作记忆；历史折叠成 engram 摘要移出上下文，需要时经「哈希寻址 → KV 路由 → 稀疏注入」找回——100k 等效延展 ≥10 倍；
+- **双轨注入**：本地魔改模型内部 gate 融合（hidden states 级）+ 云端 API 模型超稀疏文本注入（systemPrompt 级）。
 
 ## 安装
 
 ```bash
-# 方式一：dshx（marisa）外部插件管理器
+# dshx（marisa）外部插件管理器
 dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.git
-
-# 方式二：plugin-registry
-dsh registry install ./dsh-engram-relay
-dsh registry enable @dsh-external/dsh-engram-relay
 ```
 
-首次启用时插件自动下载 <1B 转接模型（约 300–500MB，缓存于 `~/.dsh/engram-relay/models/`），随后完全本地运行。
+依赖：Node ≥ 18 + Python 3.10+（torch、transformers）。首次启用自动下载 Qwen3-0.6B（约 1.2GB，缓存于 `~/.dsh/engram-relay/models/`）。
 
-## 用法
-
-安装启用后无需额外操作：engram 转接层自动工作。模型侧可用的工具：
+## 工具
 
 | 工具 | 作用 |
 |---|---|
-| `engram_recall` | 主动查询记忆（带因果链展开） |
-| `engram_store` | 显式写入一条记忆（绕过自动蒸馏） |
-| `engram_status` | 查看 engram 存储统计与唤醒情况 |
+| `engram_recall` | 主动查询记忆（哈希寻址 + 因果链展开） |
+| `engram_store` | 显式写入（fact/decision/event/preference/global/project/rule，跨会话记忆） |
+| `engram_status` | 查看记忆表状态（条目/槽位/模型/预算） |
 
 ## 配置（`~/.dsh/config.yaml`）
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `modelId` | `onnx-community/Qwen2.5-0.5B-Instruct` | 内置转接模型（<1B） |
-| `dtype` | `q8` | ONNX 量化档 |
-| `injectBudgetTokens` | `600` | 单次唤醒注入的 token 预算（超稀疏） |
-| `maxWakePerTurn` | `3` | 每回合最多唤醒的 engram 条数 |
+| `modelId` | `Qwen/Qwen3-0.6B` | 魔改基座模型（<1B） |
+| `dtype` | `bfloat16` | 模型精度 |
+| `pythonPath` | `python` | Python 解释器（spawn 魔改模型服务） |
+| `injectBudgetTokens` | `600` | 单次唤醒注入预算（超稀疏，<1%） |
+| `maxWakePerTurn` | `3` | 每回合唤醒条数上限 |
 | `storeDir` | `~/.dsh/engram-relay/` | engram 持久化目录 |
 
 ## 目录
 
 ```
-src/
-├── index.ts          # 插件入口：llm/stream 转接 + systemPrompt 注入 + 工具注册
-├── relay.ts          # 转接核心：请求前唤醒 / 回合后蒸馏
-├── engram/
-│   ├── store.ts      # engram 持久化（JSONL）
-│   ├── causal.ts     # 因果图：节点=engram，边=导致/依赖/引用
-│   └── wake.ts       # 超稀疏因果唤醒（激活传播）
-├── model/
-│   └── local.ts      # transformers.js/ONNX <1B 模型封装（蒸馏/打分/嵌入）
-└── tools.ts          # engram_recall / engram_store / engram_status
+src/                    # Node 插件（llm/stream 转接 + 工具）
+python/engram_model/    # Python 魔改模型
+├── hash.py             # N-gram 哈希寻址（论文移植）
+├── engram_module.py    # EngramMemory + DSA Indexer + Gate 融合
+├── model.py            # Qwen3 decoder layer 注入
+└── server.py           # JSON 行协议服务（Node spawn 对接）
+python/tests/           # 融合模块/哈希数学测试
 ```
 
 ## 设计要点
 
-- **因果性 > 向量索引**：唤醒不是「语义相似度 top-k」，而是从当前上下文的小模型打分结果出发，沿因果图传播激活分数，能召回「导致当前问题的前因」和「依赖当前结论的后果」。
-- **超稀疏**：唤醒注入预算默认 600 token（相对 100k+ 上下文 <1%），且每回合唤醒条数有上限，防止记忆污染主上下文。
-- **零核心改动**：只使用公开 seam（`llm/stream` waterfall、`systemPrompt.context`、`tools.register`），不碰 DSH 源码。
+- **确定性寻址**：相同模式永远命中相同槽位（精确匹配，非相似度近似）；
+- **KV 路由**：indexer 打分器是学习过的（`ReLU(q·k)` 多头加权），哈希粗筛 + KV 精筛 + top-K；
+- **超稀疏**：唤醒注入预算 600 token（100k 上下文的 <1%），每回合条数有上限；
+- **零核心改动**：只使用公开 seam（`llm/stream`、`systemPrompt.context`、`tools.register`、`agent/turn-stopping`、`agent/pre-step`）。
 
 ## 收录
 
-本仓库按 [dsh-external/hub LOOP.md](https://github.com/dsh-external/hub/blob/main/LOOP.md) 流程收录：`marisa-plugin` topic + `catalog.source.json` 登记（category: `plugin`）。
+按 [dsh-external/hub LOOP.md](https://github.com/dsh-external/hub/blob/main/LOOP.md) 收录：`marisa-plugin` topic + `catalog.source.json`（category: `plugin`）。

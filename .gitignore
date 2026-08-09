@@ -4,3 +4,8 @@ lib/
 .cache/
 models/
 engram-data/
+cache/
+__pycache__/
+*.pyc
+python/engram_model/__pycache__/
+.qwen3-model/

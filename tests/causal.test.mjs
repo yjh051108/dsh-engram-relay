@@ -11,7 +11,8 @@ import { join } from 'node:path'
 
 import { EngramStore } from '../lib/engram/store.js'
 import { CausalGraph } from '../lib/engram/causal.js'
-import { CausalWakeEngine } from '../lib/engram/wake.js'
+import { NgramHashAddressing } from '../lib/engram/hash.js'
+import { EngramWakeEngine } from '../lib/engram/wake.js'
 
 const CONFIG = {
   modelId: 'test',
@@ -25,18 +26,19 @@ const CONFIG = {
 
 function makeEnv() {
   const dir = mkdtempSync(join(tmpdir(), 'engram-causal-'))
-  const store = new EngramStore(dir)
+  const hasher = new NgramHashAddressing({ seed: 0 })
+  const store = new EngramStore(dir, hasher)
   const graph = new CausalGraph(store)
-  return { dir, store, graph }
+  return { dir, store, graph, hasher }
 }
 
 test('graph: propagate activates causes and effects', () => {
-  const { dir, store, graph } = makeEnv()
+  const { dir, store, graph, hasher } = makeEnv()
   try {
     // 因果链：A（种子）→ B → C
-    const a = store.add({ kind: 'decision', label: 'A 采用 engram', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5 })
-    const b = store.add({ kind: 'fact', label: 'B 实现细节', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5 })
-    const c = store.add({ kind: 'event', label: 'C 上线', text: 'C', sessionId: null, turn: 3, causes: [b.id], effects: [], importance: 0.5 })
+    const a = store.add({ kind: 'decision', label: 'A 采用 engram', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5, scope: null })
+    const b = store.add({ kind: 'fact', label: 'B 实现细节', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5, scope: null })
+    const c = store.add({ kind: 'event', label: 'C 上线', text: 'C', sessionId: null, turn: 3, causes: [b.id], effects: [], importance: 0.5, scope: null })
     graph.rebuild()
 
     // 从 A 出发传播：B、C 都应被激活，且分数随跳数衰减
@@ -50,10 +52,10 @@ test('graph: propagate activates causes and effects', () => {
 })
 
 test('graph: propagate also walks reverse direction (effects -> causes)', () => {
-  const { dir, store, graph } = makeEnv()
+  const { dir, store, graph, hasher } = makeEnv()
   try {
-    const a = store.add({ kind: 'decision', label: 'A 根因', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5 })
-    const b = store.add({ kind: 'event', label: 'B 后果', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5 })
+    const a = store.add({ kind: 'decision', label: 'A 根因', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5, scope: null })
+    const b = store.add({ kind: 'event', label: 'B 后果', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5, scope: null })
     graph.rebuild()
 
     // 从后果 B 出发：应能回溯到前因 A —— 向量索引做不到的因果召回
@@ -64,52 +66,55 @@ test('graph: propagate also walks reverse direction (effects -> causes)', () => 
   }
 })
 
-test('wake: sparse truncation respects budget and limit', async () => {
-  const { dir, store, graph } = makeEnv()
+test('wake: hash hit then sparse truncation', async () => {
+  const { dir, store, graph, hasher } = makeEnv()
   try {
+    // 同主题写入 10 条（共享槽位），其中一条与查询文本完全一致
     for (let i = 0; i < 10; i += 1) {
-      store.add({ kind: 'fact', label: `事实 ${i}`, text: `这是第 ${i} 条很长的记忆内容，用来测试稀疏截断逻辑是否正确。`, sessionId: null, turn: i, causes: [], effects: [], importance: 0.9 })
+      store.add({ kind: 'fact', label: `事实 ${i}`, text: i === 3 ? '项目部署端口是 8080' : `这是第 ${i} 条很长的记忆内容用来测试稀疏截断逻辑是否正确`, sessionId: null, turn: i, causes: [], effects: [], importance: 0.9, scope: null })
     }
     graph.rebuild()
 
-    const engine = new CausalWakeEngine(graph, store, { ...CONFIG, maxWakePerTurn: 3 })
-    // 无模型打分时降级为 importance 排序
-    const hit = await engine.query('测试', 3)
+    const engine = new EngramWakeEngine(store, graph, hasher, { ...CONFIG, maxWakePerTurn: 3 })
+    // 无模型打分时降级为 importance 排序（种子 = importance）
+    const hit = await engine.query('项目部署端口是 8080', 3)
     assert.ok(hit.engrams.length <= 3, '唤醒条数受 maxWakePerTurn 限制')
     assert.ok(hit.injectedTokens <= 600, '注入 token 受预算限制')
-    assert.ok(hit.reason.startsWith('causal-wake') || hit.reason === 'below-threshold')
+    assert.ok(hit.engrams.some((e) => e.label === '事实 3'), '与查询同文本的条目必须命中')
+    assert.ok(hit.reason.startsWith('hash-wake') || hit.reason === 'below-threshold')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('wake: custom scorer seeds propagation', async () => {
-  const { dir, store, graph } = makeEnv()
+test('wake: hash seed + causal propagation recalls dependents', async () => {
+  const { dir, store, graph, hasher } = makeEnv()
   try {
-    const a = store.add({ kind: 'decision', label: 'A 种子', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.1 })
-    const b = store.add({ kind: 'fact', label: 'B 依赖 A', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.1 })
+    // A 与查询同文本 → 哈希命中 A；B 因果依赖 A → 传播召回 B
+    const a = store.add({ kind: 'decision', label: 'A 种子', text: '项目部署端口是 8080', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.1, scope: null })
+    const b = store.add({ kind: 'fact', label: 'B 依赖 A', text: '因为部署端口定了所以防火墙规则如下', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.1, scope: null })
     graph.rebuild()
 
-    // 模拟模型打分：只有 A 命中
-    const engine = new CausalWakeEngine(graph, store, CONFIG, async (_q, candidates) => {
-      return new Map(candidates.filter((c) => c.id === a.id).map((c) => [c.id, 1.0]))
+    // 模拟模型打分：只给 A 高分（其余低分）
+    const engine = new EngramWakeEngine(store, graph, hasher, CONFIG, async (_q, candidates) => {
+      return new Map(candidates.map((c) => [c.id, c.id === a.id ? 1.0 : 0.1]))
     })
-    const hit = await engine.query('什么导致了 A', 3)
+    const hit = await engine.query('项目部署端口是 8080', 3)
     const ids = hit.engrams.map((e) => e.id)
-    assert.ok(ids.includes(a.id), '种子命中')
-    assert.ok(ids.includes(b.id), '因果后继被激活并召回')
+    assert.ok(ids.includes(a.id), '哈希种子命中 A')
+    assert.ok(ids.includes(b.id), '因果后继 B 被传播召回')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
 test('wake: empty store short-circuits', async () => {
-  const { dir, store, graph } = makeEnv()
+  const { dir, store, graph, hasher } = makeEnv()
   try {
-    const engine = new CausalWakeEngine(graph, store, CONFIG)
+    const engine = new EngramWakeEngine(store, graph, hasher, CONFIG)
     const hit = await engine.query('anything', 3)
     assert.equal(hit.engrams.length, 0)
-    assert.equal(hit.reason, 'below-threshold')
+    assert.equal(hit.reason, 'no-hash-hit')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
