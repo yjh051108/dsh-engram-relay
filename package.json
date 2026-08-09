@@ -1,0 +1,40 @@
+{
+  "name": "@dsh-external/dsh-engram-relay",
+  "version": "0.1.0",
+  "description": "外置 engram 转接模型插件：内置 <1B 模型（transformers.js/ONNX 本地推理），作为 DSH 主模型与外部记忆之间的转接层，实现超长记忆（100k 上下文等效延展 ≥10 倍）、超稀疏精准主动唤醒（因果图传播，优于纯向量索引）",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./package.json": "./package.json"
+  },
+  "files": ["lib"],
+  "license": "BSD-3-Clause",
+  "engines": { "dsh": ">=0.0.1" },
+  "dshx": {
+    "contributes": { "tools": ["engram_recall", "engram_store", "engram_status"], "skills": [] }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.0.1",
+    "@deepseek-ai/dsh-system-prompt": "^0.0.1",
+    "@deepseek-ai/dsh-tools": "^0.0.1",
+    "cordis": "^4.0.0-rc.7"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.2.0",
+    "schemastery": "^3.18.0"
+  },
+  "overrides": {
+    "onnxruntime-node": "1.20.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"tests/*.test.mjs\" \"tests/*.test.js\""
+  }
+}
