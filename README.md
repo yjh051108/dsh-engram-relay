@@ -20,8 +20,8 @@
 ├────────────────────────────────────────────────────────┤
 │ Node 插件（llm/stream 转接）                            │
 │  ├─ 请求前：哈希寻址 → 唤醒 → 注入                      │
-│  ├─ 回合后：蒸馏 → 写入 engram 表                        │
-│  └─ 历史折叠：早期历史 → engram 摘要 → compact 出 KV     │
+│  ├─ 回合后：蒸馏 → 写入 engram 表（实时留底）            │
+│  └─ 与官方 compact 共存：官方折叠腾 KV，engram 保细节    │
 ├────────────────────────────────────────────────────────┤
 │ Python 魔改 <1B 模型（Qwen3-0.6B torch）                │
 │  ├─ EngramModule：哈希记忆表 + gate 融合（hidden states 级）│
@@ -30,7 +30,7 @@
 ```
 
 - **大 engram**：外置记忆表（哈希槽 → 记忆嵌入），容量无限、可运行时写入；
-- **小 KV**：主模型 KV 只装工作记忆；历史折叠成 engram 摘要移出上下文，需要时经「哈希寻址 → KV 路由 → 稀疏注入」找回——100k 等效延展 ≥10 倍；
+- **与官方 compact 共存**：DSH 自带的 `dsh-compact-basic` 是成熟的有损总结式折叠（LLM 生成 checkpoint 替换 surface），负责腾 KV 空间；engram 在每回合结束时**先实时蒸馏留底**（`agent/turn-stopping` → `session.deriveMessages()`），官方折叠丢失的细节随时经「哈希寻址 → KV 路由 → 稀疏注入」找回——100k 等效延展 ≥10 倍；
 - **双轨注入**：本地魔改模型内部 gate 融合（hidden states 级）+ 云端 API 模型超稀疏文本注入（systemPrompt 级）。
 
 ## 安装

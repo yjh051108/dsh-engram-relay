@@ -1,21 +1,20 @@
 /**
  * EngramRelay — 转接核心：大 engram 小 KV 的落地实现。
  *
- * 三条链路（全部挂在公开 seam 上，零核心改动）：
+ * 链路（全部挂在公开 seam 上，零核心改动）：
  *
  * 1. 请求前唤醒（读取）：`llm/stream` 旁路观察当前请求 → N-gram 哈希
  *    寻址外置 engram 表 → 门控打分 → 因果传播 → 超稀疏注入
  *    （systemPrompt 记忆段，预算默认 600 token）。
  *
- * 2. 回合后蒸馏（写入）：`agent/turn-stopping`（回合关闭边界）→ <1B
- *    模型把本回合对话蒸馏为 engram 条目（全量，含跨会话全局/项目/
- *    规则记忆的提炼），写入外置表。hash 键由蒸馏文本决定——相同主题
- *    永远命中相同槽位。
+ * 2. 回合后蒸馏（写入）：`agent/turn-stopping`（回合关闭边界）→ 从
+ *    `agent.session.deriveMessages()` 提取最近回合文本 → <1B 模型蒸馏
+ *    为 engram 条目写入外置表。**实时留底**：在官方 compact 折叠之前
+ *    细节已进记忆表，折叠后仍可唤醒找回。
  *
- * 3. 历史折叠（小 KV）：`agent/pre-step` waterfall → token 压力超阈值
- *    → <1B 模型把早期历史蒸馏成 engram 摘要 → 调 `ctx.compact`
- *    compactNow 折叠 → 折叠内容随时按哈希唤醒找回。等效：上下文窗口
- *    保持小，记忆容量无限（100k → 1M+）。
+ * 3. 与官方 compact 共存：不阻止、不替代官方折叠（它负责腾 KV，是
+ *    成熟的有损总结式压缩）。engram 的职责在官方折叠之前完成——细节
+ *    保真（可检索、带因果），官方负责空间（surface 替换）。
  */
 
 import type { Context as CordisContext } from 'cordis'
@@ -91,26 +90,23 @@ export class EngramRelay {
     })
 
     // 3. 回合后蒸馏（agent/turn-stopping：回合关闭边界，serial 不 veto）。
-    this.ctx.on('agent/turn-stopping', ({ turn }) => {
+    //    从 agent.session.deriveMessages() 提取最近回合文本 → <1B 模型
+    //    蒸馏为 engram（实时留底——在官方 compact 折叠之前，细节已进
+    //    外置记忆表，折叠后仍可唤醒找回）。
+    this.ctx.on('agent/turn-stopping', ({ agent, turn }) => {
       if (!this.config.enabled) return
       this.lastTurnAt = turn
+      this.currentSessionId = agent.session.id
+      const messages = extractRecentTurn(agent.session.deriveMessages(), turn)
+      this.lastConversationText = messages
       void this.maybeDistill().catch((error) => {
         this.ctx.logger?.warn?.('[engram-relay] distill failed: %s', String(error))
       })
     })
 
-    // 4. 历史折叠（agent/pre-step：waterfall，可替换进入 step 的消息）。
-    //    在官方 compact 压力触发点之外，由本插件的 engram 折叠策略驱动：
-    //    先蒸馏早期历史为 engram（保底可召回），再走官方 compact 折叠。
-    this.ctx.on('agent/pre-step', async ({ agent }, next) => {
-      if (!this.config.enabled) return next()
-      try {
-        await this.maybeFold(agent)
-      } catch (error) {
-        this.ctx.logger?.warn?.('[engram-relay] fold failed: %s', String(error))
-      }
-      return next()
-    })
+    // 4. 与官方 compact 共存：不阻止、不替代官方折叠（它负责腾 KV）。
+    //    本插件的职责在官方折叠**之前**完成——每回合蒸馏已把细节留底；
+    //    官方 compact 折叠后，细节经 engram 哈希/因果唤醒找回。
 
     return () => {
       this.disposers.forEach((d) => d())
@@ -125,22 +121,8 @@ export class EngramRelay {
   /** 回合后蒸馏：<1B 模型把最近回合内容蒸馏为 engram。 */
   private async maybeDistill(): Promise<void> {
     if (this.config.distillEveryTurns === 0) return
-    // TODO(relay): 从会话投影读取最近回合文本（后续接 session 读取）。
     const conversation = this.lastConversationText ?? ''
     await this.model.distillTurn(this.store, this.graph, conversation, this.currentSessionId ?? '', this.lastTurnAt)
-  }
-
-  /** 历史折叠：token 压力超阈值时蒸馏早期历史 → 官方 compact 折叠。 */
-  private async maybeFold(_agent: { session: { id: string } }): Promise<void> {
-    // TODO(relay): 读取会话 token 压力 → RelayModel.foldHistory → compactNow。
-    // v2 折叠核心在 Python 侧（记忆表写入），Node 侧待会话投影接入后实现。
-  }
-
-  /** 供外部注入最近会话文本（relay 集成 session 投影后使用）。 */
-  setConversationContext(text: string, sessionId: string, turn: number): void {
-    this.lastConversationText = text
-    this.currentSessionId = sessionId
-    this.lastTurnAt = turn
   }
 
   private lastConversationText = ''
@@ -165,7 +147,40 @@ export class EngramRelay {
       graphEdges: this.graph.edgeCount(),
       model: await this.model.describe(),
       budgetTokens: this.config.injectBudgetTokens,
-      foldEnabled: (this.ctx as unknown as { compact?: unknown }).compact !== undefined,
+      compactCoexist: (this.ctx as unknown as { compact?: unknown }).compact !== undefined,
     }
   }
+}
+
+/**
+ * 从会话消息投影中提取「最近一个回合」的文本（供蒸馏）。
+ * deriveMessages 返回完整历史（frozen Message[]）；取最后一条 user
+ * 消息起至末尾的文本块拼接。长度上限由调用方（distillTurn）截断。
+ */
+function extractRecentTurn(messages: Array<{ role?: string; content?: unknown }>, _turn: number): string {
+  // 找最后一条 user 消息的起点
+  let start = 0
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === 'user') {
+      start = i
+      break
+    }
+  }
+  const parts: string[] = []
+  for (let i = start; i < messages.length; i += 1) {
+    const m = messages[i]
+    if (!m) continue
+    const role = m.role ?? 'unknown'
+    const content = m.content
+    if (typeof content === 'string') {
+      parts.push(`[${role}] ${content}`)
+    } else if (Array.isArray(content)) {
+      const text = content
+        .map((b) => (typeof b === 'object' && b !== null && 'text' in b ? String((b as { text: unknown }).text) : ''))
+        .filter((t) => t !== '')
+        .join(' ')
+      if (text !== '') parts.push(`[${role}] ${text}`)
+    }
+  }
+  return parts.join('\n').slice(0, 4000)
 }
