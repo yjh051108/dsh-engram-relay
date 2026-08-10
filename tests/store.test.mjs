@@ -20,8 +20,8 @@ test('store: add/persist/reload roundtrip', () => {
     const store = new EngramStore(dir)
     const e = store.add({
       kind: 'decision',
-      label: '用 engram 转接层做超长记忆',
-      text: '决定采用因果图传播的稀疏唤醒，不引入向量数据库。',
+      title: 'engram 转接层决策',
+      summary: '决定采用因果图传播的稀疏唤醒，不引入向量数据库。',
       sessionId: 's1',
       turn: 3,
       causes: [],
@@ -35,7 +35,7 @@ test('store: add/persist/reload roundtrip', () => {
     const reloaded = new EngramStore(dir)
     assert.equal(reloaded.count(), 1)
     const got = reloaded.get(e.id)
-    assert.equal(got?.label, '用 engram 转接层做超长记忆')
+    assert.equal(got?.title, 'engram 转接层决策')
     assert.equal(got?.kind, 'decision')
 
     // 持久化文件是 JSONL
@@ -53,8 +53,8 @@ test('store: touch updates hits and persists', () => {
     const store = new EngramStore(dir)
     const e = store.add({
       kind: 'fact',
-      label: '端口 8080',
-      text: '项目部署端口是 8080。',
+      title: '部署端口',
+      summary: '项目部署端口是 8080。',
       sessionId: null,
       turn: 0,
       causes: [],
@@ -76,8 +76,8 @@ test('store: remove deletes and persists', () => {
     const store = new EngramStore(dir)
     const e = store.add({
       kind: 'preference',
-      label: '中文回复',
-      text: '用户偏好中文回复。',
+      title: '回复偏好',
+      summary: '用户偏好中文回复。',
       sessionId: null,
       turn: 0,
       causes: [],

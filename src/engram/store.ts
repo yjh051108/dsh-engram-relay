@@ -1,16 +1,18 @@
 /**
- * EngramStore — 外置 engram 条件记忆表（JSONL 持久化）。
+ * EngramStore — 大一统记忆图谱（JSONL 持久化）。
  *
- * 对应 DeepSeek Engram 论文的「静态记忆表」：哈希槽 → 记忆条目。
- *  - 每条 engram 由 N-gram 哈希寻址（NgramHashAddressing）写入多个槽位
- *    （多头：n2h0..n3h3），读取时按当前上下文的哈希命中间接取回；
- *  - 槽位映射（slot → engram ids）与条目本体（engrams.jsonl）分离，
- *    槽位表是派生索引，条目是事实源；
- *  - 记忆种类（本会话内）：
- *      fact / decision / event / preference（会话内折叠的历史）
+ * 模型（参考 Obsidian 双向链接 + skill 渐进式披露）：
+ *  - **节点**：统一记忆（不预分轨/不硬编码分层）。每条记忆 =
+ *      title（入口锚点）+ summary（一句话摘要，渐进披露第一层）
+ *      + content（完整正文，按需展开）+ links（双向链接 [[title]]）
+ *      + causes/effects（因果边，双向可追溯）
+ *  - **索引**：N-gram 哈希寻址（NgramHashAddressing）→ 槽位 → 节点，
+ *    确定性 O(1) 匹配当前上下文；
+ *  - **自组织**：不手动分层——链接密度/主题关联自然形成结构，
+ *    唤醒按关联度排序（类 Obsidian 图谱的局部密度）。
  *
- * 定位：**单次会话上下文增强**——折叠本会话早期历史进记忆表、需要时
- * 模型原生回忆；会话结束即弃，不做跨会话记忆沉淀。
+ * 定位：**单次会话上下文增强**——本会话记忆写入、入口唤醒、渐进展开、
+ * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
@@ -19,35 +21,52 @@ import { dirname, join, resolve } from 'node:path'
 
 import { NgramHashAddressing, type HashResult } from './hash.js'
 
-export type EngramKind = 'fact' | 'decision' | 'event' | 'preference'
+/** 记忆节点类型（统一，不预分轨；kind 仅作展示标签，非分层）。 */
+export type EngramKind = 'fact' | 'decision' | 'event' | 'note'
 
-export interface Engram {
+/** 渐进披露层级。 */
+export interface EngramNode {
   id: string
   kind: EngramKind
-  /** 记忆正文（蒸馏后的精炼文本，唤醒时注入）。 */
-  text: string
-  /** 唤醒时的精简标签（一行）。 */
-  label: string
-  /** 归属（保留字段：当前统一 null，单会话场景无跨会话归属）。 */
-  scope: string | null
-  /** 来源会话 id（本会话内折叠）。 */
+  /** 入口锚点（唤醒列表展示；如 Obsidian 的页面标题）。 */
+  title: string
+  /** 一句话摘要（渐进披露第一层——入口列表只给这个）。 */
+  summary: string
+  /** 完整正文（渐进披露第二层——展开时给）。 */
+  content: string
+  /** 双向链接：关联节点的 title 集（Obsidian 风格 [[title]]）。 */
+  links: string[]
+  /** 因果边（前因）：导致本节点的节点 id 集。 */
+  causes: string[]
+  /** 因果边（后果）：本节点导致的节点 id 集。 */
+  effects: string[]
+  /** 来源会话 id（本会话内）。 */
   sessionId: string | null
   /** 来源回合序号。 */
   turn: number
-  /** 因果边：导致本痕迹的 engram id 集（会话内事件链）。 */
-  causes: string[]
-  /** 因果边：本痕迹导致的 engram id 集。 */
-  effects: string[]
   /** 创建时间（epoch ms）。 */
   createdAt: number
-  /** 重要度 0-1（蒸馏时小模型打分），用于稀疏截断。 */
+  /** 关联度 0-1（唤醒排序用；自组织：链接越多/被引用越多越高）。 */
   importance: number
   /** 被唤醒次数（LRU 衰减）。 */
   hits: number
   /** 最后唤醒时间。 */
   lastHitAt: number | null
-  /** 该条记忆对应的哈希槽位（写入时固化，重哈希可重建）。 */
+  /** 该节点对应的哈希槽位（写入时固化，重哈希可重建）。 */
   slots: string[]
+}
+
+/** 渐进披露视图。 */
+export interface EngramEntry {
+  id: string
+  title: string
+  summary: string
+  kind: EngramKind
+  /** 因果邻接摘要（入口层展示：前因/后果标题）。 */
+  causeTitles: string[]
+  effectTitles: string[]
+  /** 双向链接标题。 */
+  linkTitles: string[]
 }
 
 let seq = 0
@@ -60,9 +79,11 @@ export function createEngramId(): string {
 export class EngramStore {
   readonly dir: string
   private file: string
-  private byId = new Map<string, Engram>()
-  /** 槽位索引：slotKey -> Set<engramId>（派生索引，写入/加载时构建）。 */
+  private byId = new Map<string, EngramNode>()
+  /** 槽位索引：slotKey -> Set<nodeId>（派生索引，写入/加载时构建）。 */
   private slotIndex = new Map<string, Set<string>>()
+  /** 标题索引：title -> nodeId（双向链接解析用）。 */
+  private titleIndex = new Map<string, string>()
 
   constructor(storeDir: string, private hasher: NgramHashAddressing = new NgramHashAddressing()) {
     this.dir = storeDir === '' ? join(homedir(), '.dsh', 'engram-relay') : resolve(storeDir)
@@ -78,9 +99,10 @@ export class EngramStore {
     for (const line of readFileSync(this.file, 'utf8').split('\n')) {
       if (line.trim() === '') continue
       try {
-        const e = JSON.parse(line) as Engram
+        const e = JSON.parse(line) as EngramNode
         this.byId.set(e.id, e)
         for (const s of e.slots) this.indexSlot(s, e.id)
+        if (e.title) this.titleIndex.set(e.title, e.id)
       } catch {
         // 单条损坏跳过，不拖垮整个存储
       }
@@ -104,15 +126,14 @@ export class EngramStore {
   }
 
   /**
-   * 写入一条 engram：自动按文本哈希寻址，把条目挂到命中的槽位。
-   * 显式传入 text 之外的 keyText 时可让「标签文本」决定寻址（例如
-   * 规则记忆按规则主题寻址）。
+   * 写入/更新一个记忆节点：按 title+summary 哈希寻址，挂到命中槽位。
+   * 渐进披露：title/summary 是入口层，content 是展开层。
    */
-  add(input: Omit<Engram, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots'>, keyText?: string): Engram {
-    const text = keyText ?? input.text
-    const result = this.hasher.hash(text)
+  add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots'>): EngramNode {
+    const keyText = `${input.title} ${input.summary}`
+    const result = this.hasher.hash(keyText)
     const slots = this.hasher.slotKeys(result)
-    const engram: Engram = {
+    const node: EngramNode = {
       ...input,
       id: createEngramId(),
       createdAt: Date.now(),
@@ -120,23 +141,30 @@ export class EngramStore {
       lastHitAt: null,
       slots,
     }
-    this.byId.set(engram.id, engram)
-    for (const s of slots) this.indexSlot(s, engram.id)
+    this.byId.set(node.id, node)
+    for (const s of slots) this.indexSlot(s, node.id)
+    if (node.title) this.titleIndex.set(node.title, node.id)
     this.persist()
-    return engram
+    return node
   }
 
-  /** 按文本哈希寻址，返回命中槽位的候选记忆（去重，按重要度降序）。 */
-  lookup(text: string, limit = 8): Engram[] {
+  /** 按标题取节点（双向链接 [[title]] 解析）。 */
+  byTitle(title: string): EngramNode | undefined {
+    const id = this.titleIndex.get(title)
+    return id ? this.byId.get(id) : undefined
+  }
+
+  /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序）。 */
+  lookup(text: string, limit = 8): EngramNode[] {
     const result = this.hasher.hash(text)
     return this.lookupHash(result, limit)
   }
 
   /** 按已计算的哈希结果寻址（避免重复哈希）。 */
-  lookupHash(result: HashResult, limit = 8): Engram[] {
+  lookupHash(result: HashResult, limit = 8): EngramNode[] {
     const keys = this.hasher.slotKeys(result)
     const seen = new Set<string>()
-    const hits: Engram[] = []
+    const hits: EngramNode[] = []
     for (const k of keys) {
       const ids = this.slotIndex.get(k)
       if (!ids) continue
@@ -151,12 +179,30 @@ export class EngramStore {
     return hits.slice(0, limit)
   }
 
-  get(id: string): Engram | undefined {
+  /** 渐进披露入口视图：摘要级 + 因果/链接邻接摘要。 */
+  entry(node: EngramNode): EngramEntry {
+    return {
+      id: node.id,
+      title: node.title,
+      summary: node.summary,
+      kind: node.kind,
+      causeTitles: this.getMany(node.causes).map((n) => n.title),
+      effectTitles: this.getMany(node.effects).map((n) => n.title),
+      linkTitles: node.links.map((t) => this.byTitle(t)?.title ?? t),
+    }
+  }
+
+  /** 批量入口视图。 */
+  entries(nodes: EngramNode[]): EngramEntry[] {
+    return nodes.map((n) => this.entry(n))
+  }
+
+  get(id: string): EngramNode | undefined {
     return this.byId.get(id)
   }
 
-  getMany(ids: string[]): Engram[] {
-    const out: Engram[] = []
+  getMany(ids: string[]): EngramNode[] {
+    const out: EngramNode[] = []
     for (const id of ids) {
       const e = this.byId.get(id)
       if (e) out.push(e)
@@ -164,12 +210,8 @@ export class EngramStore {
     return out
   }
 
-  all(): Engram[] {
+  all(): EngramNode[] {
     return [...this.byId.values()]
-  }
-
-  byKind(kind: EngramKind): Engram[] {
-    return this.all().filter((e) => e.kind === kind)
   }
 
   count(): number {
@@ -193,6 +235,7 @@ export class EngramStore {
     const e = this.byId.get(id)
     if (!e) return false
     this.byId.delete(id)
+    if (e.title) this.titleIndex.delete(e.title)
     for (const s of e.slots) {
       const set = this.slotIndex.get(s)
       if (set) {
@@ -205,13 +248,13 @@ export class EngramStore {
   }
 
   /**
-   * 会话隔离：清空某会话的全部 engram（单会话上下文增强——会话结束即弃）。
-   * 这是「不做跨会话记忆沉淀」的执行面：会话终结时调用，记忆不跨会话残留。
+   * 会话隔离：清空某会话的全部节点（单会话增强——会话结束即弃）。
    */
   clearSession(sessionId: string): number {
     const doomed = this.all().filter((e) => e.sessionId === sessionId)
     for (const e of doomed) {
       this.byId.delete(e.id)
+      if (e.title) this.titleIndex.delete(e.title)
       for (const s of e.slots) {
         const set = this.slotIndex.get(s)
         if (set) {

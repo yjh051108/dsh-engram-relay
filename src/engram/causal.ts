@@ -7,7 +7,7 @@
  * 能召回「导致当前问题的前因」与「依赖当前结论的后果」。
  */
 
-import { EngramStore, type Engram } from './store.js'
+import { EngramStore, type EngramNode } from './store.js'
 
 /** 因果边类型。 */
 export type CausalEdgeKind = 'causes' | 'depends-on' | 'references'
@@ -104,7 +104,7 @@ export class CausalGraph {
   }
 
   /** 取某节点的直接前因（供召回结果展示因果链）。 */
-  causesOf(id: string): Engram[] {
+  causesOf(id: string): EngramNode[] {
     const ids = (this.inEdges.get(id) ?? [])
       .filter((e) => e.kind === 'causes')
       .map((e) => e.from)
@@ -112,7 +112,7 @@ export class CausalGraph {
   }
 
   /** 取某节点的直接后果（供召回结果展示因果链）。 */
-  effectsOf(id: string): Engram[] {
+  effectsOf(id: string): EngramNode[] {
     const ids = (this.out.get(id) ?? [])
       .filter((e) => e.kind === 'causes')
       .map((e) => e.to)

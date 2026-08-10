@@ -36,9 +36,9 @@ test('graph: propagate activates causes and effects', () => {
   const { dir, store, graph, hasher } = makeEnv()
   try {
     // 因果链：A（种子）→ B → C
-    const a = store.add({ kind: 'decision', label: 'A 采用 engram', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5, scope: null })
-    const b = store.add({ kind: 'fact', label: 'B 实现细节', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5, scope: null })
-    const c = store.add({ kind: 'event', label: 'C 上线', text: 'C', sessionId: null, turn: 3, causes: [b.id], effects: [], importance: 0.5, scope: null })
+    const a = store.add({ kind: 'decision', title: 'A 采用 engram', summary: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5, scope: null })
+    const b = store.add({ kind: 'fact', title: 'B 实现细节', summary: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5, scope: null })
+    const c = store.add({ kind: 'event', title: 'C 上线', summary: 'C', sessionId: null, turn: 3, causes: [b.id], effects: [], importance: 0.5, scope: null })
     graph.rebuild()
 
     // 从 A 出发传播：B、C 都应被激活，且分数随跳数衰减
@@ -54,8 +54,8 @@ test('graph: propagate activates causes and effects', () => {
 test('graph: propagate also walks reverse direction (effects -> causes)', () => {
   const { dir, store, graph, hasher } = makeEnv()
   try {
-    const a = store.add({ kind: 'decision', label: 'A 根因', text: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5, scope: null })
-    const b = store.add({ kind: 'event', label: 'B 后果', text: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5, scope: null })
+    const a = store.add({ kind: 'decision', title: 'A 根因', summary: 'A', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5, scope: null })
+    const b = store.add({ kind: 'event', title: 'B 后果', summary: 'B', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.5, scope: null })
     graph.rebuild()
 
     // 从后果 B 出发：应能回溯到前因 A —— 向量索引做不到的因果召回
@@ -71,7 +71,7 @@ test('wake: hash hit then sparse truncation', async () => {
   try {
     // 同主题写入 10 条（共享槽位），其中一条与查询文本完全一致
     for (let i = 0; i < 10; i += 1) {
-      store.add({ kind: 'fact', label: `事实 ${i}`, text: i === 3 ? '项目部署端口是 8080' : `这是第 ${i} 条很长的记忆内容用来测试稀疏截断逻辑是否正确`, sessionId: null, turn: i, causes: [], effects: [], importance: 0.9, scope: null })
+      store.add({ kind: 'fact', title: `事实 ${i}`, summary: i === 3 ? '项目部署端口是 8080' : `这是第 ${i} 条很长的记忆内容用来测试稀疏截断逻辑是否正确`, content: '', links: [], sessionId: null, turn: i, causes: [], effects: [], importance: 0.9 })
     }
     graph.rebuild()
 
@@ -80,7 +80,7 @@ test('wake: hash hit then sparse truncation', async () => {
     const hit = await engine.query('项目部署端口是 8080', 3)
     assert.ok(hit.engrams.length <= 3, '唤醒条数受 maxWakePerTurn 限制')
     assert.ok(hit.injectedTokens <= 600, '注入 token 受预算限制')
-    assert.ok(hit.engrams.some((e) => e.label === '事实 3'), '与查询同文本的条目必须命中')
+    assert.ok(hit.engrams.some((e) => e.title === '事实 3'), '与查询同文本的条目必须命中')
     assert.ok(hit.reason.startsWith('hash-wake') || hit.reason === 'below-threshold')
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -92,8 +92,8 @@ test('wake: hash seed + causal propagation recalls dependents', async () => {
   try {
     // A 与查询同文本 → 哈希命中 A；B 与 A 词汇零重叠、因果依赖 A → 因果传播召回 B
     // （importance 需 ≥ threshold/decay = 0.2 才能传播过阈值）
-    const a = store.add({ kind: 'decision', label: 'A 种子', text: '项目部署端口是 8080 且使用 PostgreSQL', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8, scope: null })
-    const b = store.add({ kind: 'fact', label: 'B 依赖 A', text: '防火墙白名单规则已按既定方案更新完成', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.8, scope: null })
+    const a = store.add({ kind: 'decision', title: 'A 种子', summary: '项目部署端口是 8080 且使用 PostgreSQL', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8, scope: null })
+    const b = store.add({ kind: 'fact', title: 'B 依赖 A', summary: '防火墙白名单规则已按既定方案更新完成', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.8, scope: null })
     graph.rebuild()
 
     // 无模型打分（重要度降级）：A/B 同为 0.1

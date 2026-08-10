@@ -73,10 +73,33 @@ FILLERS = {
     "rotate": ["30", "60", "90", "180"],
 }
 
+# 评估专用值（**训练从未出现过**——模型只能靠记忆表回忆，无法背答案）
+EVAL_ONLY_VALUES = {
+    "port": ["13579", "24680"],
+    "db": ["CockroachDB", "TiDB"],
+    "conn": ["postgres://eval:13579/main", "mysql://eval:24680/core"],
+    "host": ["eval-only.internal", "eval-2.example.net"],
+    "cache": ["Caffeine 本地", "自研缓存层"],
+    "ttl": ["135", "246"],
+    "ci": ["Travis CI", "CircleCI"],
+    "trigger": ["定时每两小时", "tag 发布"],
+    "level": ["TRACE", "FATAL"],
+    "log_target": ["Graylog", "DataDog"],
+    "threshold": ["77%", "88%"],
+    "channel": ["飞书", "Webhook"],
+    "vault": ["AWS KMS 专用", "HashiCorp Vault 企业版"],
+    "rotate": ["135", "246"],
+}
 
-def generate_knowledge(n: int, seed: int = 42) -> list[dict]:
-    """生成 n 条知识：{sentence, question, answer}。"""
+
+def generate_knowledge(n: int, seed: int = 42, eval_only: bool = False) -> list[dict]:
+    """生成 n 条知识：{sentence, question, answer}。
+
+    eval_only=True 时用 EVAL_ONLY_VALUES（训练从未见过的值）——
+    评估时模型唯一信息来源是记忆表，无法背训练答案。
+    """
     rng = random.Random(seed)
+    pool = EVAL_ONLY_VALUES if eval_only else FILLERS
     out = []
     for i in range(n):
         tpl_idx = i % len(KNOWLEDGE_TEMPLATES)
@@ -84,13 +107,13 @@ def generate_knowledge(n: int, seed: int = 42) -> list[dict]:
         q_tpl = QUESTION_TEMPLATES[tpl_idx]
         # 填充每个占位符（同一条知识内固定，跨条随机）
         filled = {}
-        for key, values in FILLERS.items():
+        for key, values in pool.items():
             placeholder = "{" + key + "}"
             if placeholder in tpl:
                 filled[key] = rng.choice(values)
         sentence = tpl.format(**filled)
         # 答案 = 第一个占位符的值（问题的核心事实）
-        first_key = next(k for k in FILLERS if "{" + k + "}" in tpl)
+        first_key = next(k for k in pool if "{" + k + "}" in tpl)
         answer = filled[first_key]
         out.append({"sentence": sentence, "question": q_tpl, "answer": answer, "tpl": tpl_idx})
     return out
@@ -154,11 +177,9 @@ def train(
     eng = EngramQwen3(model_id=model_path, device=device, dtype=torch.bfloat16)
     print(f"✓ 加载 {time.time()-t0:.1f}s，记忆表 {eng.memory.num_slots} 槽")
 
-    # 2. 生成知识：train 与 eval 分离（eval 是"没见过的知识"→ 验证泛化回忆）
-    all_knowledge = generate_knowledge(n_knowledge + n_eval, seed)
-    train_knowledge = all_knowledge[:n_knowledge]
-    eval_knowledge = all_knowledge[n_knowledge:]
-    print(f"✓ 知识：train {len(train_knowledge)} 条 + eval {len(eval_knowledge)} 条（eval 未参与训练）")
+    # 2. 训练知识（每 epoch 重新生成，见训练循环；eval 在评估段用 eval_only 值生成）
+    train_knowledge = generate_knowledge(n_knowledge, seed)
+    print(f"✓ 训练知识 {len(train_knowledge)} 条（每 epoch 重新实例化，值变化）")
 
     # 3. 预填充记忆表：训练知识的嵌入 → 对应哈希槽位。
     #    对齐 engram-peft：记忆表嵌入 = 知识句子嵌入的**带噪副本**
@@ -222,9 +243,7 @@ def train(
     for n in trainable[:4]:
         print(f"    {n}")
 
-    # 5. 数据与优化器
-    dataset = KnowledgeDataset(train_knowledge, eng.tokenizer)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.collate)
+    # 5. 优化器（数据集/记忆表每 epoch 重建，见训练循环）
     opt = torch.optim.AdamW(
         [p for p in eng.parameters() if p.requires_grad],
         lr=lr,
@@ -232,9 +251,24 @@ def train(
     )
 
     # 6. 训练循环（next-token prediction）
+    #    关键设计（逼出真回忆）：**每 epoch 重新生成实例 + 清空重填记忆表**。
+    #    同一问题模板每 epoch 对应不同答案 → 模型无法背「Q→固定A」，
+    #    只能学会「提问时查当前记忆表、融合、回忆出该实例的值」。
     eng.train()
     total_steps = 0
     for epoch in range(epochs):
+        # 每 epoch 重新生成知识实例（同模板不同值）并重填记忆表
+        epoch_knowledge = generate_knowledge(n_knowledge, seed + epoch * 1000)
+        # 清空记忆表（保留训练中的参数，只重置槽位映射与池内容）
+        eng.memory.pool.data.normal_(0, 0.02)
+        eng.memory.slot_index.fill_(-1)
+        eng.memory.slot_used.zero_()
+        eng.memory.pool_used.zero_()
+        eng.memory.active.zero_()
+        prefill(epoch_knowledge, keep_grad=False)
+        dataset = KnowledgeDataset(epoch_knowledge, eng.tokenizer)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=dataset.collate)
+
         epoch_loss = 0.0
         n_batches = 0
         for batch in loader:
@@ -253,10 +287,11 @@ def train(
             total_steps += 1
         print(f"epoch {epoch+1}/{epochs}: loss={epoch_loss/n_batches:.4f} ({time.time()-t0:.0f}s)")
 
-    # 7. 评估：回忆测试（eval 知识——训练时没见过）
-    print("\n=== 评估：模型能否回忆 eval 知识（未训练过） ===")
+    # 7. 评估：回忆测试（eval 知识用**训练从未见过的值**——模型只能靠记忆表）
+    print("\n=== 评估：模型能否回忆 eval 知识（值未参与训练） ===")
+    eval_knowledge = generate_knowledge(n_eval, seed + 9999, eval_only=True)
     eval_slots = prefill(eval_knowledge)  # 把 eval 知识也写入记忆表
-    print(f"✓ eval 知识写入记忆表 {len(eval_slots)} 条")
+    print(f"✓ eval 知识写入记忆表 {len(eval_slots)} 条（值均为训练未见过的）")
     eng.eval()
     correct = 0
     with torch.no_grad():

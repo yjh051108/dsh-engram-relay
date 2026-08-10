@@ -18,11 +18,11 @@
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { NgramHashAddressing } from './hash.js'
 import { CausalGraph } from './causal.js'
-import { EngramStore, type Engram } from './store.js'
+import { EngramStore, type EngramNode } from './store.js'
 import type { EngramRelayConfig } from '../types.js'
 
 export interface WakeHit {
-  engrams: Engram[]
+  engrams: EngramNode[]
   reason: string
   injectedTokens: number
 }
@@ -37,7 +37,7 @@ export class EngramWakeEngine {
     private hasher: NgramHashAddressing,
     private config: EngramRelayConfig,
     /** 门控打分回调（由 LocalRelayModel 提供）；null = 纯哈希 + 重要度。 */
-    private scorer: ((query: string, candidates: Engram[]) => Promise<Map<string, number>>) | null = null,
+    private scorer: ((query: string, candidates: EngramNode[]) => Promise<Map<string, number>>) | null = null,
   ) {}
 
   /** 每回合入口：收到一次模型请求时尝试唤醒。 */
@@ -108,26 +108,29 @@ export class EngramWakeEngine {
     }
     ranked.length = Math.min(ranked.length, limit)
 
-    const picked: Engram[] = []
+    const picked: EngramNode[] = []
     let tokens = 0
     for (const [id] of ranked) {
       const e = this.store.get(id)
       if (!e) continue
-      const cost = estimateTokens(e.label) + estimateTokens(e.text)
+      const cost = estimateTokens(e.title) + estimateTokens(e.summary)
       if (tokens + cost > this.config.injectBudgetTokens && picked.length > 0) break
       picked.push(e)
       tokens += cost
       this.store.touch(id)
     }
 
-    return {
+    const hit: WakeHit = {
       engrams: picked,
       reason: picked.length > 0 ? `hash-wake:${picked.length}` : 'below-threshold',
       injectedTokens: tokens,
     }
+    // query 是核心入口（maybeWake 与工具共用），结果供渲染器读取
+    this.lastInjection = hit
+    return hit
   }
 
-  /** 渲染记忆注入段（超稀疏）。 */
+  /** 渲染记忆注入段（渐进披露第一层：入口列表，超稀疏）。 */
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
@@ -135,15 +138,20 @@ export class EngramWakeEngine {
     let tokens = 0
     for (const e of engrams) {
       if (tokens >= budgetTokens) break
+      // 入口层：title + summary（不含 content——按需展开）
       const causes = this.graph.causesOf(e.id)
+      const effects = this.graph.effectsOf(e.id)
       const causeNote = causes.length > 0
-        ? ` (因: ${causes.map((c) => c.label).join('; ').slice(0, 80)})`
+        ? ` ↑因:${causes.map((c) => c.title).join(';').slice(0, 60)}`
         : ''
-      lines.push(`- [${e.kind}] ${e.label}${causeNote}: ${e.text.slice(0, 160)}`)
-      tokens += estimateTokens(e.label) + estimateTokens(e.text)
+      const effectNote = effects.length > 0
+        ? ` ↓果:${effects.map((c) => c.title).join(';').slice(0, 60)}`
+        : ''
+      lines.push(`- [[${e.title}]]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`)
+      tokens += estimateTokens(e.title) + estimateTokens(e.summary)
     }
     return lines.length > 0
-      ? `<engram-memory>（外置条件记忆，N-gram 哈希唤醒）\n${lines.join('\n')}\n</engram-memory>`
+      ? `<engram-memory>（大一统记忆图谱 · 入口，[[标题]] 可展开）\n${lines.join('\n')}\n</engram-memory>`
       : ''
   }
 

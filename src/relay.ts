@@ -39,7 +39,7 @@ export interface EngramRelayDeps {
 
 /** 唤醒结果：本次请求注入的记忆痕迹（哈希命中 + 因果激活，超稀疏）。 */
 export interface WakeResult {
-  engrams: import('./engram/store.js').Engram[]
+  engrams: import('./engram/store.js').EngramNode[]
   reason: string
   injectedTokens: number
 }

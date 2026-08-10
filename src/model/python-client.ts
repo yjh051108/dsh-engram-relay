@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export interface DistillEntry {
-  kind: 'fact' | 'decision' | 'event' | 'preference'
+  kind: 'fact' | 'decision' | 'event' | 'note'
   label: string
   text: string
   importance: number

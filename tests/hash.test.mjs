@@ -60,9 +60,8 @@ test('store: hash-add then lookup hits same slot', () => {
     const store = new EngramStore(dir, hasher)
     store.add({
       kind: 'fact',
-      label: '部署端口',
-      text: '项目部署端口是 8080',
-      scope: null,
+      title: '部署端口',
+      summary: '项目部署端口是 8080',
       sessionId: 's1',
       turn: 1,
       causes: [],
@@ -72,7 +71,7 @@ test('store: hash-add then lookup hits same slot', () => {
     // 相同表述查询 → 确定性命中
     const hits = store.lookup('项目部署端口是 8080')
     assert.ok(hits.length >= 1, '相同表述必须命中')
-    assert.equal(hits[0].label, '部署端口')
+    assert.equal(hits[0].title, '部署端口')
 
     // 归一化后仍命中
     const hits2 = store.lookup('  项目 部署端口 是 8080 ')
@@ -82,16 +81,15 @@ test('store: hash-add then lookup hits same slot', () => {
   }
 })
 
-test('store: global/rule memories are addressable by seed text', () => {
+test('store: note nodes are addressable by title', () => {
   const dir = mkdtempSync(join(tmpdir(), 'engram-rule-'))
   try {
     const hasher = new NgramHashAddressing({ seed: 0 })
     const store = new EngramStore(dir, hasher)
     store.add({
-      kind: 'rule',
-      label: '回复语言',
-      text: '用户偏好中文回复',
-      scope: 'rule',
+      kind: 'note',
+      title: '回复语言',
+      summary: '用户偏好中文回复',
       sessionId: null,
       turn: 0,
       causes: [],
@@ -102,7 +100,7 @@ test('store: global/rule memories are addressable by seed text', () => {
     // 规则记忆不一定被任意查询命中（哈希是精确的）——但它可被
     // 与写入文本一致的主题命中；跨会话记忆由「固定种子文本」保证
     // 每次会话都可寻址（en gram_store 的 scope 语义）。
-    assert.equal(store.byKind('rule').length, 1)
+    assert.equal(store.byTitle('回复语言') !== undefined, true)
     assert.ok(hits.length >= 0)
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -116,9 +114,8 @@ test('store: persist and reload keeps slot index', () => {
     const s1 = new EngramStore(dir, hasher)
     s1.add({
       kind: 'decision',
-      label: '架构决策',
-      text: '采用 engram 条件记忆做外置记忆',
-      scope: null,
+      title: '架构决策',
+      summary: '采用 engram 条件记忆做外置记忆',
       sessionId: 's1',
       turn: 2,
       causes: [],

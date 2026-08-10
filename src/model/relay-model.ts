@@ -13,7 +13,7 @@
 import type { Context as CordisContext } from 'cordis'
 import type { EngramRelayConfig } from '../types.js'
 import { PythonEngramClient, type DistillEntry } from './python-client.js'
-import type { EngramStore, Engram } from '../engram/store.js'
+import type { EngramStore, EngramNode } from '../engram/store.js'
 import type { CausalGraph } from '../engram/causal.js'
 
 export class RelayModel {
@@ -38,8 +38,8 @@ export class RelayModel {
 
   private warmupDone = false
 
-  /** 蒸馏：把对话转为 engram 条目写入存储（模型不可用时跳过）。 */
-  async distillTurn(store: EngramStore, graph: CausalGraph, conversation: string, sessionId: string, turn: number): Promise<Engram[]> {
+  /** 蒸馏：把对话转为记忆节点写入存储（模型不可用时跳过）。 */
+  async distillTurn(store: EngramStore, graph: CausalGraph, conversation: string, sessionId: string, turn: number): Promise<EngramNode[]> {
     if (conversation === '') return []
     await this.warmup()
     const out = await this.python.distill(conversation)
@@ -47,9 +47,10 @@ export class RelayModel {
     const p: DistillEntry = out.parsed
     const e = store.add({
       kind: p.kind ?? 'fact',
-      label: p.label,
-      text: p.text,
-      scope: null,
+      title: p.label ?? '对话片段',
+      summary: p.text ?? conversation.slice(0, 100),
+      content: conversation,
+      links: [],
       sessionId,
       turn,
       causes: p.causes ?? [],
@@ -57,16 +58,14 @@ export class RelayModel {
       importance: p.importance ?? 0.5,
     })
     for (const causeId of p.causes ?? []) graph.addEdge(causeId, e.id, 'causes', 1)
-    // 把记忆文本写入模型记忆表（本地轨融合）
-    await this.python.writeMemory([{ text: p.text }]).catch(() => null)
     return [e]
   }
 
   /** 门控打分：模型不可用时返回空 Map（上层降级重要度）。 */
-  async score(query: string, candidates: Engram[]): Promise<Map<string, number>> {
+  async score(query: string, candidates: EngramNode[]): Promise<Map<string, number>> {
     await this.warmup()
     const out = await this.python.generate(
-      `查询：「${query.slice(0, 200)}」\n记忆：「${candidates[0]?.label ?? ''}：${candidates[0]?.text.slice(0, 100) ?? ''}」\n这条记忆与查询的相关度（只输出 0 到 1 的数字）：`,
+      `查询：「${query.slice(0, 200)}」\n记忆：「${candidates[0]?.title ?? ''}：${candidates[0]?.summary.slice(0, 100) ?? ''}」\n这条记忆与查询的相关度（只输出 0 到 1 的数字）：`,
       4,
       0,
     )
