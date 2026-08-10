@@ -52,7 +52,6 @@ export class EngramRelay {
   readonly model: RelayModel
 
   private disposers: Array<() => void> = []
-  private lastTurnAt = 0
 
   constructor(private ctx: CordisContext, private config: EngramRelayConfig) {
     this.store = new EngramStore(config.storeDir ?? '')
@@ -77,6 +76,13 @@ export class EngramRelay {
           void this.wake.maybeWake(sessionId, options).catch((error) => {
             this.ctx.logger?.warn?.('[engram-relay] wake failed: %s', String(error))
           })
+          // 训练模型的原生回忆（异步，结果缓存供记忆段渲染）
+          const query = extractQueryText(options)
+          if (query) {
+            void this.maybeRecall(query).catch((error) => {
+              this.ctx.logger?.warn?.('[engram-relay] recall failed: %s', String(error))
+            })
+          }
         }
       }
       return next()
@@ -104,9 +110,16 @@ export class EngramRelay {
       })
     })
 
-    // 4. 与官方 compact 共存：不阻止、不替代官方折叠（它负责腾 KV）。
-    //    本插件的职责在官方折叠**之前**完成——每回合蒸馏已把细节留底；
-    //    官方 compact 折叠后，细节经 engram 哈希/因果唤醒找回。
+    // 4. 会话结束即弃（单会话上下文增强的核心约束）：
+    //    agent/disposed（会话销毁）→ 清空该会话的全部 engram，
+    //    记忆不跨会话残留。
+    this.ctx.on('agent/disposed', ({ agent }) => {
+      if (!this.config.enabled) return
+      const cleared = this.store.clearSession(agent.session.id)
+      if (cleared > 0) {
+        this.ctx.logger?.info?.('[engram-relay] session %s ended, cleared %d engrams', agent.session.id, cleared)
+      }
+    })
 
     return () => {
       this.disposers.forEach((d) => d())
@@ -115,8 +128,27 @@ export class EngramRelay {
   }
 
   private renderMemorySection(): string {
-    return this.wake.renderInjection(this.config.injectBudgetTokens)
+    // engram 文本注入（哈希唤醒）
+    const base = this.wake.renderInjection(this.config.injectBudgetTokens)
+    // 训练模型的「原生回忆」结果（异步缓存，唤醒时填充）
+    if (this.lastRecallText && base !== '') {
+      return `${base}\n<engram-recall>（记忆模型原生回忆）${this.lastRecallText.slice(0, 160)}</engram-recall>`
+    }
+    return base
   }
+
+  /** 异步触发训练模型的原生回忆（由 llm/stream 旁路调用，缓存结果）。 */
+  async maybeRecall(query: string): Promise<void> {
+    if (!this.config.enabled) return
+    try {
+      const recalled = await this.model.recall(query)
+      if (recalled) this.lastRecallText = recalled
+    } catch {
+      // 回忆失败静默（降级为纯 engram 注入）
+    }
+  }
+
+  private lastRecallText: string | null = null
 
   /** 回合后蒸馏：<1B 模型把最近回合内容蒸馏为 engram。 */
   private async maybeDistill(): Promise<void> {
@@ -126,7 +158,10 @@ export class EngramRelay {
   }
 
   private lastConversationText = ''
-  private currentSessionId: string | null = null
+  /** 当前会话 id（工具写入时归属；会话结束清理用）。 */
+  currentSessionId: string | null = null
+  /** 当前回合号（工具写入时归属）。 */
+  lastTurnAt = 0
 
   /** 供工具使用的唤醒查询入口。 */
   async recall(query: string, limit?: number): Promise<WakeResult> {
@@ -183,4 +218,23 @@ function extractRecentTurn(messages: Array<{ role?: string; content?: unknown }>
     }
   }
   return parts.join('\n').slice(0, 4000)
+}
+
+/** 从 GenerateOptions 提取最后一条 user 消息文本（供原生回忆查询）。 */
+function extractQueryText(options: unknown): string {
+  const messages = (options as { messages?: Array<{ role?: string; content?: unknown }> }).messages
+  if (!messages || messages.length === 0) return ''
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]
+    if (m?.role !== 'user') continue
+    const content = m.content
+    if (typeof content === 'string') return content.slice(0, 300)
+    if (Array.isArray(content)) {
+      const text = content
+        .map((b) => (typeof b === 'object' && b !== null && 'text' in b ? String((b as { text: unknown }).text) : ''))
+        .join(' ')
+      if (text.trim() !== '') return text.slice(0, 300)
+    }
+  }
+  return ''
 }

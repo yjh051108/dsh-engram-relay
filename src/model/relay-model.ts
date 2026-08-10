@@ -26,6 +26,8 @@ export class RelayModel {
 
   /** 预热：启动 Python 服务并加载模型（失败不抛出，记录后降级）。 */
   async warmup(): Promise<void> {
+    if (this.warmupDone) return
+    this.warmupDone = true
     try {
       const status = await this.python.load()
       if (status === null) this.loadError = 'python service unavailable'
@@ -34,9 +36,12 @@ export class RelayModel {
     }
   }
 
+  private warmupDone = false
+
   /** 蒸馏：把对话转为 engram 条目写入存储（模型不可用时跳过）。 */
   async distillTurn(store: EngramStore, graph: CausalGraph, conversation: string, sessionId: string, turn: number): Promise<Engram[]> {
     if (conversation === '') return []
+    await this.warmup()
     const out = await this.python.distill(conversation)
     if (!out || !out.parsed) return []
     const p: DistillEntry = out.parsed
@@ -59,6 +64,7 @@ export class RelayModel {
 
   /** 门控打分：模型不可用时返回空 Map（上层降级重要度）。 */
   async score(query: string, candidates: Engram[]): Promise<Map<string, number>> {
+    await this.warmup()
     const out = await this.python.generate(
       `查询：「${query.slice(0, 200)}」\n记忆：「${candidates[0]?.label ?? ''}：${candidates[0]?.text.slice(0, 100) ?? ''}」\n这条记忆与查询的相关度（只输出 0 到 1 的数字）：`,
       4,
@@ -70,6 +76,19 @@ export class RelayModel {
     const map = new Map<string, number>()
     map.set(candidates[0].id, Math.min(1, Math.max(0, v)))
     return map
+  }
+
+  /**
+   * 原生回忆：让训练好的记忆模型直接生成答案（forward 自动融合记忆表）。
+   * 这是「回忆是模型行为」的对外接口——主模型转接层把回忆结果注入上下文。
+   * 模型不可用/未训练时返回 null（调用方降级为纯 engram 文本注入）。
+   */
+  async recall(query: string, maxNewTokens = 32): Promise<string | null> {
+    await this.warmup()  // 确保服务已加载（惰性）
+    const out = await this.python.generate(query.slice(0, 200), maxNewTokens, 0)
+    if (!out) return null
+    const text = out.text.trim()
+    return text === '' ? null : text
   }
 
   async describe(): Promise<Record<string, unknown>> {

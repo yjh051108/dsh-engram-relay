@@ -6,12 +6,11 @@
  *    （多头：n2h0..n3h3），读取时按当前上下文的哈希命中间接取回；
  *  - 槽位映射（slot → engram ids）与条目本体（engrams.jsonl）分离，
  *    槽位表是派生索引，条目是事实源；
- *  - 记忆种类覆盖「传统+创新双轨」：
- *      fact / decision / event / preference（对话蒸馏，全量）
- *      global / project / rule（跨会话：全局记忆/项目记忆/规则）
+ *  - 记忆种类（本会话内）：
+ *      fact / decision / event / preference（会话内折叠的历史）
  *
- * 确定性寻址的意义：相同模式永远命中相同槽位——不需要向量相似度
- * 近似，是 O(1) 精确查找。
+ * 定位：**单次会话上下文增强**——折叠本会话早期历史进记忆表、需要时
+ * 模型原生回忆；会话结束即弃，不做跨会话记忆沉淀。
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
@@ -20,7 +19,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import { NgramHashAddressing, type HashResult } from './hash.js'
 
-export type EngramKind = 'fact' | 'decision' | 'event' | 'preference' | 'global' | 'project' | 'rule'
+export type EngramKind = 'fact' | 'decision' | 'event' | 'preference'
 
 export interface Engram {
   id: string
@@ -29,13 +28,13 @@ export interface Engram {
   text: string
   /** 唤醒时的精简标签（一行）。 */
   label: string
-  /** 归属：null = 全局；否则为项目路径/会话 id。 */
+  /** 归属（保留字段：当前统一 null，单会话场景无跨会话归属）。 */
   scope: string | null
-  /** 来源会话 id（可空 = 手工/跨会话写入）。 */
+  /** 来源会话 id（本会话内折叠）。 */
   sessionId: string | null
   /** 来源回合序号。 */
   turn: number
-  /** 因果边：导致本痕迹的 engram id 集（跨会话记忆的因果链）。 */
+  /** 因果边：导致本痕迹的 engram id 集（会话内事件链）。 */
   causes: string[]
   /** 因果边：本痕迹导致的 engram id 集。 */
   effects: string[]
@@ -203,5 +202,25 @@ export class EngramStore {
     }
     this.persist()
     return true
+  }
+
+  /**
+   * 会话隔离：清空某会话的全部 engram（单会话上下文增强——会话结束即弃）。
+   * 这是「不做跨会话记忆沉淀」的执行面：会话终结时调用，记忆不跨会话残留。
+   */
+  clearSession(sessionId: string): number {
+    const doomed = this.all().filter((e) => e.sessionId === sessionId)
+    for (const e of doomed) {
+      this.byId.delete(e.id)
+      for (const s of e.slots) {
+        const set = this.slotIndex.get(s)
+        if (set) {
+          set.delete(e.id)
+          if (set.size === 0) this.slotIndex.delete(s)
+        }
+      }
+    }
+    if (doomed.length > 0) this.persist()
+    return doomed.length
   }
 }

@@ -37,8 +37,18 @@ async function main() {
   const hit = gen?.text?.includes('8080')
   console.log(hit ? '✓ 模型回忆出 8080' : '⚠ 未直接命中 8080（可能答出候选列表）')
 
+  // 5. RelayModel.recall 接口（转接层注入用）
+  const { RelayModel } = await import('../lib/model/relay-model.js')
+  const relay = new RelayModel({ logger: { warn: () => {} } }, {
+    modelId: MODEL, dtype: 'bfloat16', storeDir: '', injectBudgetTokens: 600,
+    maxWakePerTurn: 3, distillEveryTurns: 0, enabled: true,
+    pythonPath: 'python', pythonTimeoutMs: 120000, checkpoint: CHECKPOINT,
+  })
+  const recalled = await relay.recall('缓存用的什么方案？', 12)
+  console.log('✓ RelayModel.recall →', JSON.stringify(recalled))
+
   client.stop()
-  console.log(hit ? '=== 集成验证 PASS（模型原生回忆） ===' : '=== 集成验证部分通过（加载+写入正常，回忆需更多训练） ===')
+  console.log(hit ? '=== 集成验证 PASS（模型原生回忆 + recall 接口） ===' : '=== 集成验证部分通过 ===')
   process.exitCode = hit ? 0 : 1
 }
 

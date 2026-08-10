@@ -22,7 +22,7 @@ const TEXT_OUTPUT = {
   render: (_args: unknown, value: unknown) => [{ type: 'text' as const, text: String(value) }],
 }
 
-const KINDS: EngramKind[] = ['fact', 'decision', 'event', 'preference', 'global', 'project', 'rule']
+const KINDS: EngramKind[] = ['fact', 'decision', 'event', 'preference']
 
 export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () => void {
   const disposers: Array<() => void> = []
@@ -52,12 +52,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '显式写入一条 engram 记忆，绕过自动蒸馏。支持跨会话记忆：kind=global（全局记忆）/project（项目记忆）/rule（规则）用于长期跨会话；fact/decision/event/preference 用于对话内蒸馏补充。',
+    description: '显式写入一条 engram（本会话内，会话结束即弃）。用于把当前会话的要点固化进记忆表，供模型原生回忆；不做跨会话沉淀。',
     parameters: {
       kind: {
         type: 'string',
         required: true,
-        description: '记忆类型：fact/decision/event/preference/global/project/rule',
+        description: '记忆类型：fact/decision/event/preference',
       },
       label: {
         type: 'string',
@@ -89,9 +89,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         kind: kind as EngramKind,
         label,
         text,
-        scope: kind === 'global' ? null : kind === 'project' ? 'project' : kind === 'rule' ? 'rule' : null,
-        sessionId: null,
-        turn: 0,
+        scope: null,
+        sessionId: relay.currentSessionId,
+        turn: relay.lastTurnAt,
         causes,
         effects: [],
         importance: 1,
