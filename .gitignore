@@ -9,3 +9,4 @@ __pycache__/
 *.pyc
 python/engram_model/__pycache__/
 .qwen3-model/
+checkpoints/
