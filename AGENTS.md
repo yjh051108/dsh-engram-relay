@@ -124,14 +124,21 @@ dsh --profile web --dump-config
 ## 本项目约定
 
 - **Node 侧零第三方运行时依赖**：只 import 闭包内包（cordis / @deepseek-ai/* /
-  schemastery）+ node: 内置。模型推理全在 Python 服务（spawn `python -m engram_model.server`），
+  schemastery）+ node: 内置。嵌入编码全在 Python 服务（spawn `python -m engram_model.server`），
   不要往 Node 侧加 npm 依赖（实装时 checkout 闭包不包含它们）。
-- **Python 侧**（`python/engram_model/`）：torch 魔改 Qwen3-0.6B（Engram 条件记忆 ×
-  DSA 稀疏路由），JSON 行协议服务；依赖见 `python/requirements.txt`。
+- **Python 侧**（`python/engram_model/`）：bge 嵌入编码（embed op，懒加载，
+  路径取配置 embedModel 或环境变量 ENGRAM_EMBED_MODEL）+ 遗留 0.6B op
+  （model.py 等仅保留作参考，0.6B 已移除，load 对缺失目录返回 loaded:false）。
+  JSON 行协议服务必须 UTF-8 三流（Windows 管道 GBK 会破坏中文 JSON）。
+- **混合检索**（wake.ts）：哈希粗筛（store.lookup）→ embedder 余弦精排
+  （relay-model.embed）→ 因果传播 → 分层稀疏选择；embedder 缺失/抛错依次
+  降级 scorer → 重要度，哈希命中永不因打分器缺失被丢弃。
 - **与官方 compact 共存**：不阻止、不替代 `dsh-compact-basic`（它负责腾 KV）；
-  engram 在 `agent/turn-stopping` 实时蒸馏留底（细节保真，可唤醒找回）。
+  engram 在 `agent/turn-stopping` 实时留底（细节保真，可唤醒找回）。
 - 工具 contributes 声明（dsh.plugin.json / dshx.contributes）必须与注册一致（契约校验）。
-- 测试：`npm test`（Node 单测）+ `npm run test:python` + `npm run sim:1m` / `sim:causal`；
+- 测试：`npm test`（Node 单测，含 hybrid.test.mjs 混合检索 + python-client.test.mjs
+  真实 bge embed）+ `npm run test:python`（需 `PYTHONIOENCODING=utf-8`，Windows 控制台
+  GBK 打不了 ✓）+ `npm run sim:1m` / `sim:causal`；
   实装冒烟：`DSH_CHECKOUT=<checkout> node tests/load-smoke.mjs`。
 
 ## 扩展点（本项目用到的）

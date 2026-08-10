@@ -8,13 +8,18 @@ Engram 转接服务（本地 JSON 行协议，供 Node 插件 spawn 对接）。
   {"id": 3, "op": "distill", "conversation": "...", "session": "s1", "turn": 3}
   {"id": 4, "op": "write_memory", "slots": [..], "embeds": [[..]]}
   {"id": 5, "op": "status"}
+  {"id": 6, "op": "embed", "texts": ["..."], "query": "..."}
 响应：
   {"id": 1, "ok": true, "result": {...}}
   {"id": 2, "ok": false, "error": "..."}
 
-蒸馏（distill）：用魔改模型的生成能力把对话转为结构化记忆 JSON；
-Node 插件把记忆文本经 write_memory 写入记忆表（文本 → 嵌入用模型
-的 hidden states 编码，保证与查询在同一表示空间）。
+两条能力线：
+  - embed（现行核心）：专用小型嵌入模型（bge-small-zh-v1.5）做语义
+    精排。模型路径取请求的 embed_model 或环境变量 ENGRAM_EMBED_MODEL；
+    懒加载，首次 embed 才载入。
+  - 蒸馏/生成（遗留）：原 0.6B 魔改模型（Engram 条件记忆 × DSA 路由）
+    的蒸馏/回忆能力。模型未配置或路径不存在时 load 返回
+    loaded:false，相关 op 全部优雅报错，Node 侧降级为纯图谱检索。
 """
 
 from __future__ import annotations
@@ -36,10 +41,12 @@ except ImportError:
 
 
 class EngramServer:
-    def __init__(self, model_id: str = "Qwen/Qwen3-0.6B", **kwargs):
+    def __init__(self, model_id: str = "", **kwargs):
         self.model: EngramQwen3 | None = None
         self.model_id = model_id
         self.kwargs = kwargs
+        self.embed_model = None  # sentence-transformers 嵌入模型（懒加载）
+        self.embed_model_id: str | None = None
 
     @staticmethod
     def _unwrap(model):
@@ -58,6 +65,8 @@ class EngramServer:
             return self._distill(req)
         if op == "write_memory":
             return self._write_memory(req)
+        if op == "embed":
+            return self._embed(req)
         if op == "status":
             return self._status(req)
         return {"ok": False, "error": f"unknown op: {op}"}
@@ -65,8 +74,14 @@ class EngramServer:
     def _load(self, req: dict) -> dict:
         if self.model is not None:
             return {"ok": True, "result": {"loaded": True, "reused": True}}
+        model_id = req.get("model", self.model_id) or ""
+        if model_id == "" or not os.path.isdir(model_id):
+            return {"ok": True, "result": {
+                "loaded": False,
+                "reason": f"model dir not found: {model_id or '(not configured)'}",
+            }}
         self.model = EngramQwen3(
-            model_id=req.get("model", self.model_id),
+            model_id=model_id,
             engram_layers=tuple(req.get("engram_layers", (1, 7))),
             **self.kwargs,
         )
@@ -152,6 +167,33 @@ class EngramServer:
         )
         return {"ok": True, "result": {"written": len(entries), "slots": slot_ids[:len(entries)]}}
 
+    def _embed(self, req: dict) -> dict:
+        """文本编码（bge-small-zh-v1.5，语义精排用）。
+
+        texts 与 query 一起编码；query 向量单独返回，Node 侧做余弦
+        相似度重排（hash 粗筛候选内）。模型懒加载：路径取请求的
+        embed_model，缺省用环境变量 ENGRAM_EMBED_MODEL；未配置时
+        返回 ok:false（Node 侧降级为纯 hash + 重要度）。
+        """
+        model_id = req.get("embed_model") or os.environ.get("ENGRAM_EMBED_MODEL") or ""
+        if model_id == "" or not os.path.isdir(model_id):
+            return {"ok": False, "error": f"embed model not found: {model_id or '(ENGRAM_EMBED_MODEL unset)'}"}
+        if self.embed_model is None or self.embed_model_id != model_id:
+            from sentence_transformers import SentenceTransformer
+            self.embed_model = SentenceTransformer(model_id)
+            self.embed_model_id = model_id
+        texts = req.get("texts") or []
+        if not texts:
+            return {"ok": False, "error": "texts empty"}
+        query = req.get("query") or ""
+        all_texts = texts + ([query] if query else [])
+        vecs = self.embed_model.encode(all_texts, normalize_embeddings=True)
+        n = len(texts)
+        result = {"vectors": [v.tolist() for v in vecs[:n]]}
+        if query:
+            result["query_vec"] = vecs[n].tolist()
+        return {"ok": True, "result": result}
+
     def _status(self, req: dict) -> dict:
         if self.model is None:
             return {"ok": True, "result": {"loaded": False}}
@@ -183,6 +225,10 @@ def extract_json(raw: str) -> dict | None:
 
 
 def main():
+    # 强制 UTF-8 三流（Windows 管道默认按 GBK 编码，Node 侧按 utf8 收发）
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     server = EngramServer()
     for line in sys.stdin:
         line = line.strip()

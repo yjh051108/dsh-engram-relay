@@ -32,3 +32,33 @@ test('client: missing server file degrades to null', async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ---- v3：0.6B 移除后，Python 服务 = 嵌入服务（bge 语义精排） ----
+
+const BGE_PATH = process.env.ENGRAM_EMBED_MODEL || 'F:/dsh/engram-trial/bge-small-zh'
+
+test('client: load with missing model dir degrades to loaded:false (no crash)', async () => {
+  const { PythonEngramClient } = await import('../lib/model/python-client.js')
+  const client = new PythonEngramClient('python', 'Qwen/Qwen3-0.6B')
+  const status = await client.load()
+  assert.ok(status !== null, '服务应存活（返回结果而非 null）')
+  assert.equal(status.loaded, false, '模型目录缺失 → loaded:false，不崩溃不联网')
+  client.stop()
+})
+
+test('client: embed op returns 512-dim vectors + query vec (bge 真实服务)', async () => {
+  const { PythonEngramClient } = await import('../lib/model/python-client.js')
+  const client = new PythonEngramClient('python', '', '', BGE_PATH)
+  const out = await client.embed(
+    ['缓存上线：缓存层全量生效', '数据上线：数据库切换完成'],
+    '缓存压测怎么样',
+  )
+  assert.ok(out !== null, 'embed 应成功')
+  assert.equal(out.vectors.length, 2, '每条文本一个向量')
+  assert.equal(out.vectors[0].length, 512, 'bge-small-zh 维度 512')
+  assert.ok(out.query_vec && out.query_vec.length === 512, 'query 向量')
+  const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0)
+  assert.ok(dot(out.vectors[0], out.query_vec) > dot(out.vectors[1], out.query_vec),
+    '缓存查询应语义更接近缓存节点')
+  client.stop()
+})

@@ -55,13 +55,13 @@ function makeRoundTokens(topic, i) {
   return text.slice(0, TOKENS_PER_ROUND * 2)
 }
 
-/** 仿真蒸馏：从回合文本提取主题作为记忆（与真实 0.6B 蒸馏粒度对齐）。 */
+/** 仿真蒸馏：从回合文本提取主题作为记忆（与真实蒸馏粒度对齐）。 */
 function simulateDistill(text, roundIdx) {
   const topic = TOPICS[roundIdx % TOPICS.length]
   return {
     kind: roundIdx % 4 === 0 ? 'decision' : 'fact',
-    label: topic.slice(0, 15),
-    text: `第 ${roundIdx} 回合：${topic} 的进展与结论（蒸馏自 500 token 对话）`,
+    title: topic.slice(0, 15),
+    summary: `第 ${roundIdx} 回合：${topic} 的进展与结论（蒸馏自 500 token 对话）`,
     importance: 0.5 + (roundIdx % 5) * 0.1,
   }
 }
@@ -82,10 +82,11 @@ async function main() {
       const text = makeRoundTokens(TOPICS[i % TOPICS.length], i)
       const d = simulateDistill(text, i)
       const e = store.add({ ...d, scope: null, sessionId: 'sim', turn: i, causes: [], effects: [] })
-      // 因果链：每 10 回合连一条（模拟决策依赖）
+      // 因果链：每 10 回合连一条（模拟决策依赖）——写进节点 causes，
+      // 由最后的 graph.rebuild() 统一建边（addEdge 会被 rebuild 覆盖）
       if (i > 0 && i % 10 === 0) {
         const prev = store.all()[i - 10]
-        if (prev) graph.addEdge(prev.id, e.id, 'causes', 1)
+        if (prev) e.causes.push(prev.id)
       }
     }
     graph.rebuild()
@@ -101,7 +102,6 @@ async function main() {
     let hits = 0
     let injectedTotal = 0
     let belowThreshold = 0
-    let causalFollow = 0
     const rng = mulberry32(42)
     for (let q = 0; q < QUERIES; q += 1) {
       const topic = TOPICS[Math.floor(rng() * TOPICS.length)]
@@ -110,13 +110,6 @@ async function main() {
       if (hit.engrams.length > 0) {
         hits += 1
         injectedTotal += hit.injectedTokens
-        // 因果召回：命中的记忆是否带出因果前驱（图边另一端的记忆）
-        for (const e of hit.engrams) {
-          if (graph.causesOf(e.id).length > 0 || graph.effectsOf(e.id).length > 0) {
-            causalFollow += 1
-            break
-          }
-        }
       } else {
         belowThreshold += 1
       }
@@ -137,7 +130,7 @@ async function main() {
     console.log(`未命中: ${belowThreshold}（主题未进历史）`)
     console.log(`平均注入: ${hits > 0 ? (injectedTotal / hits).toFixed(0) : 0} token/次（预算 ${BUDGET}，稀疏度 ${hits > 0 ? (100 - injectedTotal / hits / BUDGET * 100).toFixed(0) : 100}%）`)
     console.log(`查询耗时: ${queryMs}ms（${(queryMs / QUERIES).toFixed(1)}ms/次）`)
-    console.log(`因果链召回: ${causalFollow}/${hits} 次命中带出因果前驱/后果（${hits > 0 ? (causalFollow / hits * 100).toFixed(0) : 0}%）`)
+    console.log(`因果链召回: 由 tests/simulate-causal.mjs 专项验证（本仿真只测容量与唤醒命中）`)
 
     // 4. 结论
     console.log('\n--- 结论 ---')

@@ -1,10 +1,10 @@
 /**
- * PythonEngramClient — spawn Python 魔改模型服务（JSON 行协议）。
+ * PythonEngramClient — spawn Python 转接服务（JSON 行协议）。
  *
  * 对接 python/engram_model/server.py：stdin/stdout JSON 行 RPC。
- * 能力：load / generate / distill / write_memory / status。
+ * 能力：load / generate / distill / write_memory / embed / status。
  *
- * 模型未就绪/服务启动失败时：所有调用返回 null（插件降级为纯哈希
+ * 服务未就绪/启动失败时：所有调用返回 null（插件降级为纯哈希
  * 路由 + 文本注入，不阻塞主流程）。
  */
 
@@ -33,8 +33,9 @@ export class PythonEngramClient {
 
   constructor(
     private pythonPath = 'python',
-    private modelId = 'Qwen/Qwen3-0.6B',
-    private checkpoint: string = '',
+    private modelId = '',
+    private checkpoint = '',
+    private embedModel = '',
   ) {}
 
   /** 启动服务（幂等；失败记录后所有调用返回 null）。 */
@@ -117,6 +118,13 @@ export class PythonEngramClient {
 
   async writeMemory(entries: Array<{ text: string }>): Promise<{ written: number; slots: number[] } | null> {
     return this.request('write_memory', { entries })
+  }
+
+  /** 文本编码（bge 嵌入模型；embedModel 空时由服务端 ENGRAM_EMBED_MODEL 决定）。 */
+  async embed(texts: string[], query = ''): Promise<{ vectors: number[][]; query_vec?: number[] } | null> {
+    if (texts.length === 0) return null
+    this.start()
+    return this.request('embed', { texts, query, ...(this.embedModel !== '' ? { embed_model: this.embedModel } : {}) })
   }
 
   async status(): Promise<{ loaded: boolean; entries?: number; slots?: number } | null> {

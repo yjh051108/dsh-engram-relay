@@ -58,9 +58,10 @@ export class EngramRelay {
     this.hasher = new NgramHashAddressing({ seed: 0 })
     this.graph = new CausalGraph(this.store)
     this.model = new RelayModel(ctx, config)
-    this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, (query, candidates) =>
-      this.model.score(query, candidates),
-    )
+    this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, {
+      embedder: (query, candidates) => this.model.embed(query, candidates),
+      scorer: (query, candidates) => this.model.score(query, candidates),
+    })
   }
 
   /** 挂载所有 seam。 */

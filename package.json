@@ -38,7 +38,7 @@
     "typescript": "^5.9.0"
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "build": "bash scripts/build.sh",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"tests/*.test.mjs\" \"tests/*.test.js\"",
     "test:python": "python python/tests/test_engram_module.py && python python/tests/test_hash.py",

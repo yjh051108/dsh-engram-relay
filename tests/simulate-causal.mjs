@@ -67,7 +67,7 @@ function populate(store, graph) {
       const c = chain[p]
       const causes = p > 0 ? [nodes[chainName][p - 1].id] : []
       const e = store.add({
-        kind: c.kind, label: c.label, text: c.text,
+        kind: c.kind, title: c.label, summary: c.text,
         scope: null, sessionId: 'sim', turn: p, causes, effects: [], importance: 0.8,
       })
       nodes[chainName].push(e)
@@ -147,7 +147,7 @@ async function main() {
         if (examples.length < 4) {
           examples.push({
             name,
-            returned: hCausal.engrams.map((e) => `${e.kind}:${e.label}`),
+            returned: hCausal.engrams.map((e) => `${e.kind}:${e.title}`),
           })
         }
       }

@@ -2,11 +2,12 @@
  * RelayModel — 转接模型门面。
  *
  * 双轨：
- *  - 本地轨（v2 核心）：spawn Python 魔改模型（Qwen3-0.6B + Engram
- *    模块 + DSA 路由），蒸馏/记忆写入走模型内部表示空间；
- *  - 云端轨：文本注入（systemPrompt 记忆段），供 API 主模型消费。
+ *  - 语义轨（v3 核心）：bge 专用嵌入模型（sentence-transformers）对
+ *    hash 粗筛候选做余弦精排（混合检索：确定性寻址 + 语义重排）；
+ *  - 蒸馏轨（遗留）：原 0.6B 魔改模型（Engram 条件记忆 × DSA 路由）
+ *    的蒸馏/打分/原生回忆。模型目录未配置/缺失时全部优雅返回 null。
  *
- * 模型不可用（Python 缺失/下载失败/服务崩溃）时自动降级：
+ * 模型不可用（Python 缺失/模型未配置/服务崩溃）时自动降级：
  *  蒸馏 → 跳过；打分 → 重要度；记忆写入 → 无操作。插件始终可用。
  */
 
@@ -21,7 +22,12 @@ export class RelayModel {
   private loadError: string | null = null
 
   constructor(private ctx: CordisContext, private config: EngramRelayConfig) {
-    this.python = new PythonEngramClient(config.pythonPath, config.modelId, config.checkpoint ?? '')
+    this.python = new PythonEngramClient(
+      config.pythonPath,
+      config.modelId,
+      config.checkpoint ?? '',
+      config.embedModel,
+    )
   }
 
   /** 预热：启动 Python 服务并加载模型（失败不抛出，记录后降级）。 */
@@ -61,7 +67,38 @@ export class RelayModel {
     return [e]
   }
 
-  /** 门控打分：模型不可用时返回空 Map（上层降级重要度）。 */
+  /**
+   * 语义精排（混合检索核心）：对 hash 粗筛候选做 bge 余弦重排。
+   * 返回「候选 id → 余弦相似度」；嵌入模型不可用时返回 null
+   * （上层降级为重要度/遗留门控）。
+   */
+  async embed(query: string, candidates: EngramNode[]): Promise<Map<string, number> | null> {
+    await this.warmup()
+    if (candidates.length === 0) return new Map()
+    const out = await this.python.embed(
+      candidates.map((e) => `${e.title}：${e.summary.slice(0, 200)}`),
+      query.slice(0, 500),
+    )
+    if (!out || !out.query_vec || !out.vectors || out.vectors.length !== candidates.length) return null
+    const qv = out.query_vec
+    const scores = new Map<string, number>()
+    candidates.forEach((e, i) => {
+      const v = out.vectors[i]
+      if (!v || v.length !== qv.length) return
+      let dot = 0
+      let na = 0
+      let nb = 0
+      for (let k = 0; k < v.length; k += 1) {
+        dot += v[k] * qv[k]
+        na += v[k] * v[k]
+        nb += qv[k] * qv[k]
+      }
+      scores.set(e.id, dot / (Math.sqrt(na) * Math.sqrt(nb) || 1))
+    })
+    return scores
+  }
+
+  /** 门控打分（遗留 0.6B 轨；模型不可用时返回空 Map（上层降级重要度）。 */
   async score(query: string, candidates: EngramNode[]): Promise<Map<string, number>> {
     await this.warmup()
     const out = await this.python.generate(
@@ -94,6 +131,7 @@ export class RelayModel {
     const status = await this.python.status().catch(() => null)
     return {
       modelId: this.config.modelId,
+      embedModel: this.config.embedModel,
       pythonPath: this.config.pythonPath,
       loadError: this.loadError,
       service: status,

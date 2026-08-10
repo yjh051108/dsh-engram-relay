@@ -1,15 +1,16 @@
 /**
  * dsh-engram-relay — 外置 engram 转接模型插件。
  *
- * 内置 <1B 本地模型（transformers.js/ONNX），作为 DSH 主模型与外部记忆
- * （engram 存储）之间的转接层：
+ * 大一统记忆图谱 + 超稀疏精准主动唤醒（会话级上下文增强）：
  *
- *  - 写入：回合结束后，小模型把会话沉淀为结构化 engram（事实/决策/事件），
- *    带因果边（导致/依赖/引用）持久化到外置存储；
- *  - 唤醒：每次主模型请求前，小模型判断需要唤醒哪些记忆，沿因果图传播
- *    激活分数，只注入极少数超稀疏痕迹（预算默认 600 token）；
+ *  - 唤醒：每次主模型请求前，N-gram 哈希确定性寻址（O(1)，精确命中）
+ *    粗筛候选 → bge 专用嵌入模型语义精排（修跨主题误命中）→ 因果图
+ *    双向传播（前因/后果）→ 只注入极少数超稀疏痕迹（预算默认 600
+ *    token），渐进披露（入口 = [[标题]] + 摘要，按需展开全文）；
+ *  - 写入：模型经 engram_store 工具落节点（标题/摘要/正文/链接/因果），
+ *    回合结束自动蒸馏（遗留 0.6B 轨，模型已移除时跳过）；
  *  - 转接：经 `llm/stream` waterfall 拦截模型调用（请求前注入、回合后
- *    蒸馏），零核心改动。
+ *    蒸馏），零核心改动；会话结束即弃（agent/disposed 清空）。
  *
  * @module dsh-engram-relay
  */
@@ -43,11 +44,12 @@ export interface Config {
   pythonPath: string
   pythonTimeoutMs: number
   checkpoint: string
+  embedModel: string
 }
 
 export const Config: z<Config> = z.object({
-  modelId: z.string().default('Qwen/Qwen3-0.6B')
-    .description('内置转接模型 id（<1B，Python torch 魔改：Engram 条件记忆 + DSA 稀疏路由）'),
+  modelId: z.string().default('')
+    .description('遗留：0.6B 蒸馏模型目录（已弃用；空 = 不加载，蒸馏/回忆降级）'),
   dtype: z.string().default('bfloat16')
     .description('模型精度（bfloat16/float16/float32）'),
   storeDir: z.string().default('')
@@ -57,15 +59,17 @@ export const Config: z<Config> = z.object({
   maxWakePerTurn: z.number().min(0).max(32).default(3)
     .description('每回合最多唤醒的 engram 条数'),
   distillEveryTurns: z.number().min(0).max(100).default(1)
-    .description('每 N 回合蒸馏一次（0 = 关闭自动蒸馏）'),
+    .description('每 N 回合蒸馏一次（0 = 关闭自动蒸馏；0.6B 已移除，默认实际不生效）'),
   enabled: z.boolean().default(true)
     .description('总开关'),
   pythonPath: z.string().default('python')
-    .description('Python 解释器路径（spawn 魔改模型服务用）'),
+    .description('Python 解释器路径（spawn 转接服务用）'),
   pythonTimeoutMs: z.number().min(1000).max(600000).default(120000)
     .description('Python 服务预热超时'),
   checkpoint: z.string().default('')
-    .description('训练好的原生 engram checkpoint 路径（engram.pt；空 = 未训练随机表）'),
+    .description('遗留：训练好的原生 engram checkpoint 路径（0.6B 已移除）'),
+  embedModel: z.string().default('')
+    .description('bge 嵌入模型目录（本地路径；空 = 服务端 ENGRAM_EMBED_MODEL 环境变量，再空则禁用语义精排）'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -80,6 +84,7 @@ export function apply(ctx: Context, config: Config): void {
     pythonPath: config.pythonPath,
     pythonTimeoutMs: config.pythonTimeoutMs,
     checkpoint: config.checkpoint ?? '',
+    embedModel: config.embedModel,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入

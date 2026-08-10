@@ -81,7 +81,7 @@ test('wake: hash hit then sparse truncation', async () => {
     assert.ok(hit.engrams.length <= 3, '唤醒条数受 maxWakePerTurn 限制')
     assert.ok(hit.injectedTokens <= 600, '注入 token 受预算限制')
     assert.ok(hit.engrams.some((e) => e.title === '事实 3'), '与查询同文本的条目必须命中')
-    assert.ok(hit.reason.startsWith('hash-wake') || hit.reason === 'below-threshold')
+    assert.ok(hit.reason.startsWith('hybrid-wake') || hit.reason === 'below-threshold')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

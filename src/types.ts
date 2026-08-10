@@ -8,10 +8,12 @@ export interface EngramRelayConfig {
   maxWakePerTurn: number
   distillEveryTurns: number
   enabled: boolean
-  /** Python 解释器路径（spawn 魔改模型服务用）。 */
+  /** Python 解释器路径（spawn 转接服务用）。 */
   pythonPath: string
   /** Python 模型服务超时（预热等）。 */
   pythonTimeoutMs: number
   /** 训练好的原生 engram checkpoint（engram.pt 路径；空 = 未训练随机表）。 */
   checkpoint: string
+  /** bge 嵌入模型目录（本地路径；空 = 服务端 ENGRAM_EMBED_MODEL 或禁用语义精排）。 */
+  embedModel: string
 }
