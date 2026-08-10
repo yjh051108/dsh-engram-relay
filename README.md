@@ -1,6 +1,6 @@
 # dsh-engram-relay
 
-> 大 engram 小 KV：魔改 <1B 模型（Engram 条件记忆 × DSA 稀疏路由），为 DSH 主模型实现超长上下文记忆稀疏路由。
+> 单会话上下文增强：魔改 <1B 模型（Engram 条件记忆 × DSA 稀疏路由），折叠本会话早期历史进外置记忆表、模型原生回忆，让单次会话等效承载 1M+ token；会话结束即弃，不做跨会话记忆沉淀。
 
 ## 是什么
 
@@ -47,7 +47,7 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 | 工具 | 作用 |
 |---|---|
 | `engram_recall` | 主动查询记忆（哈希寻址 + 因果链展开） |
-| `engram_store` | 显式写入（fact/decision/event/preference/global/project/rule，跨会话记忆） |
+| `engram_store` | 显式写入（fact/decision/event/preference，本会话内，会话结束即弃） |
 | `engram_status` | 查看记忆表状态（条目/槽位/模型/预算） |
 
 ## 配置（`~/.dsh/config.yaml`）
