@@ -130,7 +130,7 @@ export class EngramWakeEngine {
     return hit
   }
 
-  /** 渲染记忆注入段（渐进披露第一层：入口列表，超稀疏）。 */
+  /** 渲染记忆注入段（渐进披露第一层：入口列表 + 簇概览，超稀疏）。 */
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
@@ -149,6 +149,16 @@ export class EngramWakeEngine {
         : ''
       lines.push(`- [[${e.title}]]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`)
       tokens += estimateTokens(e.title) + estimateTokens(e.summary)
+    }
+    // 自组织簇概览：让模型看到主题结构（不硬编码，连接密度自然成簇）
+    const clusters = this.store.clusters()
+    if (clusters.length > 1) {
+      const overview = clusters
+        .map((c) => `[[${c.label}]](+${c.members.length})`)
+        .join(' · ')
+      if (tokens + estimateTokens(overview) <= budgetTokens) {
+        lines.push(`  簇: ${overview}`)
+      }
     }
     return lines.length > 0
       ? `<engram-memory>（大一统记忆图谱 · 入口，[[标题]] 可展开）\n${lines.join('\n')}\n</engram-memory>`

@@ -197,6 +197,78 @@ export class EngramStore {
     return nodes.map((n) => this.entry(n))
   }
 
+  /**
+   * 自组织聚类：按连接密度（links + causes/effects）自然成簇——不预定义
+   * 主题、不硬编码分层。连通分量即簇；每簇选「代表节点」（连接度最高者）
+   * 作为唤醒入口。类似 Obsidian 图谱的视觉密度：密集连接处自然成团。
+   */
+  clusters(): Array<{ label: string; members: string[]; representative: string }> {
+    const all = this.all()
+    if (all.length === 0) return []
+    // 邻接：节点间有 links 或因果边即相连
+    const adj = new Map<string, Set<string>>()
+    for (const n of all) adj.set(n.id, new Set())
+    for (const n of all) {
+      // links（双向）
+      for (const t of n.links) {
+        const target = this.byTitle(t)
+        if (target && target.id !== n.id) {
+          adj.get(n.id)!.add(target.id)
+          adj.get(target.id)!.add(n.id)
+        }
+      }
+      // 因果边
+      for (const c of n.causes) {
+        if (this.byId.has(c)) {
+          adj.get(n.id)!.add(c)
+          adj.get(c)!.add(n.id)
+        }
+      }
+      for (const e of n.effects) {
+        if (this.byId.has(e)) {
+          adj.get(n.id)!.add(e)
+          adj.get(e)!.add(n.id)
+        }
+      }
+    }
+    // BFS 连通分量
+    const visited = new Set<string>()
+    const clusters: Array<{ label: string; members: string[]; representative: string }> = []
+    for (const n of all) {
+      if (visited.has(n.id)) continue
+      const members: string[] = []
+      const queue = [n.id]
+      visited.add(n.id)
+      while (queue.length > 0) {
+        const id = queue.shift()!
+        members.push(id)
+        for (const nb of adj.get(id) ?? []) {
+          if (!visited.has(nb)) {
+            visited.add(nb)
+            queue.push(nb)
+          }
+        }
+      }
+      // 代表节点：连接度最高（邻接数最多）；并列取 importance 高者
+      const representative = members.reduce((best, id) => {
+        const deg = adj.get(id)?.size ?? 0
+        const bestDeg = adj.get(best)?.size ?? 0
+        const node = this.byId.get(id)!
+        const bestNode = this.byId.get(best)!
+        return deg > bestDeg || (deg === bestDeg && node.importance > bestNode.importance) ? id : best
+      })
+      const repNode = this.byId.get(representative)!
+      clusters.push({
+        label: repNode.title,
+        members,
+        representative,
+      })
+    }
+    // 簇按大小降序（大的主题簇在前）
+    clusters.sort((a, b) => b.members.length - a.members.length)
+    return clusters
+  }
+
   get(id: string): EngramNode | undefined {
     return this.byId.get(id)
   }

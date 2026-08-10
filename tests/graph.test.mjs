@@ -94,3 +94,27 @@ test('graph: 渐进披露渲染——入口列表不含 content', async () => {
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('graph: 自组织聚类——链接密度自然成簇（不硬编码分层）', () => {
+  const { dir, store } = makeEnv()
+  try {
+    // 簇 A：部署主题（3 节点互相链接）
+    const a1 = store.add({ kind: 'decision', title: '部署方案', summary: '容器化', content: '', links: ['部署实施'], sessionId: 's1', turn: 1, causes: [], effects: [], importance: 0.5 })
+    const a2 = store.add({ kind: 'event', title: '部署实施', summary: '改造中', content: '', links: ['部署方案', '上线验证'], sessionId: 's1', turn: 2, causes: [a1.id], effects: [], importance: 0.5 })
+    store.add({ kind: 'note', title: '上线验证', summary: '通过', content: '', links: ['部署实施'], sessionId: 's1', turn: 3, causes: [a2.id], effects: [], importance: 0.5 })
+    // 簇 B：缓存主题（2 节点互相链接，与 A 无连接）
+    const b1 = store.add({ kind: 'decision', title: '缓存选型', summary: 'Redis', content: '', links: ['缓存实施'], sessionId: 's1', turn: 4, causes: [], effects: [], importance: 0.5 })
+    store.add({ kind: 'event', title: '缓存实施', summary: '接入中', content: '', links: ['缓存选型'], sessionId: 's1', turn: 5, causes: [b1.id], effects: [], importance: 0.5 })
+
+    const clusters = store.clusters()
+    assert.equal(clusters.length, 2, '应自然分成 2 簇（部署/缓存）')
+    // 大簇在前：部署 3 节点
+    assert.equal(clusters[0].members.length, 3, '部署簇 3 节点')
+    assert.equal(clusters[1].members.length, 2, '缓存簇 2 节点')
+    // 代表节点 = 连接度最高（部署实施连接 2 个，是代表）
+    assert.equal(clusters[0].representative, a2.id, '代表节点是连接度最高的「部署实施」')
+    assert.equal(clusters[0].label, '部署实施')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
