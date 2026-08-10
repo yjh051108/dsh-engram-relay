@@ -41,6 +41,13 @@ class EngramServer:
         self.model_id = model_id
         self.kwargs = kwargs
 
+    @staticmethod
+    def _unwrap(model):
+        """循环解包 PeftModel 到最底层（LoRA 包装后 embed_tokens 路径变化）。"""
+        while hasattr(model, "get_base_model"):
+            model = model.get_base_model()
+        return model
+
     def handle(self, req: dict) -> dict:
         op = req.get("op")
         if op == "load":
@@ -63,7 +70,30 @@ class EngramServer:
             engram_layers=tuple(req.get("engram_layers", (1, 7))),
             **self.kwargs,
         )
-        return {"ok": True, "result": {"loaded": True, "stats": self.model.memory_stats()}}
+        # 加载训练好的记忆模型（原生 engram：训练过的记忆表 + gate + LoRA）
+        checkpoint = req.get("checkpoint") or os.environ.get("ENGRAM_CHECKPOINT")
+        lora_loaded = False
+        if checkpoint and os.path.exists(checkpoint):
+            ckpt = torch.load(checkpoint, map_location=self.model.device, weights_only=False)
+            self.model.memory.pool.data.copy_(ckpt["memory_pool"].to(self.model.memory.pool.dtype))
+            self.model.memory.slot_index.copy_(ckpt["slot_index"])
+            for k, sd in ckpt["engram_modules"].items():
+                if k in self.model.engram_modules:
+                    self.model.engram_modules[k].load_state_dict(sd)
+            # LoRA 适配器
+            lora_dir = os.path.join(os.path.dirname(checkpoint), "lora")
+            if os.path.exists(lora_dir):
+                try:
+                    from peft import PeftModel
+                    self.model.model = PeftModel.from_pretrained(self.model.model, lora_dir)
+                    lora_loaded = True
+                except Exception as e:
+                    print(f"[engram-server] LoRA 加载失败（继续用 base）: {e}")
+            result = {"loaded": True, "stats": self.model.memory_stats(), "checkpoint": checkpoint,
+                      "lora": lora_loaded, "eval_acc": ckpt.get("eval_acc")}
+        else:
+            result = {"loaded": True, "stats": self.model.memory_stats()}
+        return {"ok": True, "result": result}
 
     def _generate(self, req: dict) -> dict:
         self._ensure()
@@ -108,7 +138,8 @@ class EngramServer:
             text = entry["text"]
             inputs = self.model.tokenizer(text, return_tensors="pt").to(self.model.device)
             with torch.no_grad():
-                out = self.model.model.model.embed_tokens(inputs.input_ids)
+                base = self._unwrap(self.model.model)
+                out = base.model.embed_tokens(inputs.input_ids)
                 vec = out.mean(dim=1).squeeze(0).cpu().tolist()
             slots = self.model.engram_slots_for(inputs.input_ids)
             # 写到前 write_channels 个通道的槽位（每通道一个槽 id）

@@ -21,7 +21,7 @@ export class RelayModel {
   private loadError: string | null = null
 
   constructor(private ctx: CordisContext, private config: EngramRelayConfig) {
-    this.python = new PythonEngramClient(config.pythonPath, config.modelId)
+    this.python = new PythonEngramClient(config.pythonPath, config.modelId, config.checkpoint ?? '')
   }
 
   /** 预热：启动 Python 服务并加载模型（失败不抛出，记录后降级）。 */

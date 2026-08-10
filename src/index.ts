@@ -42,6 +42,7 @@ export interface Config {
   enabled: boolean
   pythonPath: string
   pythonTimeoutMs: number
+  checkpoint: string
 }
 
 export const Config: z<Config> = z.object({
@@ -63,6 +64,8 @@ export const Config: z<Config> = z.object({
     .description('Python 解释器路径（spawn 魔改模型服务用）'),
   pythonTimeoutMs: z.number().min(1000).max(600000).default(120000)
     .description('Python 服务预热超时'),
+  checkpoint: z.string().default('')
+    .description('训练好的原生 engram checkpoint 路径（engram.pt；空 = 未训练随机表）'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -76,6 +79,7 @@ export function apply(ctx: Context, config: Config): void {
     enabled: config.enabled,
     pythonPath: config.pythonPath,
     pythonTimeoutMs: config.pythonTimeoutMs,
+    checkpoint: config.checkpoint ?? '',
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入

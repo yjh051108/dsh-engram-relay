@@ -31,7 +31,11 @@ export class PythonEngramClient {
   private ready: Promise<void> | null = null
   private failed = false
 
-  constructor(private pythonPath = 'python', private modelId = 'Qwen/Qwen3-0.6B') {}
+  constructor(
+    private pythonPath = 'python',
+    private modelId = 'Qwen/Qwen3-0.6B',
+    private checkpoint: string = '',
+  ) {}
 
   /** 启动服务（幂等；失败记录后所有调用返回 null）。 */
   start(): void {
@@ -95,9 +99,12 @@ export class PythonEngramClient {
     })
   }
 
-  async load(): Promise<{ loaded: boolean; stats?: { entries: number; slots: number } } | null> {
+  async load(): Promise<{ loaded: boolean; stats?: { entries: number; slots: number }; lora?: boolean } | null> {
     this.start()
-    return this.request('load', { model: this.modelId })
+    return this.request('load', {
+      model: this.modelId,
+      ...(this.checkpoint !== '' ? { checkpoint: this.checkpoint } : {}),
+    })
   }
 
   async generate(text: string, maxNewTokens = 64, temperature = 0.2): Promise<{ text: string } | null> {

@@ -12,4 +12,6 @@ export interface EngramRelayConfig {
   pythonPath: string
   /** Python 模型服务超时（预热等）。 */
   pythonTimeoutMs: number
+  /** 训练好的原生 engram checkpoint（engram.pt 路径；空 = 未训练随机表）。 */
+  checkpoint: string
 }
