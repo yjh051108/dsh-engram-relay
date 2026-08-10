@@ -88,6 +88,28 @@ class EngramMemory(nn.Module):
             self.pool_used += 1
             self.active[pid] = True
 
+    def prefill_batch(self, slot_ids: torch.Tensor, embeds: torch.Tensor):
+        """批量预填充记忆表（训练初始化）：嵌入写入槽位。
+
+        预填充 = 记忆表的**初始化**（用 embed_tokens 输出作为初始嵌入），
+        不建立梯度路径（pool 是 nn.Parameter，训练时梯度经 lookup 产生）。
+        slot_ids [N], embeds [N, D]。
+        """
+        N = slot_ids.shape[0]
+        for i in range(N):
+            s = int(slot_ids[i])
+            used = int(self.slot_used[s])
+            if used >= self.per_slot_capacity:
+                continue
+            if int(self.pool_used) >= self.max_entries:
+                break
+            pid = int(self.pool_used)
+            self.pool.data[pid] = embeds[i].detach()
+            self.slot_index[s, used] = pid
+            self.slot_used[s] = used + 1
+            self.pool_used += 1
+            self.active[pid] = True
+
     def erase(self, slot_ids: torch.Tensor, positions: torch.Tensor):
         for s, p in zip(slot_ids.tolist(), positions.tolist()):
             pid = int(self.slot_index[s, p])
@@ -220,15 +242,19 @@ class EngramGateModule(nn.Module):
         B, S, _ = hidden_states.shape
         k = selected_embeds.shape[2]
         # gate：选中候选的路由分数 → sigmoid（论文 gate 的转接）
-        # 无效候选（-1 或 -inf 得分）gate 应为 0，不注入
+        # 无效候选（-1 索引或 -inf 得分）gate 应为 0，不注入。
+        # ⚠️ 必须在乘 gate_scale 之前把 -inf 置 0——否则 -inf × scale 的
+        #    梯度反向传播产生 nan（gate_scale 会变 nan）。
         safe_idx = top_indices.clamp(min=0)
         gathered = route_scores.gather(-1, safe_idx)  # [B,S,k]
-        # -inf 得分（无效候选）→ gate 0
+        # -inf 得分与无效索引 → 0（先于乘法，保证梯度安全）
+        gathered = gathered.masked_fill(torch.isinf(gathered), 0.0)
+        gathered = gathered.masked_fill(top_indices < 0, 0.0)
         gate = torch.sigmoid(gathered * self.gate_scale)  # [B,S,k]
-        gate = gate.masked_fill(top_indices < 0, 0.0)
-        gate = gate.masked_fill(torch.isinf(gathered), 0.0)
         value = self.value_proj(selected_embeds)  # [B,S,k,H]
-        # 加权求和注入
+        # 加权求和注入（无效候选 gathered=0 → gate=0.5 但仍乘了 value；
+        # 这里把无效位置的注入显式归零）
+        gate = gate.masked_fill(top_indices < 0, 0.0)
         fused = (gate.unsqueeze(-1) * value).sum(dim=2)  # [B,S,H]
         return hidden_states + fused
 
