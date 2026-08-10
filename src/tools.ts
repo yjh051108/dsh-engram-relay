@@ -29,7 +29,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
 
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（本会话内）。按当前查询匹配入口节点（[[标题]] + 摘要 + 因果邻接），需要详情时用 engram_open 展开。',
+    description: '主动唤醒记忆图谱入口（本会话内）。按当前查询匹配入口节点（[[标题]] + 摘要 + 因果邻接），返回的是入口层；看到 [[标题]] 后由你判断——需要详情就再用 engram_open 展开，不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',

@@ -179,7 +179,7 @@ export class EngramWakeEngine {
       }
     }
     return lines.length > 0
-      ? `<engram-memory>（大一统记忆图谱 · 入口，[[标题]] 可展开）\n${lines.join('\n')}\n</engram-memory>`
+      ? `<engram-memory>（大一统记忆图谱入口。摘要足够就直接用；需要细节时自行调用 engram_open 展开 [[标题]] 看正文/因果/关联，不需要就不展开）\n${lines.join('\n')}\n</engram-memory>`
       : ''
   }
 
