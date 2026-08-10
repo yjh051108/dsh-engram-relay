@@ -1,7 +1,8 @@
 # dsh-engram-relay bundle 层：插入插件行。
-# 经 `dsh plugin --profile <name> add @dsh-external/dsh-engram-relay`（或
-# `add link:<repo>`）装入 profile 后由官方 profile-boot 组合，行 name 即
-# 包名，Loader 从 profile node_modules 解析（依赖走官方闭包 fallback）。
-- id: dsh-engram-relay
-  name: '@dsh-external/dsh-engram-relay'
-  config: {}
+# 官方格式（docs/user/develop/basic/publish.md）：patch 是 YAML 数组，
+# 顶层 `- insert:` 包裹新增的插件行；`name` 引用包名，Loader 从 profile
+# node_modules 解析（依赖走官方闭包 fallback）。
+- insert:
+    - id: dsh-engram-relay
+      name: '@dsh-external/dsh-engram-relay'
+      config: {}
