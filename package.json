@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-engram-relay",
   "version": "0.1.0",
-  "description": "\u5916\u7f6e engram \u8f6c\u63a5\u6a21\u578b\u63d2\u4ef6\uff1a\u5185\u7f6e <1B \u6a21\u578b\uff08transformers.js/ONNX \u672c\u5730\u63a8\u7406\uff09\uff0c\u4f5c\u4e3a DSH \u4e3b\u6a21\u578b\u4e0e\u5916\u90e8\u8bb0\u5fc6\u4e4b\u95f4\u7684\u8f6c\u63a5\u5c42\uff0c\u5b9e\u73b0\u8d85\u957f\u8bb0\u5fc6\uff08100k \u4e0a\u4e0b\u6587\u7b49\u6548\u5ef6\u5c55 \u226510 \u500d\uff09\u3001\u8d85\u7a00\u758f\u7cbe\u51c6\u4e3b\u52a8\u5524\u9192\uff08\u56e0\u679c\u56fe\u4f20\u64ad\uff0c\u4f18\u4e8e\u7eaf\u5411\u91cf\u7d22\u5f15\uff09",
+  "description": "大 engram 小 KV：魔改 Qwen3-0.6B（Engram 条件记忆 × DSA 稀疏路由），为 DSH 实现超长上下文记忆稀疏路由——外置 engram 转接层，与官方 compact 共存（官方腾 KV，engram 保细节）",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
@@ -13,20 +13,17 @@
     },
     "./package.json": "./package.json"
   },
-  "files": [
-    "lib"
-  ],
+  "files": ["lib"],
   "license": "BSD-3-Clause",
-  "engines": {
-    "dsh": ">=0.0.1"
+  "engines": { "dsh": ">=0.0.1" },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   },
   "dshx": {
     "contributes": {
-      "tools": [
-        "engram_recall",
-        "engram_store",
-        "engram_status"
-      ],
+      "tools": ["engram_recall", "engram_store", "engram_status"],
       "skills": []
     }
   },
@@ -34,16 +31,8 @@
     "@deepseek-ai/dsh-llm": "^0.0.1",
     "@deepseek-ai/dsh-system-prompt": "^0.0.1",
     "@deepseek-ai/dsh-tools": "^0.0.1",
-    "cordis": "^4.0.0-rc.7"
-  },
-  "dependencies": {
-    "@huggingface/transformers": "3.6.3",
+    "cordis": "^4.0.0-rc.7",
     "schemastery": "^3.18.0"
-  },
-  "overrides": {
-    "@huggingface/transformers": {
-      "onnxruntime-node": "1.20.1"
-    }
   },
   "devDependencies": {
     "typescript": "^5.9.0"

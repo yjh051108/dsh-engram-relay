@@ -1,0 +1,11 @@
+{
+  "id": "dsh-engram-relay",
+  "version": "0.1.0",
+  "main": "./lib/index.js",
+  "description": "大 engram 小 KV：魔改 Qwen3-0.6B（Engram 条件记忆 × DSA 稀疏路由），超长上下文记忆稀疏路由",
+  "engines": { "dsh": ">=0.0.1" },
+  "contributes": {
+    "tools": ["engram_recall", "engram_store", "engram_status"],
+    "skills": []
+  }
+}
