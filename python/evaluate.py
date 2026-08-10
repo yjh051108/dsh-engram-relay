@@ -25,6 +25,10 @@ Q_PROMPTS = {
     1: "数据库用的什么？连接串呢？",
     2: "测试环境地址是什么？",
     3: "缓存用的什么方案？TTL 多少？",
+    4: "CI 跑在哪？什么触发？",
+    5: "日志级别？输出到哪？",
+    6: "告警阈值多少？通知渠道？",
+    7: "密钥存哪？多久轮换？",
 }
 
 
@@ -37,16 +41,15 @@ def load_model(checkpoint: str | None, device: str = "cuda"):
         eng.memory.slot_index.copy_(ckpt["slot_index"])
         for k, sd in ckpt["engram_modules"].items():
             eng.engram_modules[k].load_state_dict(sd)
-        # LoRA 适配器（如有）
+        # LoRA 适配器（如有）：base model 必须未包装——用 PeftModel.from_pretrained
         lora_dir = os.path.join(os.path.dirname(checkpoint), "lora")
         if os.path.exists(lora_dir):
-            from peft import LoraConfig, get_peft_model
-            eng.model = get_peft_model(eng.model, LoraConfig(
-                r=8, lora_alpha=16, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-                lora_dropout=0.05, bias="none",
-            ))
-            eng.model.load_state_dict(torch.load(os.path.join(lora_dir, "adapter_model.bin"),
-                                                 map_location=device), strict=False)
+            from peft import PeftModel
+            # 若已被 get_peft_model 包装则先还原（from_pretrained 需要裸 base）
+            while hasattr(eng.model, "get_base_model"):
+                # PeftModel.from_pretrained 接受已包装模型会嵌套——这里还原到裸模型
+                eng.model = eng.model.get_base_model()
+            eng.model = PeftModel.from_pretrained(eng.model, lora_dir)
             print(f"✓ LoRA 适配器加载: {lora_dir}")
         print(f"✓ checkpoint 加载: {checkpoint}（eval_acc={ckpt.get('eval_acc', 'n/a')}）")
     return eng
@@ -73,10 +76,14 @@ def main():
 
     print("\n=== A. eval 知识写入记忆表（模型应回忆） ===")
     slot_ids, embeds = [], []
+    # LoRA 包装后 embed_tokens 路径：循环解包 PeftModel 到最底层
+    embed_model = eng.model
+    while hasattr(embed_model, "get_base_model"):
+        embed_model = embed_model.get_base_model()
     for it in eval_knowledge:
         ids = eng.tokenizer(it["sentence"], return_tensors="pt").to(eng.device)
         with torch.no_grad():
-            vec = eng.model.model.embed_tokens(ids.input_ids).mean(dim=1).squeeze(0)
+            vec = embed_model.model.embed_tokens(ids.input_ids).mean(dim=1).squeeze(0)
         slots = eng.engram_slots_for(ids.input_ids)  # [1, S, 16]
         # 全通道全位置写入（与 train.prefill 一致，保证查询命中）
         written = set()

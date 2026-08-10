@@ -166,9 +166,9 @@ def train(
     def prefill(items: list[dict], keep_grad: bool = False, noise: float = 0.1):
         slot_ids: list[int] = []
         embeds: list[torch.Tensor] = []
-        # LoRA 包装后 embed_tokens 路径：PeftModel → get_base_model() 还原
+        # LoRA 包装后 embed_tokens 路径：循环解包 PeftModel 到最底层
         embed_model = eng.model
-        if hasattr(embed_model, "get_base_model"):
+        while hasattr(embed_model, "get_base_model"):
             embed_model = embed_model.get_base_model()
         for it in items:
             ids = eng.tokenizer(it["sentence"], return_tensors="pt").to(device)
