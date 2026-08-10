@@ -42,7 +42,7 @@ class EngramQwen3(nn.Module):
         dtype: torch.dtype = torch.bfloat16,
         engram_layers: tuple[int, ...] = DEFAULT_ENGRAM_LAYERS,
         num_memory_slots: int = 65536,
-        per_slot_capacity: int = 2,
+        per_slot_capacity: int = 32,
         index_n_heads: int = 4,
         index_head_dim: int = 64,
         index_topk: int = 4,

@@ -52,6 +52,8 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"tests/*.test.mjs\" \"tests/*.test.js\"",
-    "test:python": "python python/tests/test_engram_module.py && python python/tests/test_hash.py"
+    "test:python": "python python/tests/test_engram_module.py && python python/tests/test_hash.py",
+    "sim:1m": "node tests/simulate-1m.mjs",
+    "sim:causal": "node tests/simulate-causal.mjs"
   }
 }

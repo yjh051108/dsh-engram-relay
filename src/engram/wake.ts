@@ -52,7 +52,7 @@ export class EngramWakeEngine {
     return hit
   }
 
-  /** 核心查询：哈希寻址 → 门控打分 → 因果传播 → 稀疏截断。 */
+  /** 核心查询：哈希寻址 → 门控打分 → 因果传播 → 分层稀疏选择。 */
   async query(query: string, limit: number): Promise<WakeHit> {
     // 1. 确定性哈希寻址：当前查询命中哪些槽位（含跨会话记忆——
     //    全局/项目/规则记忆以固定种子文本写入，永远可命中）。
@@ -70,10 +70,44 @@ export class EngramWakeEngine {
     // 3. 因果传播（前因/后果双向）。
     const activated = this.graph.propagate(scores)
 
-    // 4. 超稀疏截断。
-    const ranked = [...activated.entries()]
+    // 4. 分层稀疏选择（因果席位保证）：
+    //    - 主席位：哈希命中的候选按激活分数排序；
+    //    - 因果席位：传播激活的**因果邻居**占独立席位。注意：邻居可能
+    //      也被哈希命中（n-gram 碰撞/共享），此时它若被主席位截断，
+    //      仍应从因果席位进入——「带因果性」不被高分候选挤掉。
+    const hitIds = new Set(candidates.map((e) => e.id))
+    const causalSlots = Math.max(1, Math.ceil(limit / 2))
+
+    const ranked: Array<[string, number]> = []
+    // 主席位：哈希命中按分数排序（保留 limit - causalSlots 个）
+    const hitRanked = [...activated.entries()]
+      .filter(([id]) => hitIds.has(id))
       .sort((a, b) => b[1] - a[1])
-      .slice(0, limit)
+    const mainQuota = Math.max(1, limit - causalSlots)
+    const mainPicked = hitRanked.slice(0, mainQuota)
+    ranked.push(...mainPicked)
+    const mainIds = new Set(mainPicked.map(([id]) => id))
+
+    // 因果席位：activated 中未进主席位的节点（含被截断的哈希命中邻居）
+    // 按「因果传播增益」排序——激活分数高于自身重要性者优先
+    const baseScores = scores
+    const causalCandidates = [...activated.entries()]
+      .filter(([id]) => !mainIds.has(id))
+      .sort((a, b) => {
+        const gainA = a[1] - (baseScores.get(a[0]) ?? 0)
+        const gainB = b[1] - (baseScores.get(b[0]) ?? 0)
+        return gainB - gainA || b[1] - a[1]
+      })
+    ranked.push(...causalCandidates.slice(0, causalSlots))
+    // 主席位不足时用其余节点补齐
+    let extra = ranked.length
+    const rest = causalCandidates.slice(causalSlots)
+    while (extra < limit && rest.length > 0) {
+      ranked.push(rest[extra - ranked.length])
+      extra += 1
+    }
+    ranked.length = Math.min(ranked.length, limit)
+
     const picked: Engram[] = []
     let tokens = 0
     for (const [id] of ranked) {

@@ -31,12 +31,17 @@ test('hash: normalization folds case and whitespace', () => {
 test('hash: multi-head gives multiple slots per ngram length', () => {
   const h = new NgramHashAddressing({ seed: 0, maxNgramSize: 3, headsPerNgram: 4 })
   const r = h.hash('部署端口 8080')
-  // n=2 与 n=3 两级，每级 4 头
-  assert.equal(r.slots.length, 2)
-  assert.equal(r.slots[0].length, 4)
-  assert.equal(r.slots[1].length, 4)
+  // per-position 展开：每位置 × (2-gram 4头 + 3-gram 4头) = 8 键
+  // '部署端口 8080' → tokens: 部署端口(4字) + 8080(1词) = 5 tokens
+  // 2-gram 位置 4 个 + 3-gram 位置 3 个 = 7 位置 × 4 头 = 28 键
+  assert.ok(r.slots.length >= 28, `per-position 展开应有 ≥28 键（实际 ${r.slots.length}）`)
+  // 键格式：n{len}h{head}:{slot}
   const keys = h.slotKeys(r)
-  assert.equal(keys.length, 8)
+  assert.equal(keys.length, r.slots.length)
+  assert.ok(keys.every((k) => /^n[23]h[0-3]:\d+$/.test(k)), '键格式应为 n{len}h{head}:{slot}')
+  // 确定性：相同输入相同键
+  const r2 = h.hash('部署端口 8080')
+  assert.deepEqual(r.slots, r2.slots)
 })
 
 test('hash: different texts mostly diverge (low collision sanity)', () => {

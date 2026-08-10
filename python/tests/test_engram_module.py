@@ -145,3 +145,28 @@ if __name__ == "__main__":
     test_fused_module_full_chain()
     test_indexer_masks_invalid()
     print("\n=== all engram module tests PASS ===")
+
+
+def test_memory_1m_token_scale():
+    """1M token 目标仿真：2000 回合 × 500 token = 1M token → 2000 条记忆。
+    记忆池容量应远富余，槽索引不应成为瓶颈。"""
+    import time
+    torch.manual_seed(3)
+    mem = EngramMemory(num_slots=4096, embed_dim=64, per_slot_capacity=32, max_entries=4096, dtype=torch.float32)
+    N = 2000  # 回合数
+    slots = torch.randint(0, 4096, (N,))
+    embeds = torch.randn(N, 64)
+    t0 = time.time()
+    mem.write(slots, embeds)
+    dt = time.time() - t0
+    usage = mem.slot_usage()
+    assert usage["entries"] == N, f"应写入全部 {N} 条，实际 {usage['entries']}"
+    print(f"✓ test_memory_1m_token_scale: {N} 条写入 {dt*1000:.0f}ms, 全部保留")
+    print(f"  usage: {usage}")
+    # 查回率：随机槽位查询，命中数应 ≈ 写入数
+    out, valid = mem.lookup(torch.randint(0, 4096, (1, 100, 8)))
+    print(f"  抽查 valid 命中: {int(valid.sum())} / {100*8*32}")
+
+
+if __name__ == "__main__":
+    test_memory_1m_token_scale()

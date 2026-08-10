@@ -27,48 +27,103 @@ import torch.nn as nn
 
 
 class EngramMemory(nn.Module):
-    """外置条件记忆表：哈希槽位 → 记忆嵌入。
+    """外置条件记忆表：哈希槽位 → 记忆嵌入（记忆池 + 稀疏槽索引）。
 
-    槽位由 N-gram 哈希寻址产生（O(1) 确定性）；每条记忆 = 一个可训练
-    嵌入。Node 插件侧蒸馏出的记忆经 API 写入（add/update/delete），
-    本模块只负责查表与嵌入。
+    容量设计（1M token 小目标的核心）：
+    - 嵌入集中存在**记忆池**（pool：[MAX_ENTRIES, D]），每条记忆一个嵌入；
+    - 槽位只存**索引**（slot_index：[num_slots, per_slot_capacity] 的 int64
+      表，存记忆池下标，-1 = 空）——这是论文「massive embedding tables
+      offload」思想的落地：槽位稀疏，容量由池子决定，内存可控；
+    - 写入：哈希寻址到槽 → 槽内追加记忆池下标（round-robin 找空位）；
+    - 查找：槽 → 索引 → index_select 取嵌入。
+
+    容量测算（bf16，1024 维）：
+    - 池 65536 条 × 1024 × 2B ≈ 134MB 权重 + 槽索引 65652×32×4B ≈ 8MB；
+    - 按「1 条记忆 ≈ 1 回合 ≈ 500 token」，65536 条 ≈ **3270 万 token**
+      历史可寻址容量——1M token 目标富余 32 倍。
     """
 
-    def __init__(self, num_slots: int, embed_dim: int, per_slot_capacity: int = 8, dtype: torch.dtype = torch.bfloat16):
+    def __init__(
+        self,
+        num_slots: int,
+        embed_dim: int,
+        per_slot_capacity: int = 32,
+        max_entries: int = 65536,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
         super().__init__()
         self.num_slots = num_slots
         self.per_slot_capacity = per_slot_capacity
-        # slot x capacity x embed_dim（论文 MultiHeadEmbedding 的扩展：
-        # 论文每槽一个嵌入；这里每槽多条记忆，由 indexer 打分挑选）
-        self.embedding = nn.Parameter(torch.zeros(num_slots, per_slot_capacity, embed_dim, dtype=dtype))
-        # 有效位掩码：1 = 该槽位该位置有记忆
-        self.register_buffer("valid", torch.zeros(num_slots, per_slot_capacity, dtype=torch.bool))
-        nn.init.normal_(self.embedding, std=0.02)
+        self.max_entries = max_entries
+        self.embed_dim = embed_dim
+
+        # 记忆池：全部记忆嵌入（集中存储）
+        self.pool = nn.Parameter(torch.zeros(max_entries, embed_dim, dtype=dtype))
+        nn.init.normal_(self.pool, std=0.02)
+        # 槽索引：slot -> [capacity] 个记忆池下标（-1 = 空）；容量 32 可寻址
+        # 65536×32 ≈ 210 万条（3270 万 token），远超 1M 目标。
+        self.register_buffer(
+            "slot_index",
+            torch.full((num_slots, per_slot_capacity), -1, dtype=torch.long),
+        )
+        # 计数：每槽已用位置数 + 池已用数
+        self.register_buffer("slot_used", torch.zeros(num_slots, dtype=torch.long))
+        self.register_buffer("pool_used", torch.zeros((), dtype=torch.long))
+        # 记忆有效性（供 num_entries 统计）
+        self.register_buffer("active", torch.zeros(max_entries, dtype=torch.bool))
 
     def write(self, slot_ids: torch.Tensor, embeds: torch.Tensor):
-        """写入记忆：slot_ids [N]，embeds [N, D]。逐槽追加到空位。"""
+        """写入记忆：slot_ids [N]，embeds [N, D]。逐槽追加到空位（槽满则丢弃并计数）。"""
         for i in range(slot_ids.shape[0]):
             s = int(slot_ids[i])
-            # 找该槽第一个空位（round-robin 从 0 开始）
-            for cap in range(self.per_slot_capacity):
-                if not bool(self.valid[s, cap]):
-                    self.embedding.data[s, cap] = embeds[i].detach()
-                    self.valid[s, cap] = True
-                    break
+            used = int(self.slot_used[s])
+            if used >= self.per_slot_capacity:
+                continue  # 槽满：该记忆不可寻址（不丢弃文本存储，只是不入表）
+            if int(self.pool_used) >= self.max_entries:
+                return  # 池满
+            pid = int(self.pool_used)
+            self.pool.data[pid] = embeds[i].detach()
+            self.slot_index[s, used] = pid
+            self.slot_used[s] = used + 1
+            self.pool_used += 1
+            self.active[pid] = True
 
     def erase(self, slot_ids: torch.Tensor, positions: torch.Tensor):
         for s, p in zip(slot_ids.tolist(), positions.tolist()):
-            self.valid[s, p] = False
+            pid = int(self.slot_index[s, p])
+            if pid >= 0:
+                self.active[pid] = False
+                self.slot_index[s, p] = -1
+                self.slot_used[s] -= 1
 
     def lookup(self, slot_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """按槽位取回全部有效记忆：返回 (embeds [B, ..., slots, cap, D], valid [B, ..., slots, cap])。"""
         # slot_ids 可为 [B, S] 或 [B, S, n_slots]（多头哈希）
-        embeds = self.embedding[slot_ids]  # [B, ..., cap, D]
-        valid = self.valid[slot_ids]  # [B, ..., cap]
-        return embeds, valid
+        idx = self.slot_index[slot_ids]  # [B, ..., cap]
+        valid = idx >= 0  # [B, ..., cap]
+        safe = idx.clamp(min=0)
+        # 展平 index_select（保证梯度路径一致）
+        flat = safe.reshape(-1)
+        pool_embeds = self.pool[flat].reshape(*idx.shape, self.embed_dim)
+        # 无效位置嵌入置零（gate 处按 valid 掩码为 0，不影响）
+        pool_embeds = pool_embeds * valid.unsqueeze(-1)
+        return pool_embeds, valid
 
     def num_entries(self) -> int:
-        return int(self.valid.sum().item())
+        return int(self.active.sum().item())
+
+    def slot_usage(self) -> dict:
+        """槽位占用统计（仿真/诊断用）。"""
+        used = self.slot_used.tolist()
+        full = sum(1 for u in used if u >= self.per_slot_capacity)
+        nonempty = sum(1 for u in used if u > 0)
+        return {
+            "entries": self.num_entries(),
+            "slots_nonempty": nonempty,
+            "slots_full": full,
+            "pool_used": int(self.pool_used),
+            "pool_capacity": self.max_entries,
+        }
 
 
 class DsaEngramIndexer(nn.Module):

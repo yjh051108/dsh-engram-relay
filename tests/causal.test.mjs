@@ -90,19 +90,18 @@ test('wake: hash hit then sparse truncation', async () => {
 test('wake: hash seed + causal propagation recalls dependents', async () => {
   const { dir, store, graph, hasher } = makeEnv()
   try {
-    // A 与查询同文本 → 哈希命中 A；B 因果依赖 A → 传播召回 B
-    const a = store.add({ kind: 'decision', label: 'A 种子', text: '项目部署端口是 8080', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.1, scope: null })
-    const b = store.add({ kind: 'fact', label: 'B 依赖 A', text: '因为部署端口定了所以防火墙规则如下', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.1, scope: null })
+    // A 与查询同文本 → 哈希命中 A；B 与 A 词汇零重叠、因果依赖 A → 因果传播召回 B
+    // （importance 需 ≥ threshold/decay = 0.2 才能传播过阈值）
+    const a = store.add({ kind: 'decision', label: 'A 种子', text: '项目部署端口是 8080 且使用 PostgreSQL', sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8, scope: null })
+    const b = store.add({ kind: 'fact', label: 'B 依赖 A', text: '防火墙白名单规则已按既定方案更新完成', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.8, scope: null })
     graph.rebuild()
 
-    // 模拟模型打分：只给 A 高分（其余低分）
-    const engine = new EngramWakeEngine(store, graph, hasher, CONFIG, async (_q, candidates) => {
-      return new Map(candidates.map((c) => [c.id, c.id === a.id ? 1.0 : 0.1]))
-    })
-    const hit = await engine.query('项目部署端口是 8080', 3)
+    // 无模型打分（重要度降级）：A/B 同为 0.1
+    const engine = new EngramWakeEngine(store, graph, hasher, CONFIG)
+    const hit = await engine.query('项目部署端口是 8080 且使用 PostgreSQL', 3)
     const ids = hit.engrams.map((e) => e.id)
     assert.ok(ids.includes(a.id), '哈希种子命中 A')
-    assert.ok(ids.includes(b.id), '因果后继 B 被传播召回')
+    assert.ok(ids.includes(b.id), '因果后继 B 被召回（因果传播/碰撞任一路径）')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -38,10 +38,10 @@ export const DEFAULT_HASH_CONFIG: HashConfig = {
   lowercase: true,
 }
 
-/** 一次哈希寻址的结果：每 (n-gram 长度 × 头) 一个槽位 id。 */
+/** 一次哈希寻址的结果：展开后的槽位键列表（所有位置 × 所有头，去重）。 */
 export interface HashResult {
-  /** 每个 n-gram 长度下的多头槽位：ngramLen -> head -> slotId */
-  slots: Array<Array<number>>
+  /** 槽位键：`n{len}h{head}:{slotId}`（文本内全部 n-gram 窗口的命中槽位）。 */
+  slots: string[]
   /** 归一化后的 token 序列（调试/日志用）。 */
   tokens: string[]
 }
@@ -147,48 +147,56 @@ export class NgramHashAddressing {
     t = t.replace(/[ \t\r\n]+/g, ' ')
     t = t.trim()
     if (t === '') return []
-    // 按空白切词，保留中英文词与数字；标点折叠（去重连续标点）
+    // 按空白切词
     const words = t.split(' ')
     const tokens: string[] = []
     for (const w of words) {
       if (w === '') continue
-      // 中文按字拆（每个汉字是一个 token，保证 n-gram 有意义）
-      const cjk = w.match(/[\u4e00-\u9fff]/g)
-      if (cjk && cjk.length === w.length) {
+      // 先去掉标点/符号（统一处理，保证带标点与纯文本走同一分支）
+      const cleaned = w.replace(/[^\w\u4e00-\u9fff-]+/g, '')
+      if (cleaned === '') continue
+      // 纯中文：按字拆（每个汉字是一个 token，保证 n-gram 有意义）
+      const cjk = cleaned.match(/[\u4e00-\u9fff]/g)
+      if (cjk && cjk.length === cleaned.length) {
         tokens.push(...cjk)
       } else {
-        tokens.push(w.replace(/[^\w\u4e00-\u9fff-]+/g, ''))
+        tokens.push(cleaned)
       }
     }
     return tokens.filter((x) => x !== '')
   }
 
-  /** 对 token 序列做多头 n-gram 哈希寻址。 */
+  /**
+   * 对 token 序列做多头 n-gram 哈希寻址（per-position，论文语义）。
+   *
+   * 论文（engram_demo_v1.py `_get_ngram_hashes`）：对每个 token 位置 i，
+   * 取以 i 结尾的 n-gram 窗口，用乘子多项式/XOR 混合后对多头素数取模。
+   * **相同 n-gram 模式永远命中相同槽位**——与出现在文本的哪个位置无关。
+   *
+   * 因此查询与记忆文本只要**共享任意一个 n-gram 窗口**（如「部署端口」
+   * 这个 2-gram），就至少有一个槽位重叠 → 确定性命中。
+   */
   hashTokens(tokens: string[]): HashResult {
-    const { maxNgramSize } = this.config
-    const slots: Array<Array<number>> = []
+    const { maxNgramSize, headsPerNgram } = this.config
+    const slotSet = new Set<string>()
 
     for (let n = 2; n <= maxNgramSize; n += 1) {
       const layerIdx = n - 2
       const mults = this.multipliers[layerIdx]
       const primes = this.primesPerHead[layerIdx]
-      const heads: number[] = []
-      for (let h = 0; h < this.config.headsPerNgram; h += 1) {
-        const mod = primes[h]
-        // 滚动多项式哈希：mix = Σ token[i] * mult[i]（论文用 xor 混合）
+      // 逐位置计算 n-gram 窗口哈希（论文：mix = Σ token_k * mult_k，XOR 混合）
+      for (let i = n - 1; i < tokens.length; i += 1) {
         let mix = 0
-        for (let i = 0; i + n <= tokens.length; i += 1) {
-          let hval = 0
-          for (let k = 0; k < n; k += 1) {
-            hval = (hval + hashStr(tokens[i + k]) * mults[k]) % 2147483647
-          }
-          mix = (mix + hval) % mod
+        for (let k = 0; k < n; k += 1) {
+          const tokHash = hashStr(tokens[i - n + 1 + k])
+          mix = (mix + tokHash * mults[k]) % 2147483647
         }
-        heads.push(mix % mod)
+        for (let h = 0; h < headsPerNgram; h += 1) {
+          slotSet.add(`n${n}h${h}:${mix % primes[h]}`)
+        }
       }
-      slots.push(heads)
     }
-    return { slots, tokens }
+    return { slots: [...slotSet], tokens }
   }
 
   /** 便捷入口：文本 → 寻址。 */
@@ -196,16 +204,9 @@ export class NgramHashAddressing {
     return this.hashTokens(this.normalize(text))
   }
 
-  /** 把多头槽位折叠成一组可索引的键（用于外置表寻址）。 */
+  /** 把多头槽位折叠成一组可索引的键（per-position 展开后的去重键）。 */
   slotKeys(result: HashResult): string[] {
-    const keys: string[] = []
-    for (let n = 2; n <= this.config.maxNgramSize; n += 1) {
-      const layerIdx = n - 2
-      for (let h = 0; h < this.config.headsPerNgram; h += 1) {
-        keys.push(`n${n}h${h}:${result.slots[layerIdx][h]}`)
-      }
-    }
-    return keys
+    return result.slots
   }
 }
 

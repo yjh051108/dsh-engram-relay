@@ -93,9 +93,15 @@ class EngramServer:
         return {"ok": True, "result": {"raw": raw, "parsed": parsed}}
 
     def _write_memory(self, req: dict) -> dict:
-        """把记忆文本写入记忆表：文本 → 模型编码（hidden states 池化）→ 哈希槽位写入。"""
+        """把记忆文本写入记忆表：文本 → 模型编码（hidden states 池化）→ 哈希槽位写入。
+
+        多头哈希的 16 个通道对应不同模数；查询时 fused module 会查全部
+        通道，因此写入时把每条记忆写到前 WRITE_CHANNELS 个通道的槽位，
+        保证「写入必可被查询命中」，同时分散同主题碰撞。
+        """
         self._ensure()
         entries = req["entries"]  # [{text, label?, kind?}, ...]
+        write_channels = int(req.get("write_channels", 4))
         slot_ids: list[int] = []
         embeds: list[list[float]] = []
         for entry in entries:
@@ -105,14 +111,15 @@ class EngramServer:
                 out = self.model.model.model.embed_tokens(inputs.input_ids)
                 vec = out.mean(dim=1).squeeze(0).cpu().tolist()
             slots = self.model.engram_slots_for(inputs.input_ids)
-            # 取该文本第一个位置的槽位（多头哈希的首槽）
-            slot_ids.append(int(slots[0, 0, 0].item()))
-            embeds.append(vec)
+            # 写到前 write_channels 个通道的槽位（每通道一个槽 id）
+            for ch in range(min(write_channels, slots.shape[-1])):
+                slot_ids.append(int(slots[0, 0, ch].item()))
+                embeds.append(vec)
         self.model.write_memory(
             slot_ids,
             torch.tensor(embeds, dtype=self.model.dtype, device=self.model.device),
         )
-        return {"ok": True, "result": {"written": len(entries), "slots": slot_ids}}
+        return {"ok": True, "result": {"written": len(entries), "slots": slot_ids[:len(entries)]}}
 
     def _status(self, req: dict) -> dict:
         if self.model is None:

@@ -37,8 +37,8 @@ export class CausalGraph {
   private out = new Map<string, CausalEdge[]>()
   private inEdges = new Map<string, CausalEdge[]>()
 
-  constructor(private store: EngramStore) {
-    this.rebuild()
+  constructor(private store: EngramStore, options: { rebuild?: boolean } = {}) {
+    if (options.rebuild !== false) this.rebuild()
   }
 
   /** 从 store 全量重建（启动时 / 蒸馏后调用）。 */
@@ -108,6 +108,14 @@ export class CausalGraph {
     const ids = (this.inEdges.get(id) ?? [])
       .filter((e) => e.kind === 'causes')
       .map((e) => e.from)
+    return this.store.getMany(ids)
+  }
+
+  /** 取某节点的直接后果（供召回结果展示因果链）。 */
+  effectsOf(id: string): Engram[] {
+    const ids = (this.out.get(id) ?? [])
+      .filter((e) => e.kind === 'causes')
+      .map((e) => e.to)
     return this.store.getMany(ids)
   }
 
