@@ -35,7 +35,7 @@ test('client: missing server file degrades to null', async () => {
 
 // ---- v3：0.6B 移除后，Python 服务 = 嵌入服务（bge 语义精排） ----
 
-const BGE_PATH = process.env.ENGRAM_EMBED_MODEL || 'F:/dsh/engram-trial/bge-small-zh'
+const BGE_PATH = process.env.ENGRAM_EMBED_MODEL || 'F:/dsh/01-memory/engram-trial/bge-small-zh'
 
 test('client: load with missing model dir degrades to loaded:false (no crash)', async () => {
   const { PythonEngramClient } = await import('../lib/model/python-client.js')

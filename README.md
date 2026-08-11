@@ -69,7 +69,7 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 - id: dsh-engram-relay
   name: '@dsh-external/dsh-engram-relay'
   config:
-    embedModel: 'F:/dsh/engram-trial/bge-small-zh'   # bge 本地目录（必配才能语义精排）
+    embedModel: 'F:/dsh/01-memory/engram-trial/bge-small-zh'   # bge 本地目录（必配才能语义精排）
 ```
 
 | 键 | 默认 | 说明 |
