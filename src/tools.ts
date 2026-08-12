@@ -412,6 +412,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.title}]]（可 engram_search 检索）`
       // 可见性：只能展开自己可见层的节点
       if (!isVisible(node, viewerOf(exec))) return `无权展开 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
+      // 展开 = 深度使用 → 强化（激活模型 B 增量）
+      relay.store.reinforce(node.id)
+      relay.activation?.update(node.id, relay.store.get(node.id)?.reinforces)
       relay.store.touch(node.id)
       const causes = relay.store.getMany(node.causes)
       const effects = relay.store.getMany(node.effects)
@@ -522,6 +525,11 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       }
       const kind = (String(args.kind ?? 'causes') as CausalEdgeKind)
       relay.graph.addEdge(from.id, to.id, kind, 1)
+      // 织网 = 深度使用 → 强化两端（激活模型 B 增量）
+      relay.store.reinforce(from.id)
+      relay.activation?.update(from.id, relay.store.get(from.id)?.reinforces)
+      relay.store.reinforce(to.id)
+      relay.activation?.update(to.id, relay.store.get(to.id)?.reinforces)
       // 同步 store 的因果数组（graph 从 store rebuild，保持一致）
       if (kind === 'causes') {
         if (!from.effects.includes(to.id)) relay.store.update(from.id, { effects: [...from.effects, to.id] })

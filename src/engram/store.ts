@@ -145,6 +145,8 @@ export interface EngramNode {
   slots: string[]
   /** 确认状态：pending=待确认（不参与检索/唤醒命中），confirmed=已确认（缺省；旧数据视为 confirmed）。 */
   status?: 'pending' | 'confirmed'
+  /** 强化事件时间戳（写入/命中/展开/链接；类脑激活模型 B=ln(Σt^(-d)) 的输入）。旧数据缺省 [createdAt]。 */
+  reinforces?: number[]
 }
 
 /** 渐进披露视图。 */
@@ -215,6 +217,7 @@ export class EngramStore {
           e.importance = typeof e.importance === 'number' ? e.importance : 0
           e.hits = typeof e.hits === 'number' ? e.hits : 0
           e.createdAt = typeof e.createdAt === 'number' ? e.createdAt : 0
+          e.reinforces = Array.isArray(e.reinforces) ? e.reinforces : [e.createdAt || Date.now()]
           this.byId.set(e.id, e)
           for (const s of e.slots) this.indexSlot(s, e.id)
           if (e.title) this.titleIndex.set(e.title, e.id)
@@ -325,6 +328,8 @@ export class EngramStore {
       hits: 0,
       lastHitAt: null,
       slots,
+      // 写入即第一次强化（类脑：刚记住时最容易被想起）
+      reinforces: input.reinforces ?? [Date.now()],
     }
     this.byId.set(node.id, node)
     for (const s of slots) this.indexSlot(s, node.id)
@@ -553,12 +558,22 @@ export class EngramStore {
     return doomed.length
   }
 
-  /** 登记一次唤醒（LRU 衰减）。 */
+  /** 登记一次唤醒（LRU 衰减 + 激活强化：命中即复习，类脑巩固）。 */
   touch(id: string): void {
     const e = this.byId.get(id)
     if (!e) return
     e.hits += 1
     e.lastHitAt = Date.now()
+    if (e.reinforces) e.reinforces.push(Date.now())
+    this.persist()
+  }
+
+  /** 登记一次强化（展开/链接等深度使用——权重高于命中）。 */
+  reinforce(id: string): void {
+    const e = this.byId.get(id)
+    if (!e) return
+    e.reinforces = e.reinforces ?? [e.createdAt || Date.now()]
+    e.reinforces.push(Date.now())
     this.persist()
   }
 

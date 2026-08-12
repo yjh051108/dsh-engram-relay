@@ -28,6 +28,7 @@ import type CompactService from '@deepseek-ai/dsh-compact'
 import { EngramStore } from './engram/store.js'
 import { CausalGraph } from './engram/causal.js'
 import { NgramHashAddressing } from './engram/hash.js'
+import { ActivationCache } from './engram/activation.js'
 import { EngramWakeEngine, type WakeViewer } from './engram/wake.js'
 import { RelayModel } from './model/relay-model.js'
 import { installGraphApi } from './graph-api.js'
@@ -56,6 +57,8 @@ export class EngramRelay {
   readonly hasher: NgramHashAddressing
   readonly wake: EngramWakeEngine
   readonly model: RelayModel
+  /** 类脑激活缓存（B=ln(Σt^-d)，强化事件驱动；wake 阶段 3 接入排序）。 */
+  readonly activation: import('./engram/activation.js').ActivationCache
 
   private disposers: Array<() => void> = []
 
@@ -64,6 +67,8 @@ export class EngramRelay {
     this.hasher = new NgramHashAddressing({ seed: 0 })
     this.graph = new CausalGraph(this.store)
     this.model = new RelayModel(ctx, config)
+    this.activation = new ActivationCache()
+    this.activation.rebuild(this.store.all())
     this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, {
       embedder: (query, candidates) => this.model.embed(query, candidates),
       scorer: (query, candidates) => this.model.score(query, candidates),
