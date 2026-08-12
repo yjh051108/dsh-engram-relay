@@ -16,6 +16,14 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+
+/** 进程内文件写锁（按文件路径串行化关键区）。 */
+const fileLocks = new Map<string, Promise<void>>()
+function runWithFileLock(file: string, critical: () => void): void {
+  const prev = fileLocks.get(file) ?? Promise.resolve()
+  const next = prev.then(() => { critical() }).catch(() => {})
+  fileLocks.set(file, next)
+}
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -189,26 +197,29 @@ export class EngramStore {
    * 原子持久化：写临时文件 + rename 替换。
    *
    * 背景：web 与 headless 两个 profile 可能同时装配本插件并写同一个
-   * engrams.jsonl；直接 writeFileSync 在多写者下会交错/截断，把文件写坏
-   * （实测出现过整文件 NUL 填充、记忆全丢）。临时文件 + rename 保证任何
-   * 时刻磁盘上要么是旧完整文件、要么是新完整文件，杜绝半写损坏。
-   * Windows 上 rename 覆盖已存在文件会失败，先 unlink 目标再 rename
-   * （窗口期极小，且由上面的「损坏自愈」兜底）。
+   * engrams.jsonl；热重载时同一进程内也会短暂存在两个 store 实例（旧
+   * fiber dispose 前的最后一次 persist 与新实例并发）。tmp 必须**每实例
+   * 唯一**（曾用 `${pid}` 导致同进程两实例共用同名 tmp → writeFileSync
+   * 交错 → 整文件 NUL、记忆全丢），并加进程内写锁串行化 rename 竞态。
+   * Windows 上 rename 覆盖已存在文件会失败，先 unlink 目标再 rename。
    */
   private persist(): void {
     mkdirSync(dirname(this.file), { recursive: true })
     const lines: string[] = []
     for (const e of this.byId.values()) lines.push(JSON.stringify(e))
-    const tmp = `${this.file}.tmp-${process.pid}`
+    const tmp = `${this.file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     writeFileSync(tmp, lines.join('\n') + '\n', 'utf8')
-    try {
-      renameSync(tmp, this.file)
-    } catch {
+    // 进程内写锁：热重载窗口内两实例的 rename 串行（最后写入者胜，不交错）
+    runWithFileLock(this.file, () => {
       try {
-        unlinkSync(this.file)
-      } catch { /* 目标不存在等，忽略 */ }
-      renameSync(tmp, this.file)
-    }
+        renameSync(tmp, this.file)
+      } catch {
+        try {
+          unlinkSync(this.file)
+        } catch { /* 目标不存在等，忽略 */ }
+        renameSync(tmp, this.file)
+      }
+    })
   }
 
   /**
