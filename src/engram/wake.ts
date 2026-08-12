@@ -39,6 +39,8 @@ export interface WakeHit {
 export interface WakeViewer {
   sessionId?: string
   cwd?: string
+  /** 当前回合号（时序衰减用：近期记忆加权） */
+  turn?: number
 }
 
 /** 打分回调：embedder（语义精排）优先，scorer（遗留门控）兜底。 */
@@ -118,11 +120,21 @@ export class EngramWakeEngine {
     const hitIds = new Set(candidates.map((e) => e.id))
     const causalSlots = Math.max(1, Math.ceil(limit / 2))
 
+    // 时序衰减权重：近期记忆加分（新近优先，20 回合指数衰减；无 turn 信息时退化为 1）
+    const curTurn = viewer.turn
+    const nodeById = new Map(candidates.map((e) => [e.id, e]))
+    const recency = (id: string): number => {
+      const e = nodeById.get(id)
+      if (!e || typeof curTurn !== 'number' || typeof e.turn !== 'number') return 1
+      const d = Math.max(0, curTurn - e.turn)
+      return 1 + 0.25 * Math.exp(-d / 20)
+    }
+
     const ranked: Array<[string, number]> = []
-    // 主席位：哈希命中按分数排序（保留 limit - causalSlots 个）
+    // 主席位：哈希命中按「激活分数 × 时序权重」排序（保留 limit - causalSlots 个）
     const hitRanked = [...activated.entries()]
       .filter(([id]) => hitIds.has(id))
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1] * recency(b[0]) - a[1] * recency(a[0]))
     const mainQuota = Math.max(1, limit - causalSlots)
     const mainPicked = hitRanked.slice(0, mainQuota)
     ranked.push(...mainPicked)

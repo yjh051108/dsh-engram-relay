@@ -84,7 +84,7 @@ export class EngramRelay {
         if (sessionId) {
           // 分层准入需要查看者视角：sessionId + 当前工作目录（cwd 经
           // turn-stopping 持续追踪）
-          void this.wake.maybeWake(sessionId, options, { cwd: this.currentCwd ?? undefined }).catch((error) => {
+          void this.wake.maybeWake(sessionId, options, { cwd: this.currentCwd ?? undefined, turn: this.lastTurnAt }).catch((error) => {
             this.ctx.logger?.warn?.('[engram-relay] wake failed: %s', String(error))
           })
           // 训练模型的原生回忆（异步，结果缓存供记忆段渲染）
@@ -404,6 +404,7 @@ const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供�
 - summary: 一句话摘要（30 字内）
 - content: 完整细节（关键参数、上下文，200 字内）
 - causesOf: 导致这条记忆的**已有记忆标题**数组（从下方「已有记忆入口」列表精确引用，最多 2 个；没有因果关系的填 []）——例如本轮"修复了 X"是由之前的「Y 故障定位」导致的，则 causesOf: ["Y 故障定位"]
+- 额外：若本回合的内容与「已有记忆入口」中的多条记忆构成**反复出现的模式/规律**（如"每次改 X 都会引发 Y"），可再输出一条规律记忆（kind=fact，title 以「规律」开头，content 描述模式与证据）——没有明显规律则不输出。
 只输出 JSON 数组，不要任何其他文字。`
 
 /** 宽松解析蒸馏输出：剥代码围栏 → 取首个 JSON 数组。 */

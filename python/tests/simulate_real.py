@@ -10,6 +10,10 @@ ground truth（相关性标注）：查询与记忆的共享主题关键词（�
 import json
 import math
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hash_text import TextHashAddressing, TextHashIndex  # noqa: E402
 
 STORE = os.path.expanduser('~/.dsh/engram-relay/engrams.jsonl')
 QUERIES_FILE = 'F:/dsh/.zcode/real-queries.txt'
@@ -67,14 +71,18 @@ def main():
 
     mem_topics = [topic_of(t) for t in mem_texts]
 
+    # 真实哈希索引（与生产一致的 NgramHashAddressing 语义）
+    idx = TextHashIndex()
+    for i, t in enumerate(mem_texts):
+        idx.add(i, t)
+
     results = []
     for qi, q in enumerate(queries):
         q_topic = topic_of(q)
-        # 1. 哈希粗筛（2-gram 交集近似）
-        qb = bigrams(q)
-        cand_idx = [i for i, m in enumerate(memories) if qb & bigrams(m.get('title', '') + m.get('summary', ''))]
+        # 1. 哈希粗筛（真实哈希寻址——与生产一致）
+        cand_idx = idx.lookup(q, 256)
         if not cand_idx:
-            results.append({'q': q, 'recalled': [], 'injected': 0, 'has_related': bool(q_topic), 'gt_hit': False})
+            results.append({'q': q, 'recalled': [], 'injected': 0, 'has_related': False, 'gt_hit': False})
             continue
         # 2. bge 精排（真实）
         cand_texts = [mem_texts[i] for i in cand_idx]
