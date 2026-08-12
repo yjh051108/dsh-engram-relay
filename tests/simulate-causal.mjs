@@ -101,9 +101,22 @@ async function main() {
     console.log(`记忆 ${store.count()} 条，因果边 ${graph.edgeCount()} 条（A4 + B4 + 跨主题 1）\n`)
 
     // 基线引擎（空图 = 纯哈希/向量 top-k 的确定性版）
-    const enginePlain = new EngramWakeEngine(store, new CausalGraph(store, { rebuild: false }), hasher, { ...CONFIG, maxWakePerTurn: 5 })
+    const enginePlain = new EngramWakeEngine(store, new CausalGraph(store, { rebuild: false }), hasher, { ...CONFIG, maxWakePerTurn: 5, semanticMinScore: 0.42 })
     // 因果引擎（哈希 + 分层因果席位）
-    const engineCausal = new EngramWakeEngine(store, graph, hasher, { ...CONFIG, maxWakePerTurn: 5 })
+    const engineCausal = new EngramWakeEngine(store, graph, hasher, { ...CONFIG, maxWakePerTurn: 5, semanticMinScore: 0.42 })
+    // fake embedder：查询=某节点全文 → 该节点 0.8（过阈值），其余词汇隔离节点 0.1（低于阈值）。
+    // 因果邻居语义低于阈值——验证「因果席位不受语义阈值限制」的新语义。
+    const embedder = (q, candidates) => {
+      const map = new Map()
+      const target = candidates.find((c) => c.summary === q)
+      for (const c of candidates) {
+        map.set(c.id, c.id === target?.id ? 0.8 : 0.1)
+      }
+      return Promise.resolve(map)
+    }
+    enginePlain.setEmbedder?.(embedder) ?? null
+    const plainWithEmbedder = new EngramWakeEngine(store, new CausalGraph(store, { rebuild: false }), hasher, { ...CONFIG, maxWakePerTurn: 5, semanticMinScore: 0.42 }, { embedder })
+    const causalWithEmbedder = new EngramWakeEngine(store, graph, hasher, { ...CONFIG, maxWakePerTurn: 5, semanticMinScore: 0.42 }, { embedder })
 
     // 查询集：每节点全文查询（精确命中单节点）
     const queries = []
@@ -128,8 +141,8 @@ async function main() {
 
     for (const { name, q, targetId } of queries) {
       const nbrs = neighborsOf(targetId)
-      const hPlain = await enginePlain.query(q, 5)
-      const hCausal = await engineCausal.query(q, 5)
+      const hPlain = await plainWithEmbedder.query(q, 5)
+      const hCausal = await causalWithEmbedder.query(q, 5)
       plainTokens += hPlain.injectedTokens
       causalTokens += hCausal.injectedTokens
 

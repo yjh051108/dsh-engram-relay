@@ -100,23 +100,24 @@ export class EngramWakeEngine {
     if (!raw || raw.size === 0) {
       return { engrams: [], reason: 'no-embedder', injectedTokens: 0 }
     }
+    // 阈值过滤仅限「主席位」资格：前因/后果的语义常与查询不同（因果邻接
+    // 不是语义相似），若在此处全量过滤会把因果邻居挡在传播之外。
+    // 因果席位从全候选的传播结果选取（见第 3 步），不受阈值限制。
     const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= threshold)
     if (relevant.length === 0) {
       return { engrams: [], reason: 'below-threshold', injectedTokens: 0 }
     }
-    candidates = relevant
     const scores = new Map<string, number>(
       candidates.map((e) => [e.id, raw!.get(e.id) ?? e.importance]),
     )
 
-    // 3. 因果传播（前因/后果双向）。
+    // 3. 因果传播（前因/后果双向）——基于全候选分数（含低于阈值的邻居种子）。
     const activated = this.graph.propagate(scores)
 
     // 4. 分层稀疏选择（因果席位保证）：
-    //    - 主席位：哈希命中的候选按激活分数排序；
-    //    - 因果席位：传播激活的**因果邻居**占独立席位。注意：邻居可能
-    //      也被哈希命中（n-gram 碰撞/共享），此时它若被主席位截断，
-    //      仍应从因果席位进入——「带因果性」不被高分候选挤掉。
+    //    - 主席位：**阈值内**候选按激活分数排序；
+    //    - 因果席位：传播激活的因果邻居（可低于阈值）占独立席位。
+    const relevantIds = new Set(relevant.map((e) => e.id))
     const hitIds = new Set(candidates.map((e) => e.id))
     const causalSlots = Math.max(1, Math.ceil(limit / 2))
 
@@ -131,9 +132,9 @@ export class EngramWakeEngine {
     }
 
     const ranked: Array<[string, number]> = []
-    // 主席位：哈希命中按「激活分数 × 时序权重」排序（保留 limit - causalSlots 个）
+    // 主席位：**阈值内**候选按「激活分数 × 时序权重」排序（保留 limit - causalSlots 个）
     const hitRanked = [...activated.entries()]
-      .filter(([id]) => hitIds.has(id))
+      .filter(([id]) => hitIds.has(id) && relevantIds.has(id))
       .sort((a, b) => b[1] * recency(b[0]) - a[1] * recency(a[0]))
     const mainQuota = Math.max(1, limit - causalSlots)
     const mainPicked = hitRanked.slice(0, mainQuota)
