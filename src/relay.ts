@@ -93,18 +93,31 @@ export class EngramRelay {
               this.ctx.logger?.warn?.('[engram-relay] recall failed: %s', String(error))
             })
           }
+          // 记忆注入（缓存友好）：追加到消息流末尾而非 system——system 内
+          // 任何动态内容都会使其后 tools+历史缓存全失效；尾部注入变化只在
+          // 历史末端，system+tools+前缀历史保持命中。
+          try {
+            const injection = this.renderMemorySection()
+            if (injection) {
+              const messages = (options as { messages?: unknown[] }).messages
+              if (Array.isArray(messages)) {
+                ;(messages as unknown[]).push({ role: 'system', content: injection } as never)
+              }
+            }
+          } catch (error) {
+            this.ctx.logger?.warn?.('[engram-relay] injection failed: %s', String(error))
+          }
         }
       }
       return next()
     })
 
-    // 2. 记忆段注入（systemPrompt 装配时渲染最新唤醒结果，超稀疏）。
-    // order 9997：动态内容尾部化（参考官方 system prompt 缓存友好设计——
-    // 召回结果每轮不同，放最尾使前缀缓存保持命中）。
+    // 2. 记忆能力说明（固定文本，零动态：system 稳定 → 前缀缓存保持命中）。
+    //    动态召回内容走消息尾注入（上方），需要时也可用 engram_recall 工具。
     this.ctx.systemPrompt.context({
       name: 'engram:relay',
       order: 9997,
-      text: () => this.renderMemorySection(),
+      text: '本环境有 engram 跨会话记忆图谱（global/project/session 分层、因果链接、渐进披露）。需要时用 engram_recall 检索、engram_store 写入、engram_open 展开；每轮请求会自动把相关记忆追加到消息末尾。',
     })
 
     // 3. 回合后蒸馏（agent/turn-stopping：回合关闭边界，serial 不 veto）。
