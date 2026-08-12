@@ -14,6 +14,7 @@
 import type { Context as CordisContext } from 'cordis'
 import type { EngramRelayConfig } from '../types.js'
 import { PythonEngramClient, type DistillEntry } from './python-client.js'
+import { embedWithOnnx } from './onnx-embedder.js'
 import type { EngramStore, EngramNode } from '../engram/store.js'
 import type { CausalGraph } from '../engram/causal.js'
 
@@ -70,20 +71,26 @@ export class RelayModel {
   /**
    * 语义精排（混合检索核心）：对 hash 粗筛候选做 bge 余弦重排。
    * 返回「候选 id → 余弦相似度」；嵌入模型不可用时返回 null
-   * （上层降级为重要度/遗留门控）。
+   * （上层降级为重要度/遗留门控）。降级链：TS ONNX（包内模型，免 Python）→ Python 服务。
    */
   async embed(query: string, candidates: EngramNode[]): Promise<Map<string, number> | null> {
-    await this.warmup()
     if (candidates.length === 0) return new Map()
-    const out = await this.python.embed(
-      candidates.map((e) => `${e.title}：${e.summary.slice(0, 200)}`),
-      query.slice(0, 500),
-    )
+    const texts = candidates.map((e) => `${e.title}：${e.summary.slice(0, 200)}`)
+    const q = query.slice(0, 500)
+    // ① TS ONNX（优先——包内 model/bge-small-zh 免 Python，新电脑开箱即用）
+    const ts = await embedWithOnnx(texts, q, this.config.embedModel)
+    if (ts) return this.cosineScores(candidates, ts.query_vec, ts.vectors)
+    // ② Python 服务（回退）
+    await this.warmup()
+    const out = await this.python.embed(texts, q)
     if (!out || !out.query_vec || !out.vectors || out.vectors.length !== candidates.length) return null
-    const qv = out.query_vec
+    return this.cosineScores(candidates, out.query_vec, out.vectors)
+  }
+
+  private cosineScores(candidates: EngramNode[], qv: number[], vectors: number[][]): Map<string, number> {
     const scores = new Map<string, number>()
     candidates.forEach((e, i) => {
-      const v = out.vectors[i]
+      const v = vectors[i]
       if (!v || v.length !== qv.length) return
       let dot = 0
       let na = 0
