@@ -26,6 +26,7 @@ import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import type CompactService from '@deepseek-ai/dsh-compact'
 
 import { EngramStore } from './engram/store.js'
+import { BruteForceIndex } from './engram/vector-index.js'
 import { CausalGraph } from './engram/causal.js'
 import { NgramHashAddressing } from './engram/hash.js'
 import { ActivationCache } from './engram/activation.js'
@@ -59,6 +60,8 @@ export class EngramRelay {
   readonly model: RelayModel
   /** 类脑激活缓存（B=ln(Σt^-d)，强化事件驱动；wake 阶段 3 接入排序）。 */
   readonly activation: import('./engram/activation.js').ActivationCache
+  /** 向量索引（int8 粗筛 + fp32 精筛双表；prefilter 候选来源）。 */
+  readonly vectorIndex: import('./engram/vector-index.js').BruteForceIndex
 
   private disposers: Array<() => void> = []
 
@@ -69,10 +72,41 @@ export class EngramRelay {
     this.model = new RelayModel(ctx, config)
     this.activation = new ActivationCache()
     this.activation.rebuild(this.store.all())
+    this.vectorIndex = new BruteForceIndex(this.store.dir)
     this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, {
       embedder: (query, candidates) => this.model.embed(query, candidates),
       scorer: (query, candidates) => this.model.score(query, candidates),
-    })
+    }, (query) => this.vectorPrefilter(query))
+  }
+
+  /**
+   * 向量预筛（prefilter 钩子）：查询向量 → int8 全量内积 top-50 → 候选 id。
+   * 含懒补 ensure：新记忆未入向量表时差量 embed 补入；embedder 不可用返回 null（哈希兜底）。
+   */
+  private async vectorPrefilter(query: string): Promise<string[] | null> {
+    try {
+      // 懒补：store 节点数 > 向量表行数 → 差量补算（写入后首次检索前补）
+      const all = this.store.all().filter((e) => e.status !== 'pending')
+      if (all.length > this.vectorIndex.size) {
+        const missing = all.filter((e) => !this.vectorIndex.has(e.id))
+        if (missing.length > 0) {
+          const raw = await this.model.embedRaw(query, missing.map((e) => `${e.title}：${e.summary.slice(0, 200)}`))
+          if (raw) {
+            missing.forEach((e, i) => {
+              if (raw.vectors[i]) this.vectorIndex.add(e.id, Float32Array.from(raw.vectors[i]))
+            })
+            this.vectorIndex.persist()
+          }
+        }
+      }
+      if (this.vectorIndex.size === 0) return null
+      const raw = await this.model.embedRaw(query, [query])
+      if (!raw) return null
+      const hits = this.vectorIndex.search(Float32Array.from(raw.query_vec), 50)
+      return hits.map((h) => h.id)
+    } catch {
+      return null
+    }
   }
 
   /** 挂载所有 seam。 */

@@ -48,16 +48,10 @@ export class BruteForceIndex implements VectorIndex {
   private filePrefix: string
   private dirty = false
 
-  constructor(dim: number = VECTOR_DIM, filePrefix?: string) {
+  constructor(dir: string = '', dim: number = VECTOR_DIM) {
     this.dim = dim
-    this.filePrefix = filePrefix ?? ''
-  }
-
-  static async create(dir: string, dim: number = VECTOR_DIM): Promise<BruteForceIndex> {
-    const prefix = join(dir, 'vectors')
-    const idx = new BruteForceIndex(dim, prefix)
-    idx.load()
-    return idx
+    this.filePrefix = dir === '' ? '' : join(dir, 'vectors')
+    if (this.filePrefix) this.load()
   }
 
   get size(): number {

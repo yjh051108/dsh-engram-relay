@@ -69,6 +69,19 @@ export class RelayModel {
   }
 
   /**
+   * 原始向量嵌入（向量缓存/检索用）：返回查询向量 + 候选向量（ONNX 优先，Python 回退）。
+   */
+  async embedRaw(query: string, texts: string[]): Promise<{ query_vec: number[]; vectors: number[][] } | null> {
+    const q = query.slice(0, 500)
+    const ts = await embedWithOnnx(texts, q, this.config.embedModel)
+    if (ts) return ts
+    await this.warmup()
+    const out = await this.python.embed(texts, q)
+    if (!out || !out.query_vec || !out.vectors) return null
+    return { query_vec: out.query_vec, vectors: out.vectors }
+  }
+
+  /**
    * 语义精排（混合检索核心）：对 hash 粗筛候选做 bge 余弦重排。
    * 返回「候选 id → 余弦相似度」；嵌入模型不可用时返回 null
    * （上层降级为重要度/遗留门控）。降级链：TS ONNX（包内模型，免 Python）→ Python 服务。
@@ -76,15 +89,9 @@ export class RelayModel {
   async embed(query: string, candidates: EngramNode[]): Promise<Map<string, number> | null> {
     if (candidates.length === 0) return new Map()
     const texts = candidates.map((e) => `${e.title}：${e.summary.slice(0, 200)}`)
-    const q = query.slice(0, 500)
-    // ① TS ONNX（优先——包内 model/bge-small-zh 免 Python，新电脑开箱即用）
-    const ts = await embedWithOnnx(texts, q, this.config.embedModel)
-    if (ts) return this.cosineScores(candidates, ts.query_vec, ts.vectors)
-    // ② Python 服务（回退）
-    await this.warmup()
-    const out = await this.python.embed(texts, q)
-    if (!out || !out.query_vec || !out.vectors || out.vectors.length !== candidates.length) return null
-    return this.cosineScores(candidates, out.query_vec, out.vectors)
+    const raw = await this.embedRaw(query, texts)
+    if (!raw) return null
+    return this.cosineScores(candidates, raw.query_vec, raw.vectors)
   }
 
   private cosineScores(candidates: EngramNode[], qv: number[], vectors: number[][]): Map<string, number> {

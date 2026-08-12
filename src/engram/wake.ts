@@ -60,6 +60,8 @@ export class EngramWakeEngine {
     private config: EngramRelayConfig,
     /** 打分器（bge 语义精排 + 遗留门控）；缺省 = 纯哈希 + 重要度。 */
     private scorers: WakeScorers | null = null,
+    /** 候选预筛钩子（向量索引粗筛用）：返回候选 id 列表；null = 回退哈希 lookup。 */
+    private prefilter: ((query: string) => Promise<string[] | null>) | null = null,
   ) {}
 
   /** 每回合入口（自动唤醒，极克制）：哈希预筛 → 查询质量门 → 自动阈值 0.5 → top-1。 */
@@ -69,9 +71,14 @@ export class EngramWakeEngine {
     const query = extractQuery(_options)
     if (query.trim() === '') return { engrams: [], reason: 'no-query', injectedTokens: 0 }
 
-    // ① 哈希预筛（零成本）：词汇与任何记忆无重叠 → 直接跳过（零注入）。
+    // ① 向量/哈希预筛（零成本）：词汇/语义与任何记忆无重叠 → 直接跳过（零注入）。
     //    这是最大的噪声过滤器——闲聊/过程轮基本在此命中退出。
-    if (this.store.lookup(query, 1).length === 0) {
+    if (this.prefilter) {
+      const ids = await this.prefilter(query).catch(() => null)
+      if (ids && ids.length === 0) {
+        return { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
+      }
+    } else if (this.store.lookup(query, 1).length === 0) {
       return { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
     }
     // ② 查询质量门：太短（口语无锚，如"这个怎么弄"）没有语义锚 → 跳过。
@@ -85,11 +92,19 @@ export class EngramWakeEngine {
     return hit
   }
 
-  /** 核心查询：哈希粗筛 → 分层准入 → 语义精排（bge）→ 因果传播 → 分层稀疏选择。 */
+  /** 核心查询：向量/哈希粗筛 → 分层准入 → 语义精排（bge）→ 因果传播 → 分层稀疏选择。 */
   async query(query: string, limit: number, viewer: WakeViewer = {}, opts: { auto?: boolean } = {}): Promise<WakeHit> {
-    // 1. 确定性哈希粗筛（多取候选：分层准入会过滤掉一部分，保证命中不因
-    //    层过滤而丢失——global 常驻候选始终可见）。
-    let candidates = this.store.lookup(query, 256)
+    // 1. 粗筛：向量索引（prefilter 钩子，语义无盲区）→ 回退哈希 lookup。
+    //    多取候选：分层准入会过滤掉一部分，保证命中不因层过滤而丢失。
+    let candidates: EngramNode[]
+    if (this.prefilter) {
+      const ids = await this.prefilter(query).catch(() => null)
+      candidates = ids
+        ? ids.map((id) => this.store.get(id)).filter((e): e is EngramNode => !!e)
+        : this.store.lookup(query, 256)
+    } else {
+      candidates = this.store.lookup(query, 256)
+    }
     // 分层准入：global 所有会话 / project 同 cwd / session 本会话。
     // 这是「跨会话记忆」的可见性边界——看不到的记忆不会被唤醒注入。
     candidates = candidates.filter((e) => isVisible(e, viewer))
