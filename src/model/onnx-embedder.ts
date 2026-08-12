@@ -31,7 +31,7 @@ export async function embedWithOnnx(texts: string[], query: string, modelDir: st
     const queryVec = toVec(all[0])
     if (queryVec.length === 0) return null
     const vectors = all.slice(1).map(toVec)
-    if (vectors.some((v) => v.length !== queryVec.length)) return null
+    if (vectors.some((v: number[]) => v.length !== queryVec.length)) return null
     return { query_vec: queryVec, vectors }
   } catch {
     return null
