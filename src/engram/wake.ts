@@ -76,7 +76,7 @@ export class EngramWakeEngine {
   async query(query: string, limit: number, viewer: WakeViewer = {}): Promise<WakeHit> {
     // 1. 确定性哈希粗筛（多取候选：分层准入会过滤掉一部分，保证命中不因
     //    层过滤而丢失——global 常驻候选始终可见）。
-    let candidates = this.store.lookup(query, 64)
+    let candidates = this.store.lookup(query, 256)
     // 分层准入：global 所有会话 / project 同 cwd / session 本会话。
     // 这是「跨会话记忆」的可见性边界——看不到的记忆不会被唤醒注入。
     candidates = candidates.filter((e) => isVisible(e, viewer))
@@ -88,6 +88,9 @@ export class EngramWakeEngine {
     //      embedder 不可用时无法判断语义相关性，本轮不注入
     //      （重要度垫底会带来弱相关污染 + 每轮注入的缓存损耗，宁可空手）。
     const semanticMin = this.config.semanticMinScore ?? 0.42
+    // 多重比较校正（温和版）：候选越多误过概率越高，但真实系统哈希第一道防线
+    // 已把无关候选压到个位数——仅对候选异常膨胀时温和收紧。
+    const threshold = semanticMin + 0.03 * Math.log2(Math.max(1, candidates.length / 16))
     let raw: Map<string, number> | null | undefined
     if (this.scorers?.embedder) {
       raw = await this.scorers.embedder(query, candidates).catch(() => null)
@@ -95,7 +98,7 @@ export class EngramWakeEngine {
     if (!raw || raw.size === 0) {
       return { engrams: [], reason: 'no-embedder', injectedTokens: 0 }
     }
-    const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= semanticMin)
+    const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= threshold)
     if (relevant.length === 0) {
       return { engrams: [], reason: 'below-threshold', injectedTokens: 0 }
     }
@@ -167,14 +170,14 @@ export class EngramWakeEngine {
     return hit
   }
 
-  /** 渲染记忆注入段（渐进披露第一层：能力声明 + 入口列表 + 簇概览，超稀疏）。 */
+  /** 渲染记忆注入段（渐进披露第一层：短声明 + 入口列表，严格守预算）。 */
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
+    const HEADER = '（记忆：recall检索/open展开/store写入/link因果）'
     const lines: string[] = []
-    let tokens = 0
+    let tokens = estimateTokens(HEADER)
     for (const e of engrams) {
-      if (tokens >= budgetTokens) break
       // 入口层：title + 层标注 + 因果邻接 + summary（不含 content——按需展开）
       const causes = this.graph.causesOf(e.id)
       const effects = this.graph.effectsOf(e.id)
@@ -184,21 +187,14 @@ export class EngramWakeEngine {
       const effectNote = effects.length > 0
         ? ` ↓果:${effects.map((c) => c.title).join(';').slice(0, 60)}`
         : ''
-      lines.push(`- [[${e.title}]][${e.layer}]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`)
-      tokens += estimateTokens(e.title) + estimateTokens(e.summary)
-    }
-    // 自组织簇概览：让模型看到主题结构（不硬编码，连接密度自然成簇）
-    const clusters = this.store.clusters()
-    if (clusters.length > 1) {
-      const overview = clusters
-        .map((c) => `[[${c.label}]](+${c.members.length})`)
-        .join(' · ')
-      if (tokens + estimateTokens(overview) <= budgetTokens) {
-        lines.push(`  簇: ${overview}`)
-      }
+      const line = `- [[${e.title}]][${e.layer}]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`
+      const cost = estimateTokens(e.title) + estimateTokens(e.summary) + estimateTokens(causeNote) + estimateTokens(effectNote)
+      if (tokens + cost > budgetTokens) break
+      lines.push(line)
+      tokens += cost
     }
     return lines.length > 0
-      ? `<engram-memory>（跨会话记忆服务：global=全局持久·project=本目录持久·session=本会话临时（结束清理，重要记得 engram_promote 转长期）。能力：recall 检索 / open 展开 / store 写入(自主分层) / link 连接因果 / promote 转长期。摘要足够直接用，需细节自行展开 [[标题]]）\n${lines.join('\n')}\n</engram-memory>`
+      ? `<engram-memory>${HEADER}\n${lines.join('\n')}\n</engram-memory>`
       : ''
   }
 
@@ -227,7 +223,7 @@ function extractQuery(options: GenerateOptions): string {
   return ''
 }
 
-/** 粗略 token 估算：CJK 约 1 字 ≈ 1 token，ASCII ≈ 0.25 token/字符。 */
+/** 粗略 token 估算：CJK 约 1 字 ≈ 0.7 token（DeepSeek 中文实测 ~1.4 字/token），ASCII ≈ 0.25 token/字符。 */
 export function estimateTokens(text: string): number {
   let cjk = 0
   let ascii = 0
@@ -235,5 +231,5 @@ export function estimateTokens(text: string): number {
     if (/[\u3000-\u9fff]/.test(ch)) cjk += 1
     else ascii += 1
   }
-  return Math.ceil(cjk + ascii / 4)
+  return Math.ceil(cjk * 0.7 + ascii / 4)
 }

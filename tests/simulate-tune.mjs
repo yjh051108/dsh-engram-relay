@@ -48,18 +48,24 @@ function makeStore(dir, n) {
   return { store, hasher, T }
 }
 
-/** fake embedder：主题词匹配的余弦 + 少量噪声；无关查询给低分。 */
+/** fake embedder（真实 bge 分布校准）：相关 ~ N(0.516, 0.088)，无关 ~ N(0.293, 0.099)。 */
+function gauss(mean, std) {
+  let u = 0
+  let v = 0
+  while (u === 0) u = Math.random()
+  while (v === 0) v = Math.random()
+  return mean + std * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)
+}
 function makeEmbedder() {
   return (query, candidates) => {
     const map = new Map()
     const qt = query.match(/主题(\d+)/)
     for (const c of candidates) {
       const ct = c.title.match(/主题(\d+)/)
-      let score
-      if (qt && ct && qt[1] === ct[1]) score = 0.7 + Math.random() * 0.15 // 相关 0.7-0.85
-      else if (qt && ct) score = 0.12 + Math.random() * 0.1 // 跨主题 0.12-0.22
-      else score = 0.02 + Math.random() * 0.06 // 无关 <0.08
-      map.set(c.id, score)
+      const score = (qt && ct && qt[1] === ct[1])
+        ? gauss(0.516, 0.088)
+        : gauss(0.293, 0.099)
+      map.set(c.id, Math.min(1, Math.max(0, score)))
     }
     return Promise.resolve(map)
   }
