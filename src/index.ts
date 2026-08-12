@@ -77,7 +77,7 @@ export const Config: z<Config> = z.object({
     .description('Python 服务预热超时'),
   checkpoint: z.string().default('')
     .description('遗留：训练好的原生 engram checkpoint 路径（0.6B 已移除）'),
-  embedModel: z.string().default('')
+  embedModel: z.string().default('F:/dsh/01-memory/engram-trial/bge-small-zh')
     .description('bge 嵌入模型目录（本地路径；空 = 服务端 ENGRAM_EMBED_MODEL 环境变量，再空则禁用语义精排）'),
   distillRequireConfirm: z.boolean().default(false)
     .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
