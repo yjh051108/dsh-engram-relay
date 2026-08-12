@@ -15,14 +15,57 @@
  * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync } from 'node:fs'
+import { basename } from 'node:path'
+/** 进程内写锁（同步标志位）：persist 是同步函数，JS 单线程下同步代码天然不交错；tmp 每实例唯一已防跨实例冲突。 */
+let fileLockHeld = false
+function runWithFileLock(_file: string, critical: () => void): void {
+  if (fileLockHeld) {
+    // 重入（不可能发生于同步 persist 链），保守直接执行
+    critical()
+    return
+  }
+  fileLockHeld = true
+  try {
+    critical()
+  } finally {
+    fileLockHeld = false
+  }
+}
 
-/** 进程内文件写锁（按文件路径串行化关键区）。 */
-const fileLocks = new Map<string, Promise<void>>()
-function runWithFileLock(file: string, critical: () => void): void {
-  const prev = fileLocks.get(file) ?? Promise.resolve()
-  const next = prev.then(() => { critical() }).catch(() => {})
-  fileLocks.set(file, next)
+/** 判断载荷是否完好：无 NUL 主导 + 首行可解析（空文件视为完好）。 */
+function isHealthyPayload(raw: string): boolean {
+  if (raw.length === 0) return true
+  const nulCount = (raw.match(/\0/g) ?? []).length
+  if (nulCount / raw.length > 0.1) return false
+  const first = raw.split('\n').find((l) => l.trim() !== '')
+  if (first === undefined) return true
+  try {
+    JSON.parse(first)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 备份文件列表（新 → 旧）。 */
+function listBackups(file: string): string[] {
+  try {
+    return readdirSync(dirname(file))
+      .filter((n) => n.startsWith(basename(file) + '.bak-'))
+      .sort()
+      .reverse()
+      .map((n) => join(dirname(file), n))
+  } catch {
+    return []
+  }
+}
+
+/** 备份剪枝（保留最近 keep 代）。 */
+function pruneBackups(file: string, keep: number): void {
+  for (const b of listBackups(file).slice(keep)) {
+    try { unlinkSync(b) } catch { /* 忽略 */ }
+  }
 }
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -144,43 +187,65 @@ export class EngramStore {
   }
 
   private load(): void {
-    const raw = readFileSync(this.file, 'utf8')
-    // 损坏自愈：整文件 NUL/控制字节（多实例并发写 writeFileSync 的典型损坏）
-    // 会令逐行 JSON.parse 全部失败 → 静默丢光数据。先剥离 NUL 再解析；
-    // 若有效行极少而原始字节很多，备份损坏文件（保留取证），从干净行重建。
-    const cleaned = raw.replace(/\0+/g, '')
-    let loaded = 0
-    for (const line of cleaned.split('\n')) {
-      if (line.trim() === '') continue
+    // 恢复链（绝不丢记忆防线 2）：主文件 → 各代备份（新→旧），
+    // 取第一个能解析出节点的来源；主文件损坏时从最近完好备份自动恢复。
+    const sources = [this.file, ...listBackups(this.file)]
+    let recoveredFrom: string | null = null
+    for (const src of sources) {
+      if (!existsSync(src)) continue
+      let raw: string
       try {
-        const e = JSON.parse(line) as EngramNode
-        // —— 旧数据迁移兜底（v0.2.0 跨会话分层前持久化的节点缺字段）——
-        // 在加载边界一次性归一化，保证 isVisible/layerCounts/图谱序列化/
-        // 力导向布局等消费面不遇 undefined/NaN（layer 缺失按旧语义 = 会话级）。
-        e.layer = e.layer ?? 'session'
-        e.projectId = e.projectId ?? null
-        e.slots = Array.isArray(e.slots) ? e.slots : []
-        e.links = Array.isArray(e.links) ? e.links : []
-        e.causes = Array.isArray(e.causes) ? e.causes : []
-        e.effects = Array.isArray(e.effects) ? e.effects : []
-        e.importance = typeof e.importance === 'number' ? e.importance : 0
-        e.hits = typeof e.hits === 'number' ? e.hits : 0
-        e.createdAt = typeof e.createdAt === 'number' ? e.createdAt : 0
-        this.byId.set(e.id, e)
-        for (const s of e.slots) this.indexSlot(s, e.id)
-        if (e.title) this.titleIndex.set(e.title, e.id)
-        loaded++
+        raw = readFileSync(src, 'utf8')
       } catch {
-        // 单条损坏跳过，不拖垮整个存储
+        continue
       }
+      const cleaned = raw.replace(/\0+/g, '')
+      let loaded = 0
+      for (const line of cleaned.split('\n')) {
+        if (line.trim() === '') continue
+        try {
+          const e = JSON.parse(line) as EngramNode
+          // —— 旧数据迁移兜底（v0.2.0 跨会话分层前持久化的节点缺字段）——
+          e.layer = e.layer ?? 'session'
+          e.projectId = e.projectId ?? null
+          e.slots = Array.isArray(e.slots) ? e.slots : []
+          e.links = Array.isArray(e.links) ? e.links : []
+          e.causes = Array.isArray(e.causes) ? e.causes : []
+          e.effects = Array.isArray(e.effects) ? e.effects : []
+          e.importance = typeof e.importance === 'number' ? e.importance : 0
+          e.hits = typeof e.hits === 'number' ? e.hits : 0
+          e.createdAt = typeof e.createdAt === 'number' ? e.createdAt : 0
+          this.byId.set(e.id, e)
+          for (const s of e.slots) this.indexSlot(s, e.id)
+          if (e.title) this.titleIndex.set(e.title, e.id)
+          loaded++
+        } catch {
+          // 单条损坏跳过，不拖垮整个存储
+        }
+      }
+      if (loaded > 0) {
+        if (src !== this.file) {
+          recoveredFrom = src
+          try {
+            writeFileSync(this.file, cleaned, 'utf8')
+          } catch { /* 写回失败不阻塞 */ }
+        }
+        return
+      }
+      // 该来源全坏 → 下一个（更旧的备份）
     }
-    if (loaded === 0 && raw.replace(/\s/g, '').length > 64) {
-      // 文件有实质字节但一条都没解析出来 → 大概率损坏：留证 + 重建空库
-      try {
-        const backup = `${this.file}.corrupt-${Date.now()}`
-        renameSync(this.file, backup)
-        console.warn(`[engram-store] corrupt store backed up to ${backup}`)
-      } catch { /* 备份失败不阻塞 */ }
+    if (recoveredFrom) {
+      console.warn(`[engram-store] recovered ${this.byId.size} nodes from backup ${recoveredFrom}`)
+    }
+    // 全部来源都坏：留证（主文件损坏时）后以空库继续——绝不静默清空主文件
+    if (existsSync(this.file)) {
+      const raw = (() => { try { return readFileSync(this.file, 'utf8') } catch { return '' } })()
+      if (raw.replace(/\s/g, '').length > 64) {
+        try {
+          renameSync(this.file, `${this.file}.corrupt-${Date.now()}`)
+          console.warn(`[engram-store] all sources corrupt; main file preserved at corrupt backup`)
+        } catch { /* 备份失败不阻塞 */ }
+      }
     }
   }
 
@@ -207,8 +272,19 @@ export class EngramStore {
     mkdirSync(dirname(this.file), { recursive: true })
     const lines: string[] = []
     for (const e of this.byId.values()) lines.push(JSON.stringify(e))
+    const payload = lines.join('\n') + '\n'
+    // 写前快照（绝不丢记忆防线 1）：当前完好文件 → .bak-<ts>，保留 3 代。
+    if (existsSync(this.file)) {
+      try {
+        const cur = readFileSync(this.file, 'utf8')
+        if (isHealthyPayload(cur)) {
+          copyFileSync(this.file, `${this.file}.bak-${Date.now()}`)
+          pruneBackups(this.file, 3)
+        }
+      } catch { /* 快照失败不阻塞写入 */ }
+    }
     const tmp = `${this.file}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    writeFileSync(tmp, lines.join('\n') + '\n', 'utf8')
+    writeFileSync(tmp, payload, 'utf8')
     // 进程内写锁：热重载窗口内两实例的 rename 串行（最后写入者胜，不交错）
     runWithFileLock(this.file, () => {
       try {
@@ -220,6 +296,14 @@ export class EngramStore {
         renameSync(tmp, this.file)
       }
     })
+    // 写后校验（防线 3）：读回行数一致才算成功；不一致时上一代备份仍在。
+    try {
+      const back = readFileSync(this.file, 'utf8')
+      const backLines = back.split('\n').filter((l) => l.trim() !== '').length
+      if (backLines !== lines.length) {
+        console.warn(`[engram-store] persist readback mismatch: wrote ${lines.length}, read ${backLines}`)
+      }
+    } catch { /* 校验失败不阻塞 */ }
   }
 
   /**
