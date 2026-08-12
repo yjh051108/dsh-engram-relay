@@ -201,13 +201,18 @@ export class EngramRelay {
     }
     let text = ''
     try {
+      // 已有记忆入口（供因果推断引用——入口级，控制体积）
+      const entryList = this.store.all()
+        .map((n) => `[[${n.title}]] ${n.summary.slice(0, 40)}`)
+        .join('\n')
+      const userText = `已有记忆入口：\n${entryList.slice(0, 1800)}\n\n最近对话回合：\n${conversation.slice(0, 3800)}`
       const stream = this.ctx.llm.stream({
         provider: route.provider,
         model: route.model,
         system: DISTILL_SYSTEM_PROMPT,
         messages: [createUserMessage({
           source: { kind: 'user' },
-          content: [{ type: 'text', text: conversation.slice(0, 6000) }],
+          content: [{ type: 'text', text: userText }],
         })],
         temperature: 0.3,
         // 蒸馏是结构化抽取任务，不需要思考链：显式关闭 reasoning，
@@ -242,6 +247,12 @@ export class EngramRelay {
       if (layer === 'project' && !cwd) continue
       if (layer === 'session' && !sessionId) continue
       if (!item.title || !item.summary) continue
+      // 自动因果：causesOf 引用的已有记忆标题 → 建因果边（前因 → 新节点）。
+      const causeIds: string[] = []
+      for (const causeTitle of (Array.isArray(item.causesOf) ? item.causesOf : [])) {
+        const cause = this.store.all().find((n) => n.title === causeTitle && n.id !== undefined)
+        if (cause) causeIds.push(cause.id)
+      }
       this.store.add({
         kind: (item.kind && KINDS.has(item.kind)) ? item.kind as EngramKind : 'note',
         layer,
@@ -252,13 +263,21 @@ export class EngramRelay {
         links: [],
         sessionId: layer === 'session' ? sessionId : null,
         turn: this.lastTurnAt,
-        causes: [],
+        causes: causeIds,
         effects: [],
         importance: 0.6,
         // 无确认模式（默认）：蒸馏直接 confirmed 立即生效；distillRequireConfirm
         // true 时写 pending，等用户 engram_confirm。
         ...(this.config.distillRequireConfirm ? { status: 'pending' as const } : {}),
       })
+      // 建边 + 前因节点 effects 双写
+      const added = this.store.all().find((n) => n.title === item.title)
+      if (added) {
+        for (const causeId of causeIds) {
+          this.graph.addEdge(causeId, added.id, 'causes', 1)
+          this.store.update(causeId, { effects: [...(this.store.get(causeId)?.effects ?? []), added.id] })
+        }
+      }
       proposed++
     }
     this.debugLog(`distill proposed: ${proposed}`)
@@ -384,6 +403,7 @@ const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供�
 - title: 简短入口标题（10 字内，如「部署端口决策」）
 - summary: 一句话摘要（30 字内）
 - content: 完整细节（关键参数、上下文，200 字内）
+- causesOf: 导致这条记忆的**已有记忆标题**数组（从下方「已有记忆入口」列表精确引用，最多 2 个；没有因果关系的填 []）——例如本轮"修复了 X"是由之前的「Y 故障定位」导致的，则 causesOf: ["Y 故障定位"]
 只输出 JSON 数组，不要任何其他文字。`
 
 /** 宽松解析蒸馏输出：剥代码围栏 → 取首个 JSON 数组。 */
@@ -393,6 +413,7 @@ function parseDistillJson(text: string): Array<{
   title?: string
   summary?: string
   content?: string
+  causesOf?: string[]
 }> | null {
   let t = text.trim()
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
@@ -403,7 +424,7 @@ function parseDistillJson(text: string): Array<{
   try {
     const arr = JSON.parse(t.slice(start, end + 1))
     return Array.isArray(arr)
-      ? arr as Array<{ kind?: string; layer?: string; title?: string; summary?: string; content?: string }>
+      ? arr as Array<{ kind?: string; layer?: string; title?: string; summary?: string; content?: string; causesOf?: string[] }>
       : null
   } catch {
     return null
