@@ -4,6 +4,13 @@
 
 ## 未发布（2026-08-13 更新）
 
+### 真实历史数据仿真（`simulate_real.py`）
+
+- 97 条真实记忆 × 161 条真实会话查询 × 真实 bge 全链路：相关召回 **82.9%**、平均注入 **100 tok/轮**（动态分级生效）
+- ground truth 关键词粗标注（诚实声明：语义相关但词表不匹配的查询被误标无关，误召指标被高估，召回可信）
+- 动态注入预算：按相关度分级渲染（最高分完整入口/次之标题摘要/其余仅标题）
+- engram_store 撰写规范（标题/摘要/正文字数与质量、反模式、同主题修订优先）
+
 ### 唤醒系统数学建模（`1c6ba25`）
 
 - **真实 bge 分布校准**：`python/tests/sample_bge_dist.py`（86 条记忆 × 8 查询，sentence-transformers 加载 bge-small-zh）——相关对 N(0.516, 0.088)、无关对 N(0.293, 0.099)，两分布重叠显著
@@ -29,3 +36,4 @@
 - engram_status compact 探测改 ctx.get + 记忆段 order 9997 尾部化（`d18bfa4`）
 - 存储原子写 + 损坏自愈备份（engrams.jsonl 曾全 NUL 损坏，双实例非原子并发写）
 - 蒸馏 reasoningEffort off（max 思考会吃光 800 token 预算导致输出为空）
+
