@@ -233,7 +233,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         const rec = await recommendLinks(relay, `${title}：${summary}`, e.id)
         const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，无因果/链接）`
         if (rec) {
-          return `${base}\n\n📎 推荐关联（bge 语义 × 时序，未自动建边——供决策）：\n${rec}\n\n决策：认识的标题直接采纳（engram_link 建边）；不认识的可先 engram_open 展开再定；都不合适就跳过。`
+          return `${base}\n\n📎 推荐关联（bge 语义 × 时序加权，未自动建边）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果/引用边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可，不影响本条记忆。`
         }
         return base + '\n（当前无显著关联候选）'
       }

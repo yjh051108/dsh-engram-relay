@@ -200,7 +200,9 @@ export class EngramWakeEngine {
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
-    const HEADER = '（记忆：recall检索/open展开/store写入/link因果）'
+    // 考究的使用引导：让模型知道「入口可直接用、细节可展开、更多可检索」——
+    // 渐进披露的入口层语义（摘要够用直接用，不够才展开，避免无谓的 open 调用）。
+    const HEADER = '（跨会话记忆：recall 检索 / open 展开 / store 写入 / link 织网。以下为相关记忆入口——摘要足够可直接用，需细节对 [[标题]] 用 engram_open 展开，需更多用 engram_recall）'
     const lines: string[] = []
     let tokens = estimateTokens(HEADER)
     engrams.forEach((e, idx) => {
