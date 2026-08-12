@@ -170,29 +170,36 @@ export class EngramWakeEngine {
     return hit
   }
 
-  /** 渲染记忆注入段（渐进披露第一层：短声明 + 入口列表，严格守预算）。 */
+  /** 渲染记忆注入段（动态预算：按相关度分级——高分完整入口、中分标题+摘要、低分仅标题）。 */
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
     const HEADER = '（记忆：recall检索/open展开/store写入/link因果）'
     const lines: string[] = []
     let tokens = estimateTokens(HEADER)
-    for (const e of engrams) {
-      // 入口层：title + 层标注 + 因果邻接 + summary（不含 content——按需展开）
-      const causes = this.graph.causesOf(e.id)
-      const effects = this.graph.effectsOf(e.id)
-      const causeNote = causes.length > 0
-        ? ` ↑因:${causes.map((c) => c.title).join(';').slice(0, 60)}`
-        : ''
-      const effectNote = effects.length > 0
-        ? ` ↓果:${effects.map((c) => c.title).join(';').slice(0, 60)}`
-        : ''
-      const line = `- [[${e.title}]][${e.layer}]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`
-      const cost = estimateTokens(e.title) + estimateTokens(e.summary) + estimateTokens(causeNote) + estimateTokens(effectNote)
-      if (tokens + cost > budgetTokens) break
+    engrams.forEach((e, idx) => {
+      if (tokens >= budgetTokens) return
+      // 分级渲染（engrams 已按激活分数降序）：
+      //  - 第 1 条（最高分）：完整入口（标题+层+因果+摘要）
+      //  - 第 2-3 条：标题+摘要（省因果注）
+      //  - 其余：仅 [[标题]]（最大化覆盖，预算内尽量多挂入口）
+      let line: string
+      if (idx === 0) {
+        const causes = this.graph.causesOf(e.id)
+        const effects = this.graph.effectsOf(e.id)
+        const causeNote = causes.length > 0 ? ` ↑因:${causes.map((c) => c.title).join(';').slice(0, 60)}` : ''
+        const effectNote = effects.length > 0 ? ` ↓果:${effects.map((c) => c.title).join(';').slice(0, 60)}` : ''
+        line = `- [[${e.title}]][${e.layer}]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`
+      } else if (idx <= 2) {
+        line = `- [[${e.title}]][${e.layer}]: ${e.summary.slice(0, 80)}`
+      } else {
+        line = `- [[${e.title}]]`
+      }
+      const cost = estimateTokens(line)
+      if (tokens + cost > budgetTokens) return
       lines.push(line)
       tokens += cost
-    }
+    })
     return lines.length > 0
       ? `<engram-memory>${HEADER}\n${lines.join('\n')}\n</engram-memory>`
       : ''
