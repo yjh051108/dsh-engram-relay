@@ -25,6 +25,10 @@
   "engines": {
     "dsh": ">=0.0.1-rc"
   },
+  "dependencies": {
+    "@huggingface/transformers": "3.6.3",
+    "onnxruntime-node": "1.20.1"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
