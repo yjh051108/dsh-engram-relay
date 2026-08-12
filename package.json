@@ -23,7 +23,7 @@
   ],
   "license": "BSD-3-Clause",
   "engines": {
-    "dsh": ">=0.0.1"
+    "dsh": ">=0.0.1-rc"
   },
   "dsh": {
     "bundle": {
