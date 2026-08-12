@@ -1,7 +1,8 @@
 /**
  * tsdown build for dsh-engram-relay: the single browser client bundle
  * (lib/client.js, CJS closure factory) registering with the package-name id
- * `dsh-engram-relay` (client-modules compose keys on the package name).
+ * `@dsh-external/dsh-engram-relay` (client-modules compose keys on the full
+ * package name — a bare short id leaves the loader entry unregistered).
  *
  * Mirrors the official DSH client-bundle preset (packages/client/tsdown.client.ts)
  * and dsh-voice-chat's setup:
@@ -20,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
-const PLUGIN_ID = 'dsh-engram-relay'
+const PLUGIN_ID = '@dsh-external/dsh-engram-relay'
 
 /** Module specifiers the web shell shares into the frozen module table (the official PLATFORM_MODULES list). */
 const CLIENT_EXTERNALS = [

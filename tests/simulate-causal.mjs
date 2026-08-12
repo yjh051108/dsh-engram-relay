@@ -21,6 +21,7 @@ import { NgramHashAddressing } from '../lib/engram/hash.js'
 import { EngramStore } from '../lib/engram/store.js'
 import { CausalGraph } from '../lib/engram/causal.js'
 import { EngramWakeEngine } from '../lib/engram/wake.js'
+import { buildGraphView, assertGraphView } from './graph-view.mjs'
 
 /**
  * 主题 A / B：**完全不相交的 ASCII 词集**（拼音代号）——任意两条文本
@@ -68,7 +69,7 @@ function populate(store, graph) {
       const causes = p > 0 ? [nodes[chainName][p - 1].id] : []
       const e = store.add({
         kind: c.kind, title: c.label, summary: c.text,
-        scope: null, sessionId: 'sim', turn: p, causes, effects: [], importance: 0.8,
+        scope: null, sessionId: 'sim', turn: p, causes, effects: [], links: [], importance: 0.8,
       })
       nodes[chainName].push(e)
     }
@@ -169,6 +170,21 @@ async function main() {
         console.log(`查询 ${ex.name} → ${ex.returned.join(' | ')}`)
       }
     }
+
+    // 5. 图谱维度（GraphView 数据面完整性，见 tests/graph-view.mjs）
+    const gv = buildGraphView(store, { sessionId: 'sim' })
+    const { causes, links } = assertGraphView(gv, { label: 'sim-causal', expectedEdges: 9 })
+    // 分层准入：本会话可见全部 10 节点；匿名视角（无 sessionId/cwd）只 global
+    // → 0（全 session 层）；异会话视角 → 0（会话记忆不跨会话泄露）
+    const gvAnon = buildGraphView(store, {})
+    const gvOther = buildGraphView(store, { sessionId: 'other-sess' })
+    if (gv.total !== 10 || gvAnon.total !== 0 || gvOther.total !== 0) {
+      throw new Error(`图谱准入失败: sim=${gv.total}, anon=${gvAnon.total}, other=${gvOther.total}`)
+    }
+    console.log('\n--- 图谱维度 ---')
+    console.log(`节点 ${gv.total}，边 ${gv.edges.length}（因果 ${causes} 实线 / link ${links} 虚线）`)
+    console.log(`层分布: ${JSON.stringify(gv.layerCounts)}`)
+    console.log(`准入: 本会话 ${gv.total} | 匿名 ${gvAnon.total} | 异会话 ${gvOther.total}（分层隔离 ✓）`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

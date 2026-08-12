@@ -48,9 +48,10 @@ function resolveNode(relay: EngramRelay, ref: string): EngramNode | undefined {
   return relay.store.byTitle(t) ?? relay.store.get(t)
 }
 
-/** 入口行渲染（[[标题]][层] 摘要）。 */
+/** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
 function entryLine(e: EngramNode): string {
-  return `- [[${e.title}]][${e.layer}] ${e.summary}`
+  const pendingMark = e.status === 'pending' ? ' ⏳' : ''
+  return `- [[${e.title}]][${e.layer}]${pendingMark} ${e.summary}`
 }
 
 export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () => void {
@@ -192,6 +193,150 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         }
       }
       return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条，因果 ↑${causes.length} ↓${effects.length}）`
+    },
+  })))
+
+  // ---- engram_propose：提议写入（用户确认制：pending 不参与检索，确认后才生效） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_propose',
+    description: '提议一条记忆节点（**用户确认制**）：写入后为待确认状态（⏳），不参与 recall/唤醒命中；用户确认后（engram_confirm）才生效。用于模型自动沉淀/不确定该不该记的内容。参数与 engram_store 相同；分层/类型准则见 engram_store 描述。',
+    parameters: {
+      layer: {
+        type: 'string',
+        required: true,
+        description: `记忆分层（AI 自主决策）：${ENGRAM_LAYERS.join('/')}（见 engram_store 描述）`,
+      },
+      kind: {
+        type: 'string',
+        required: true,
+        description: `记忆类型：${KINDS.join('/')}`,
+      },
+      title: {
+        type: 'string',
+        required: true,
+        description: '入口锚点标题（如 [[部署端口决策]]；唤醒列表展示，Obsidian 风格）',
+      },
+      summary: {
+        type: 'string',
+        required: true,
+        description: '一句话摘要（渐进披露第一层）',
+      },
+      content: {
+        type: 'string',
+        description: '完整正文（渐进披露第二层，展开时给）',
+      },
+      links: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：关联节点的标题（Obsidian 双向链接 [[标题]]）',
+      },
+      causes: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：导致本条记忆的已有节点 id 列表（因果前因）',
+      },
+      effects: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：本条记忆导致的已有节点 id 列表（因果后果）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const viewer = viewerOf(exec)
+      const layer = String(args.layer) as EngramLayer
+      if (!ENGRAM_LAYERS.includes(layer)) {
+        return `错误：layer 必须是 ${ENGRAM_LAYERS.join('/')}（收到 ${layer}）`
+      }
+      const kind = String(args.kind)
+      if (!KINDS.includes(kind as EngramKind)) {
+        return `错误：kind 必须是 ${KINDS.join('/')}（收到 ${kind}）`
+      }
+      const title = String(args.title)
+      const summary = String(args.summary)
+      const content = String(args.content ?? '')
+      const links = Array.isArray(args.links) ? args.links.map(String) : []
+      const causes = Array.isArray(args.causes) ? args.causes.map(String) : []
+      const effects = Array.isArray(args.effects) ? args.effects.map(String) : []
+      if (layer === 'project' && !viewer.cwd) {
+        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
+      }
+      if (layer === 'session' && !viewer.sessionId) {
+        return `错误：session 层需要会话上下文（无会话视角——建议改用 global）`
+      }
+      const e = relay.store.add({
+        kind: kind as EngramKind,
+        layer,
+        projectId: layer === 'project' ? viewer.cwd! : null,
+        title,
+        summary,
+        content,
+        links,
+        sessionId: viewer.sessionId ?? relay.currentSessionId,
+        turn: relay.lastTurnAt,
+        causes,
+        effects,
+        importance: 1,
+        status: 'pending',
+      })
+      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，哈希槽位 ${e.slots.length} 个）——用户确认（engram_confirm）后才会参与检索/唤醒`
+    },
+  })))
+
+  // ---- engram_confirm：确认待确认节点（确认后参与检索/唤醒） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_confirm',
+    description: '确认一个待确认（⏳）记忆节点：确认后参与 recall/唤醒命中。参数为节点引用（id 或 [[标题]]）。已确认节点调用幂等无副作用。',
+    parameters: {
+      ref: {
+        type: 'string',
+        required: true,
+        description: '节点引用（id 或 [[标题]]）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const node = resolveNode(relay, String(args.ref))
+      if (!node) return `未找到节点 [[${args.ref}]]`
+      const viewer = viewerOf(exec)
+      if (!isVisible(node, viewer)) {
+        return `错误：只能确认当前会话可见的节点（global + 本目录 project + 本会话 session）`
+      }
+      if (node.status !== 'pending') {
+        return `[[${node.title}]] 不是待确认状态（当前 ${node.status ?? 'confirmed'}），无需确认`
+      }
+      relay.store.confirmNode(node.id)
+      return `已确认 [[${node.title}]]（${node.layer}·${node.kind}）——现在参与检索与唤醒`
+    },
+  })))
+
+  // ---- engram_reject：拒绝（删除）待确认节点 ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_reject',
+    description: '拒绝（删除）一个待确认（⏳）记忆节点。**只能删除 pending 节点**（已确认节点不可拒删，防止误删已生效记忆——如需删除请用 engram_remove）。',
+    parameters: {
+      ref: {
+        type: 'string',
+        required: true,
+        description: '节点引用（id 或 [[标题]]）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const node = resolveNode(relay, String(args.ref))
+      if (!node) return `未找到节点 [[${args.ref}]]`
+      const viewer = viewerOf(exec)
+      if (!isVisible(node, viewer)) {
+        return `错误：只能拒绝当前会话可见的节点（global + 本目录 project + 本会话 session）`
+      }
+      if (node.status !== 'pending') {
+        return `[[${node.title}]] 不是待确认状态（当前 ${node.status ?? 'confirmed'}）——拒绝仅对 ⏳待确认 节点生效；已确认节点如需删除请用 engram_remove`
+      }
+      relay.store.rejectNode(node.id)
+      return `已拒绝并删除待确认节点 [[${node.title}]]`
     },
   })))
 

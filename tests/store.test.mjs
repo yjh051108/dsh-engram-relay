@@ -4,7 +4,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -87,6 +87,31 @@ test('store: remove deletes and persists', () => {
     assert.equal(store.remove(e.id), true)
     assert.equal(store.count(), 0)
     assert.equal(existsSync(join(dir, 'engrams.jsonl')), true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('store: 旧数据加载归一化——缺 layer/slots/links 的持久化不产生 undefined/NaN', () => {
+  const dir = tempDir()
+  try {
+    // 手工写入 v0.2.0 分层前格式的旧节点（缺 layer/projectId/slots/links/causes/effects）
+    writeFileSync(
+      join(dir, 'engrams.jsonl'),
+      '{"id":"e-old-1","kind":"fact","title":"旧节点","summary":"分层前写入","content":"","sessionId":"s1","turn":0,"importance":0.5,"hits":0,"lastHitAt":null,"createdAt":1}\n',
+      'utf8',
+    )
+    const store = new EngramStore(dir)
+    assert.equal(store.count(), 1, '旧节点应加载成功（不被 slots 缺失丢弃）')
+    const n = store.get('e-old-1')
+    assert.equal(n?.layer, 'session', '缺 layer 按旧语义归 session')
+    assert.equal(n?.projectId, null)
+    assert.deepEqual(n?.links, [])
+    assert.deepEqual(n?.causes, [])
+    assert.deepEqual(n?.effects, [])
+    assert.deepEqual(n?.slots, [])
+    // layerCounts 不再出现 undefined 键（曾 JSON 序列化为 "undefined":null）
+    assert.deepEqual(store.layerCounts(), { global: 0, project: 0, session: 1 })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

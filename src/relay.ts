@@ -19,6 +19,7 @@
 
 import type { Context as CordisContext } from 'cordis'
 import type LlmService from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import type CompactService from '@deepseek-ai/dsh-compact'
@@ -29,8 +30,10 @@ import { NgramHashAddressing } from './engram/hash.js'
 import { EngramWakeEngine, type WakeViewer } from './engram/wake.js'
 import { RelayModel } from './model/relay-model.js'
 import { installGraphApi } from './graph-api.js'
-import type { EngramLayer, EngramNode } from './engram/store.js'
+import { ENGRAM_LAYERS, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
 import type { EngramRelayConfig } from './types.js'
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export interface EngramRelayDeps {
   llm: LlmService
@@ -74,6 +77,8 @@ export class EngramRelay {
     // 1. 请求前唤醒（llm/stream 旁路观察，不包装流）。
     this.ctx.on('llm/stream', (options, next) => {
       if (this.config.enabled) {
+        // 捕获最近一次模型调用的路由（LLM 蒸馏复用同一 provider/model）
+        this.lastLlmRoute = { provider: options.provider, model: options.model }
         const sessionId = (options as { sessionId?: string }).sessionId
         if (sessionId) {
           // 分层准入需要查看者视角：sessionId + 当前工作目录（cwd 经
@@ -94,9 +99,11 @@ export class EngramRelay {
     })
 
     // 2. 记忆段注入（systemPrompt 装配时渲染最新唤醒结果，超稀疏）。
+    // order 9997：动态内容尾部化（参考官方 system prompt 缓存友好设计——
+    // 召回结果每轮不同，放最尾使前缀缓存保持命中）。
     this.ctx.systemPrompt.context({
       name: 'engram:relay',
-      order: 800,
+      order: 9997,
       text: () => this.renderMemorySection(),
     })
 
@@ -163,14 +170,93 @@ export class EngramRelay {
 
   private lastRecallText: string | null = null
 
-  /** 回合后蒸馏：<1B 模型把最近回合内容蒸馏为 engram。 */
+  /** 回合后蒸馏：LLM 把最近回合内容提取为 engram（⏳待确认，用户确认后生效）。 */
   private async maybeDistill(): Promise<void> {
+    this.debugLog(`distill called: everyTurns=${this.config.distillEveryTurns} convLen=${(this.lastConversationText ?? '').length} route=${this.lastLlmRoute ? `${this.lastLlmRoute.provider}/${this.lastLlmRoute.model}` : 'none'}`)
     if (this.config.distillEveryTurns === 0) return
     const conversation = this.lastConversationText ?? ''
-    await this.model.distillTurn(this.store, this.graph, conversation, this.currentSessionId ?? '', this.lastTurnAt)
+    if (!conversation.trim()) {
+      this.debugLog('distill skip: conversation empty')
+      return
+    }
+    const route = this.lastLlmRoute
+    if (!route) {
+      this.ctx.logger?.warn?.('[engram-relay] distill skipped: no llm route captured yet')
+      this.debugLog('distill skip: no llm route')
+      return
+    }
+    let text = ''
+    try {
+      const stream = this.ctx.llm.stream({
+        provider: route.provider,
+        model: route.model,
+        system: DISTILL_SYSTEM_PROMPT,
+        messages: [createUserMessage({
+          source: { kind: 'user' },
+          content: [{ type: 'text', text: conversation.slice(0, 6000) }],
+        })],
+        temperature: 0.3,
+        maxTokens: 800,
+      })
+      for await (const chunk of stream) {
+        if (chunk.type === 'text-delta') text += chunk.text
+      }
+      this.debugLog(`distill llm ok: outLen=${text.length}`)
+    } catch (error) {
+      this.ctx.logger?.warn?.('[engram-relay] distill llm failed: %s', String(error))
+      this.debugLog(`distill llm FAILED: ${String(error)}`)
+      return
+    }
+    const parsed = parseDistillJson(text)
+    if (!parsed || parsed.length === 0) {
+      this.ctx.logger?.warn?.('[engram-relay] distill output unparsable/empty: %s', text.slice(0, 160))
+      this.debugLog(`distill output unparsable/empty: ${text.slice(0, 160)}`)
+      return
+    }
+    this.debugLog(`distill parsed: ${parsed.length} items`)
+    // 自动沉淀 → ⏳待确认（用户确认制合流：不擅自写入生效记忆）
+    let proposed = 0
+    const sessionId = this.currentSessionId ?? ''
+    const cwd = this.currentCwd ?? null
+    for (const item of parsed) {
+      const layer = item.layer as EngramLayer
+      if (!ENGRAM_LAYERS.includes(layer)) continue
+      if (layer === 'project' && !cwd) continue
+      if (layer === 'session' && !sessionId) continue
+      if (!item.title || !item.summary) continue
+      this.store.add({
+        kind: (item.kind && KINDS.has(item.kind)) ? item.kind as EngramKind : 'note',
+        layer,
+        projectId: layer === 'project' ? cwd : null,
+        title: item.title,
+        summary: item.summary,
+        content: item.content ?? '',
+        links: [],
+        sessionId: layer === 'session' ? sessionId : null,
+        turn: this.lastTurnAt,
+        causes: [],
+        effects: [],
+        importance: 0.6,
+        status: 'pending',
+      })
+      proposed++
+    }
+    this.debugLog(`distill proposed: ${proposed}`)
+    this.ctx.logger?.info?.('[engram-relay] distill: %d 条回合记忆已沉淀为 ⏳待确认节点', proposed)
+  }
+
+  /** 蒸馏排查日志（写入图谱目录 distill-debug.log）。 */
+  private debugLog(msg: string): void {
+    try {
+      appendFileSync(join(this.store.dir, 'distill-debug.log'), `${new Date().toISOString()} ${msg}\n`)
+    } catch {
+      // 日志失败静默
+    }
   }
 
   private lastConversationText = ''
+  /** 最近一次模型调用的路由（llm/stream 拦截时捕获；LLM 蒸馏复用）。 */
+  private lastLlmRoute: { provider: string; model: string } | null = null
   /** 当前会话 id（工具写入时归属；会话结束清理用）。 */
   currentSessionId: string | null = null
   /** 当前回合号（工具写入时归属）。 */
@@ -203,13 +289,14 @@ export class EngramRelay {
       enabled: this.config.enabled,
       storeDir: this.store.dir,
       engramCount: this.store.count(),
+      pendingCount: this.store.pending().length,
       layerCounts: this.store.layerCounts(),
       slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
       model: await this.model.describe(),
       budgetTokens: this.config.injectBudgetTokens,
       currentCwd: this.currentCwd,
-      compactCoexist: (this.ctx as unknown as { compact?: unknown }).compact !== undefined,
+      compactCoexist: this.ctx.get('compact') !== undefined,
     }
   }
 }
@@ -264,4 +351,41 @@ function extractQueryText(options: unknown): string {
     }
   }
   return ''
+}
+
+/** 蒸馏允许的 kind 集合。 */
+const KINDS = new Set(['fact', 'decision', 'event', 'note'])
+
+/** LLM 自动蒸馏的系统提示（回合 → 记忆条目，JSON 数组输出）。 */
+const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供的「最近对话回合」中提取值得长期记住的信息（事实/决策/事件/约定/踩坑），最多 3 条。只提取可复用、有长期价值的；寒暄、过程性、一次性内容一律不提取（返回空数组 []）。
+每条输出 JSON 对象：
+- kind: fact(事实/约定) / decision(决策/方案) / event(事件/进展) / note(笔记/其它)
+- layer: global(跨项目通用，如环境/工具/偏好) / project(仅当前项目相关，如架构/踩坑/约定) / session(仅本次会话，如临时进度)
+- title: 简短入口标题（10 字内，如「部署端口决策」）
+- summary: 一句话摘要（30 字内）
+- content: 完整细节（关键参数、上下文，200 字内）
+只输出 JSON 数组，不要任何其他文字。`
+
+/** 宽松解析蒸馏输出：剥代码围栏 → 取首个 JSON 数组。 */
+function parseDistillJson(text: string): Array<{
+  kind?: string
+  layer?: string
+  title?: string
+  summary?: string
+  content?: string
+}> | null {
+  let t = text.trim()
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+  if (fence) t = fence[1]
+  const start = t.indexOf('[')
+  const end = t.lastIndexOf(']')
+  if (start < 0 || end <= start) return null
+  try {
+    const arr = JSON.parse(t.slice(start, end + 1))
+    return Array.isArray(arr)
+      ? arr as Array<{ kind?: string; layer?: string; title?: string; summary?: string; content?: string }>
+      : null
+  } catch {
+    return null
+  }
 }

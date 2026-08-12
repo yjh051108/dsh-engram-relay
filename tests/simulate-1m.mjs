@@ -23,6 +23,7 @@ import { NgramHashAddressing } from '../lib/engram/hash.js'
 import { EngramStore } from '../lib/engram/store.js'
 import { CausalGraph } from '../lib/engram/causal.js'
 import { EngramWakeEngine, estimateTokens } from '../lib/engram/wake.js'
+import { buildGraphView, assertGraphView } from './graph-view.mjs'
 
 const ROUNDS = 2000          // 回合数
 const TOKENS_PER_ROUND = 500 // 每回合 token（消息 + 回复）
@@ -81,7 +82,7 @@ async function main() {
     for (let i = 0; i < ROUNDS; i += 1) {
       const text = makeRoundTokens(TOPICS[i % TOPICS.length], i)
       const d = simulateDistill(text, i)
-      const e = store.add({ ...d, scope: null, sessionId: 'sim', turn: i, causes: [], effects: [] })
+      const e = store.add({ ...d, scope: null, sessionId: 'sim', turn: i, causes: [], effects: [], links: [] })
       // 因果链：每 10 回合连一条（模拟决策依赖）——写进节点 causes，
       // 由最后的 graph.rebuild() 统一建边（addEdge 会被 rebuild 覆盖）
       if (i > 0 && i % 10 === 0) {
@@ -131,6 +132,18 @@ async function main() {
     console.log(`平均注入: ${hits > 0 ? (injectedTotal / hits).toFixed(0) : 0} token/次（预算 ${BUDGET}，稀疏度 ${hits > 0 ? (100 - injectedTotal / hits / BUDGET * 100).toFixed(0) : 100}%）`)
     console.log(`查询耗时: ${queryMs}ms（${(queryMs / QUERIES).toFixed(1)}ms/次）`)
     console.log(`因果链召回: 由 tests/simulate-causal.mjs 专项验证（本仿真只测容量与唤醒命中）`)
+
+    // 3.5 图谱维度（2000 节点大规模数据面：无悬挂边 + 边分类 + 分层准入）
+    const gv = buildGraphView(store, { sessionId: 'sim' })
+    const { causes, links } = assertGraphView(gv, { label: 'sim-1m', expectedEdges: 199 })
+    const gvAnon = buildGraphView(store, {})
+    if (gv.total !== ROUNDS || gvAnon.total !== 0) {
+      throw new Error(`图谱准入失败: sim=${gv.total}, anon=${gvAnon.total}（预期 ${ROUNDS}/0）`)
+    }
+    console.log('\n--- 图谱维度 ---')
+    console.log(`节点 ${gv.total}，边 ${gv.edges.length}（因果 ${causes} 实线 / link ${links} 虚线，无悬挂边）`)
+    console.log(`层分布: ${JSON.stringify(gv.layerCounts)}`)
+    console.log(`准入: 本会话 ${gv.total} | 匿名 ${gvAnon.total}（session 层不外泄 ✓）`)
 
     // 4. 结论
     console.log('\n--- 结论 ---')

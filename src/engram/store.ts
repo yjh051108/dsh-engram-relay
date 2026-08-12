@@ -92,6 +92,8 @@ export interface EngramNode {
   lastHitAt: number | null
   /** 该节点对应的哈希槽位（写入时固化，重哈希可重建）。 */
   slots: string[]
+  /** 确认状态：pending=待确认（不参与检索/唤醒命中），confirmed=已确认（缺省；旧数据视为 confirmed）。 */
+  status?: 'pending' | 'confirmed'
 }
 
 /** 渐进披露视图。 */
@@ -138,6 +140,18 @@ export class EngramStore {
       if (line.trim() === '') continue
       try {
         const e = JSON.parse(line) as EngramNode
+        // —— 旧数据迁移兜底（v0.2.0 跨会话分层前持久化的节点缺字段）——
+        // 在加载边界一次性归一化，保证 isVisible/layerCounts/图谱序列化/
+        // 力导向布局等消费面不遇 undefined/NaN（layer 缺失按旧语义 = 会话级）。
+        e.layer = e.layer ?? 'session'
+        e.projectId = e.projectId ?? null
+        e.slots = Array.isArray(e.slots) ? e.slots : []
+        e.links = Array.isArray(e.links) ? e.links : []
+        e.causes = Array.isArray(e.causes) ? e.causes : []
+        e.effects = Array.isArray(e.effects) ? e.effects : []
+        e.importance = typeof e.importance === 'number' ? e.importance : 0
+        e.hits = typeof e.hits === 'number' ? e.hits : 0
+        e.createdAt = typeof e.createdAt === 'number' ? e.createdAt : 0
         this.byId.set(e.id, e)
         for (const s of e.slots) this.indexSlot(s, e.id)
         if (e.title) this.titleIndex.set(e.title, e.id)
@@ -214,7 +228,7 @@ export class EngramStore {
         if (seen.has(id)) continue
         seen.add(id)
         const e = this.byId.get(id)
-        if (e) hits.push(e)
+        if (e && e.status !== 'pending') hits.push(e)
       }
     }
     hits.sort((a, b) => b.importance - a.importance)
@@ -245,7 +259,7 @@ export class EngramStore {
    * 作为唤醒入口。类似 Obsidian 图谱的视觉密度：密集连接处自然成团。
    */
   clusters(): Array<{ label: string; members: string[]; representative: string }> {
-    const all = this.all()
+    const all = this.all().filter((e) => e.status !== 'pending')
     if (all.length === 0) return []
     // 邻接：节点间有 links 或因果边即相连
     const adj = new Map<string, Set<string>>()
@@ -417,6 +431,29 @@ export class EngramStore {
     e.hits += 1
     e.lastHitAt = Date.now()
     this.persist()
+  }
+
+  /** 全部待确认节点（用户确认制管理面）。 */
+  pending(): EngramNode[] {
+    return this.all().filter((e) => e.status === 'pending')
+  }
+
+  /** 确认一个待确认节点（确认后才参与检索/唤醒命中）。幂等：已确认返回原节点。 */
+  confirmNode(id: string): EngramNode | undefined {
+    const e = this.byId.get(id)
+    if (!e) return undefined
+    if (e.status === 'pending') {
+      e.status = 'confirmed'
+      this.persist()
+    }
+    return e
+  }
+
+  /** 拒绝（删除）一个待确认节点。非 pending 节点不可拒绝（防误删已生效记忆）。 */
+  rejectNode(id: string): boolean {
+    const e = this.byId.get(id)
+    if (!e || e.status !== 'pending') return false
+    return this.remove(id)
   }
 
   remove(id: string): boolean {
