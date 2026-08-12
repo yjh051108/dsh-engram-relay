@@ -155,12 +155,11 @@ export class NgramHashAddressing {
       // 先去掉标点/符号（统一处理，保证带标点与纯文本走同一分支）
       const cleaned = w.replace(/[^\w\u4e00-\u9fff-]+/g, '')
       if (cleaned === '') continue
-      // 纯中文：按字拆（每个汉字是一个 token，保证 n-gram 有意义）
-      const cjk = cleaned.match(/[\u4e00-\u9fff]/g)
-      if (cjk && cjk.length === cleaned.length) {
-        tokens.push(...cjk)
-      } else {
-        tokens.push(cleaned)
+      // 中文汉字逐字拆、连续字母/数字段成词——中英混合词也拆
+      // （否则 "主题0" / "browser-panel操控" 整词成单 token，无 n-gram 可寻址）。
+      const parts = cleaned.match(/[\u4e00-\u9fff]|[\w-]+/g) ?? []
+      for (const p of parts) {
+        tokens.push(p)
       }
     }
     return tokens.filter((x) => x !== '')

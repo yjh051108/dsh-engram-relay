@@ -87,7 +87,7 @@ export class EngramWakeEngine {
     //      哈希命中只是粗筛，语义余弦低于阈值的候选直接剔除；
     //      embedder 不可用时无法判断语义相关性，本轮不注入
     //      （重要度垫底会带来弱相关污染 + 每轮注入的缓存损耗，宁可空手）。
-    const SEMANTIC_MIN_SCORE = 0.42 // bge 中文余弦相似度下限（实测无关文本常 0.3+，0.42 才达语义相关）
+    const semanticMin = this.config.semanticMinScore ?? 0.42
     let raw: Map<string, number> | null | undefined
     if (this.scorers?.embedder) {
       raw = await this.scorers.embedder(query, candidates).catch(() => null)
@@ -95,7 +95,7 @@ export class EngramWakeEngine {
     if (!raw || raw.size === 0) {
       return { engrams: [], reason: 'no-embedder', injectedTokens: 0 }
     }
-    const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= SEMANTIC_MIN_SCORE)
+    const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= semanticMin)
     if (relevant.length === 0) {
       return { engrams: [], reason: 'below-threshold', injectedTokens: 0 }
     }

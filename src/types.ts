@@ -23,4 +23,6 @@ export interface EngramRelayConfig {
    * Obsidian 式开箱即用，不用每回合确认。
    */
   distillRequireConfirm: boolean
+  /** 唤醒语义阈值：bge 余弦相似度下限（低于此值不注入，宁缺毋滥）。 */
+  semanticMinScore: number
 }

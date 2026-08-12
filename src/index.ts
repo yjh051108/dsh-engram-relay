@@ -53,6 +53,7 @@ export interface Config {
   checkpoint: string
   embedModel: string
   distillRequireConfirm: boolean
+  semanticMinScore: number
 }
 
 export const Config: z<Config> = z.object({
@@ -80,6 +81,8 @@ export const Config: z<Config> = z.object({
     .description('bge 嵌入模型目录（本地路径；空 = 服务端 ENGRAM_EMBED_MODEL 环境变量，再空则禁用语义精排）'),
   distillRequireConfirm: z.boolean().default(false)
     .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
+  semanticMinScore: z.number().min(0).max(1).default(0.42)
+    .description('唤醒语义阈值：bge 余弦相似度下限（低于此值不注入；无关记忆零注入）'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -96,6 +99,7 @@ export function apply(ctx: Context, config: Config): void {
     checkpoint: config.checkpoint ?? '',
     embedModel: config.embedModel,
     distillRequireConfirm: config.distillRequireConfirm,
+    semanticMinScore: config.semanticMinScore,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入
