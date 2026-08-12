@@ -71,11 +71,12 @@ wake.ts 只依赖 `VectorIndex.search`——换实现零改动。
 
 ## 6. 第三级 reranker（设计内，实现后置）
 
-- 模型：bge-reranker-base（cross-encoder，交叉注意力比双塔余弦更准）；
+- **主选：Qwen3-Reranker-0.6B**（cross-encoder，2025-2026 中文精度天花板，全面超过 bge-reranker 系；0.6B 是系列最小，CPU 推理 ~2.4GB 内存、~50ms/对）；
+- 备选：bge-reranker-base（278M / ~1.1GB，内存紧张时，与 bge-small-zh 同源）；
 - 用法：② 细筛后的 top-10 → reranker 打分 → 最终 top-3；
-- 成本：每对 ~5ms × 10 = 50ms；**分数差大时跳过**（top-2 的分数差距 >0.1 视为已足够确定，不跑 reranker）；
+- 成本：每对 ~50ms × 10 = 500ms；**分数差大时跳过**（top-2 的分数差距 >0.1 视为已足够确定，不跑 reranker）；
 - 缓存不适用（逐对计算），与双量化向量缓存互补不冲突；
-- CPU 推理：278M 参数 ~1.1GB 内存，普通机器可跑（可配开关）。
+- 可配开关：`rerankerModel: 'qwen3-reranker-0.6b' | 'bge-reranker-base' | ''`（空 = 关闭第三级）。
 
 ## 7. 实施路线（按分发/收益排序）
 
