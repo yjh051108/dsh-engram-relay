@@ -77,13 +77,28 @@ export const Config: z<Config> = z.object({
     .description('Python 服务预热超时'),
   checkpoint: z.string().default('')
     .description('遗留：训练好的原生 engram checkpoint 路径（0.6B 已移除）'),
-  embedModel: z.string().default('F:/dsh/01-memory/engram-trial/bge-small-zh')
-    .description('bge 嵌入模型目录（本地路径；空 = 服务端 ENGRAM_EMBED_MODEL 环境变量，再空则禁用语义精排）'),
+  embedModel: z.string().default('')
+    .description('bge 嵌入模型目录（本地路径；空 = 优先包内 model/bge-small-zh（仓库自带 int8），再空则服务端 ENGRAM_EMBED_MODEL 环境变量）'),
   distillRequireConfirm: z.boolean().default(false)
     .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
   semanticMinScore: z.number().min(0).max(1).default(0.42)
     .description('唤醒语义阈值：bge 余弦相似度下限（低于此值不注入；无关记忆零注入）'),
 })
+
+/** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；旧 engram-trial 路径存在则沿用。 */
+function resolveEmbedModel(configured: string): string {
+  if (configured.trim() !== '') return configured
+  const legacy = 'F:/dsh/01-memory/engram-trial/bge-small-zh'
+  try {
+    const bundled = new URL('../model/bge-small-zh/', import.meta.url).pathname
+    // Windows 路径修复（file:// URL 的 /C:/ 前缀）
+    const bundledPath = process.platform === 'win32'
+      ? bundled.replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\')
+      : bundled
+    if (bundledPath) return bundledPath
+  } catch { /* 解析失败回退 */ }
+  return legacy
+}
 
 export function apply(ctx: Context, config: Config): void {
   const relay = new EngramRelay(ctx, {
@@ -97,7 +112,9 @@ export function apply(ctx: Context, config: Config): void {
     pythonPath: config.pythonPath,
     pythonTimeoutMs: config.pythonTimeoutMs,
     checkpoint: config.checkpoint ?? '',
-    embedModel: config.embedModel,
+    // 包内模型优先：空配置时用仓库自带 model/bge-small-zh（int8，免下载），
+    // 兼容旧配置的 engram-trial 路径（若存在则沿用）。
+    embedModel: resolveEmbedModel(config.embedModel),
     distillRequireConfirm: config.distillRequireConfirm,
     semanticMinScore: config.semanticMinScore,
   })
