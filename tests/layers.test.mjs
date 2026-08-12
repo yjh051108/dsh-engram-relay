@@ -219,16 +219,19 @@ function fakeRelay(dir) {
   }
 }
 
-test('tools: 注册完整工具集（9 个）', () => {
+test('tools: 注册完整工具集（12 个，含用户确认制 propose/confirm/reject）', () => {
   const ctx = fakeToolCtx()
   const relay = fakeRelay(tempDir())
   const dispose = installEngramTools(ctx, relay)
   const names = ctx.collected.map((d) => d.name).sort()
   assert.deepEqual(names, [
+    'engram_confirm',
     'engram_link',
     'engram_open',
     'engram_promote',
+    'engram_propose',
     'engram_recall',
+    'engram_reject',
     'engram_remove',
     'engram_search',
     'engram_status',

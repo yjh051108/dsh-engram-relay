@@ -35,12 +35,24 @@ function sendJson(res: import('node:http').ServerResponse, status: number, body:
 }
 
 /** 从请求 query 解析查看者视角：sessionId → cwd（agents 服务解析会话工作目录）。 */
-function resolveViewer(ctx: CordisContext, url: URL): { sessionId?: string; cwd?: string } {
+function resolveViewer(ctx: CordisContext, url: URL, relay: EngramRelay): { sessionId?: string; cwd?: string } {
   const sessionId = url.searchParams.get('sessionId') ?? undefined
   const agents = ctx.get('agents') as { get?: (id: string) => { session?: { header?: { cwd?: string } } } } | undefined
-  const cwd = sessionId !== undefined
+  let cwd = sessionId !== undefined
     ? agents?.get?.(sessionId)?.session?.header?.cwd
     : undefined
+  // 兜底：agents 表查不到该会话（已归档/非活跃/服务未暴露）时，回退到
+  // relay 持续追踪的当前工作目录——web 图谱 Tab 服务当前活动会话，
+  // 这样 project 层记忆仍然可见，不会只剩 global 一个点。
+  if (cwd === undefined && sessionId !== undefined) {
+    cwd = relay.currentCwd ?? undefined
+  }
+  // 最终兜底：store 里最近写入的 project 层节点所属项目（HMR 后
+  // currentCwd 可能尚未捕获；web 图谱面向「当前/最近项目」的记忆网络）。
+  if (cwd === undefined && sessionId !== undefined) {
+    const recent = relay.store.query({ layer: 'project', limit: 1, recent: true })
+    cwd = recent[0]?.projectId ?? undefined
+  }
   return { sessionId, cwd }
 }
 
@@ -68,7 +80,7 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
     path: '/engram-relay/api',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
-      const viewer = resolveViewer(ctx, url)
+      const viewer = resolveViewer(ctx, url, relay)
 
       // GET /graph：可见节点 + 边（分层准入）
       if (req.method === 'GET' && url.pathname === '/engram-relay/api/graph') {

@@ -19,6 +19,7 @@
 
 import type { Context as CordisContext } from 'cordis'
 import type LlmService from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
@@ -209,7 +210,11 @@ export class EngramRelay {
           content: [{ type: 'text', text: conversation.slice(0, 6000) }],
         })],
         temperature: 0.3,
-        maxTokens: 800,
+        // 蒸馏是结构化抽取任务，不需要思考链：显式关闭 reasoning，
+        // 否则 reasoningEffort=max 的思考会吃光 800 token 预算导致输出为空
+        // （实测 distill-debug.log 大量 `outLen=0`）。
+        reasoningEffort: ReasoningEffortId('off'),
+        maxTokens: 1500,
       })
       for await (const chunk of stream) {
         if (chunk.type === 'text-delta') text += chunk.text
@@ -250,7 +255,9 @@ export class EngramRelay {
         causes: [],
         effects: [],
         importance: 0.6,
-        status: 'pending',
+        // 无确认模式（默认）：蒸馏直接 confirmed 立即生效；distillRequireConfirm
+        // true 时写 pending，等用户 engram_confirm。
+        ...(this.config.distillRequireConfirm ? { status: 'pending' as const } : {}),
       })
       proposed++
     }

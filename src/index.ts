@@ -52,6 +52,7 @@ export interface Config {
   pythonTimeoutMs: number
   checkpoint: string
   embedModel: string
+  distillRequireConfirm: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -77,6 +78,8 @@ export const Config: z<Config> = z.object({
     .description('遗留：训练好的原生 engram checkpoint 路径（0.6B 已移除）'),
   embedModel: z.string().default('')
     .description('bge 嵌入模型目录（本地路径；空 = 服务端 ENGRAM_EMBED_MODEL 环境变量，再空则禁用语义精排）'),
+  distillRequireConfirm: z.boolean().default(false)
+    .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
 })
 
 export function apply(ctx: Context, config: Config): void {
@@ -92,6 +95,7 @@ export function apply(ctx: Context, config: Config): void {
     pythonTimeoutMs: config.pythonTimeoutMs,
     checkpoint: config.checkpoint ?? '',
     embedModel: config.embedModel,
+    distillRequireConfirm: config.distillRequireConfirm,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入

@@ -82,22 +82,26 @@ export class EngramWakeEngine {
     candidates = candidates.filter((e) => isVisible(e, viewer))
     if (candidates.length === 0) return { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
 
-    // 2. 打分：bge 语义精排（首选）→ 遗留门控 → 重要度兜底。
-    //    未出现在打分结果里的候选一律用重要度垫底，保证哈希命中
-    //    永不因打分器缺失而被静默丢弃。
+    // 2. 打分：bge 语义精排（唯一语义判断）→ 重要度仅作排序兜底。
+    //    ⚠️ 相关性门槛（宁缺毋滥）：不相关的记忆一律不注入——
+    //      哈希命中只是粗筛，语义余弦低于阈值的候选直接剔除；
+    //      embedder 不可用时无法判断语义相关性，本轮不注入
+    //      （重要度垫底会带来弱相关污染 + 每轮注入的缓存损耗，宁可空手）。
+    const SEMANTIC_MIN_SCORE = 0.42 // bge 中文余弦相似度下限（实测无关文本常 0.3+，0.42 才达语义相关）
     let raw: Map<string, number> | null | undefined
     if (this.scorers?.embedder) {
       raw = await this.scorers.embedder(query, candidates).catch(() => null)
     }
     if (!raw || raw.size === 0) {
-      if (this.scorers?.scorer) {
-        raw = await this.scorers.scorer(query, candidates).catch(() => new Map<string, number>())
-      } else {
-        raw = new Map<string, number>()
-      }
+      return { engrams: [], reason: 'no-embedder', injectedTokens: 0 }
     }
+    const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= SEMANTIC_MIN_SCORE)
+    if (relevant.length === 0) {
+      return { engrams: [], reason: 'below-threshold', injectedTokens: 0 }
+    }
+    candidates = relevant
     const scores = new Map<string, number>(
-      candidates.map((e) => [e.id, raw?.get(e.id) ?? e.importance]),
+      candidates.map((e) => [e.id, raw!.get(e.id) ?? e.importance]),
     )
 
     // 3. 因果传播（前因/后果双向）。

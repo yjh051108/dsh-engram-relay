@@ -15,7 +15,7 @@
  * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
@@ -136,7 +136,13 @@ export class EngramStore {
   }
 
   private load(): void {
-    for (const line of readFileSync(this.file, 'utf8').split('\n')) {
+    const raw = readFileSync(this.file, 'utf8')
+    // 损坏自愈：整文件 NUL/控制字节（多实例并发写 writeFileSync 的典型损坏）
+    // 会令逐行 JSON.parse 全部失败 → 静默丢光数据。先剥离 NUL 再解析；
+    // 若有效行极少而原始字节很多，备份损坏文件（保留取证），从干净行重建。
+    const cleaned = raw.replace(/\0+/g, '')
+    let loaded = 0
+    for (const line of cleaned.split('\n')) {
       if (line.trim() === '') continue
       try {
         const e = JSON.parse(line) as EngramNode
@@ -155,9 +161,18 @@ export class EngramStore {
         this.byId.set(e.id, e)
         for (const s of e.slots) this.indexSlot(s, e.id)
         if (e.title) this.titleIndex.set(e.title, e.id)
+        loaded++
       } catch {
         // 单条损坏跳过，不拖垮整个存储
       }
+    }
+    if (loaded === 0 && raw.replace(/\s/g, '').length > 64) {
+      // 文件有实质字节但一条都没解析出来 → 大概率损坏：留证 + 重建空库
+      try {
+        const backup = `${this.file}.corrupt-${Date.now()}`
+        renameSync(this.file, backup)
+        console.warn(`[engram-store] corrupt store backed up to ${backup}`)
+      } catch { /* 备份失败不阻塞 */ }
     }
   }
 
@@ -170,11 +185,30 @@ export class EngramStore {
     set.add(id)
   }
 
+  /**
+   * 原子持久化：写临时文件 + rename 替换。
+   *
+   * 背景：web 与 headless 两个 profile 可能同时装配本插件并写同一个
+   * engrams.jsonl；直接 writeFileSync 在多写者下会交错/截断，把文件写坏
+   * （实测出现过整文件 NUL 填充、记忆全丢）。临时文件 + rename 保证任何
+   * 时刻磁盘上要么是旧完整文件、要么是新完整文件，杜绝半写损坏。
+   * Windows 上 rename 覆盖已存在文件会失败，先 unlink 目标再 rename
+   * （窗口期极小，且由上面的「损坏自愈」兜底）。
+   */
   private persist(): void {
     mkdirSync(dirname(this.file), { recursive: true })
     const lines: string[] = []
     for (const e of this.byId.values()) lines.push(JSON.stringify(e))
-    writeFileSync(this.file, lines.join('\n') + '\n', 'utf8')
+    const tmp = `${this.file}.tmp-${process.pid}`
+    writeFileSync(tmp, lines.join('\n') + '\n', 'utf8')
+    try {
+      renameSync(tmp, this.file)
+    } catch {
+      try {
+        unlinkSync(this.file)
+      } catch { /* 目标不存在等，忽略 */ }
+      renameSync(tmp, this.file)
+    }
   }
 
   /**
