@@ -76,7 +76,7 @@ export class EngramRelay {
     this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, {
       embedder: (query, candidates) => this.model.embed(query, candidates),
       scorer: (query, candidates) => this.model.score(query, candidates),
-    }, (query) => this.vectorPrefilter(query))
+    }, (query) => this.vectorPrefilter(query), this.activation)
   }
 
   /**

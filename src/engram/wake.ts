@@ -62,6 +62,8 @@ export class EngramWakeEngine {
     private scorers: WakeScorers | null = null,
     /** 候选预筛钩子（向量索引粗筛用）：返回候选 id 列表；null = 回退哈希 lookup。 */
     private prefilter: ((query: string) => Promise<string[] | null>) | null = null,
+    /** 类脑激活缓存（B=ln(Σt^-d)）：排序融合（阶段 3）；缺省 = 无激活加权。 */
+    private activation: import('./activation.js').ActivationCache | null = null,
   ) {}
 
   /** 每回合入口（自动唤醒，极克制）：哈希预筛 → 查询质量门 → 自动阈值 0.5 → top-1。 */
@@ -159,11 +161,21 @@ export class EngramWakeEngine {
       return 1 + 0.25 * Math.exp(-d / 20)
     }
 
+    // 类脑激活加权（阶段 3）：排序分数 = 语义激活 × sigmoid(基础激活 - 基准)，
+    // 强化历史（命中/展开/链接）驱动——使用即巩固、闲置即遗忘。
+    // 无激活缓存时退化为纯语义排序。
+    const actBias = (id: string): number => {
+      if (!this.activation) return 1
+      const b = this.activation.get(id)
+      // sigmoid 温和提升：B 高（近期多强化）加权，B 低（久未强化）不压死
+      return 1 + 0.6 / (1 + Math.exp(-(b + 1.5))) // B≈0 时 ~1.09，B 大趋 1.6
+    }
+
     const ranked: Array<[string, number]> = []
-    // 主席位：**阈值内**候选按「激活分数 × 时序权重」排序（保留 limit - causalSlots 个）
+    // 主席位：**阈值内**候选按「语义激活 × 激活加权 × 时序权重」排序
     const hitRanked = [...activated.entries()]
       .filter(([id]) => hitIds.has(id) && relevantIds.has(id))
-      .sort((a, b) => b[1] * recency(b[0]) - a[1] * recency(a[0]))
+      .sort((a, b) => b[1] * actBias(b[0]) * recency(b[0]) - a[1] * actBias(a[0]) * recency(a[0]))
     const mainQuota = Math.max(1, limit - causalSlots)
     const mainPicked = hitRanked.slice(0, mainQuota)
     ranked.push(...mainPicked)
