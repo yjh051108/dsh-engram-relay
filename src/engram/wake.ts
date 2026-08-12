@@ -201,9 +201,15 @@ export class EngramWakeEngine {
     }
     ranked.length = Math.min(ranked.length, limit)
 
+    // 动态注入（分数团）：top1 的 0.9 倍以内的都注入（上限 limit）——
+    // 明显第一只注入 1 条（确定，省噪声）；并列相关注入 2-3 条。
+    // 自动唤醒（limit=1）自然收窄到 1 条；手动 recall 可到 3 条。
     const picked: EngramNode[] = []
     let tokens = 0
-    for (const [id] of ranked) {
+    const topScore = ranked[0]?.[1] ?? 0
+    for (const [id, score] of ranked) {
+      if (picked.length >= limit) break
+      if (picked.length > 0 && score < topScore * 0.9) break
       const e = this.store.get(id)
       if (!e) continue
       const cost = estimateTokens(e.title) + estimateTokens(e.summary)
