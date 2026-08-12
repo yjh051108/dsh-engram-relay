@@ -62,20 +62,31 @@ export class EngramWakeEngine {
     private scorers: WakeScorers | null = null,
   ) {}
 
-  /** 每回合入口：收到一次模型请求时尝试唤醒。 */
+  /** 每回合入口（自动唤醒，极克制）：哈希预筛 → 查询质量门 → 自动阈值 0.5 → top-1。 */
   async maybeWake(sessionId: string, _options: GenerateOptions, viewer: WakeViewer = {}): Promise<WakeHit> {
     if (this.store.count() === 0) return { engrams: [], reason: 'empty-store', injectedTokens: 0 }
 
     const query = extractQuery(_options)
     if (query.trim() === '') return { engrams: [], reason: 'no-query', injectedTokens: 0 }
 
-    const hit = await this.query(query, this.config.maxWakePerTurn, { sessionId, ...viewer })
+    // ① 哈希预筛（零成本）：词汇与任何记忆无重叠 → 直接跳过（零注入）。
+    //    这是最大的噪声过滤器——闲聊/过程轮基本在此命中退出。
+    if (this.store.lookup(query, 1).length === 0) {
+      return { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
+    }
+    // ② 查询质量门：太短（口语无锚，如"这个怎么弄"）没有语义锚 → 跳过。
+    const anchorText = query.trim()
+    if (anchorText.length < 8) {
+      return { engrams: [], reason: 'short-query', injectedTokens: 0 }
+    }
+    // ③④ 自动模式：阈值 +0.08（≈0.50，明显相关才注入）+ top-1（唯一入口，干扰最小）。
+    const hit = await this.query(query, 1, { sessionId, ...viewer }, { auto: true })
     this.lastInjection = hit
     return hit
   }
 
-  /** 核心查询：哈希粗筛 → 分层准入 → 语义精排（bge）/门控兜底 → 因果传播 → 分层稀疏选择。 */
-  async query(query: string, limit: number, viewer: WakeViewer = {}): Promise<WakeHit> {
+  /** 核心查询：哈希粗筛 → 分层准入 → 语义精排（bge）→ 因果传播 → 分层稀疏选择。 */
+  async query(query: string, limit: number, viewer: WakeViewer = {}, opts: { auto?: boolean } = {}): Promise<WakeHit> {
     // 1. 确定性哈希粗筛（多取候选：分层准入会过滤掉一部分，保证命中不因
     //    层过滤而丢失——global 常驻候选始终可见）。
     let candidates = this.store.lookup(query, 256)
@@ -90,9 +101,11 @@ export class EngramWakeEngine {
     //      embedder 不可用时无法判断语义相关性，本轮不注入
     //      （重要度垫底会带来弱相关污染 + 每轮注入的缓存损耗，宁可空手）。
     const semanticMin = this.config.semanticMinScore ?? 0.42
+    // 自动唤醒更严：明显相关才注入（0.42 + 0.08 ≈ 0.50），手动 recall 保持 0.42。
+    const autoBoost = opts.auto ? 0.08 : 0
     // 多重比较校正（温和版）：候选越多误过概率越高，但真实系统哈希第一道防线
     // 已把无关候选压到个位数——仅对候选异常膨胀时温和收紧。
-    const threshold = semanticMin + 0.03 * Math.log2(Math.max(1, candidates.length / 16))
+    const threshold = semanticMin + autoBoost + 0.03 * Math.log2(Math.max(1, candidates.length / 16))
     let raw: Map<string, number> | null | undefined
     if (this.scorers?.embedder) {
       raw = await this.scorers.embedder(query, candidates).catch(() => null)
