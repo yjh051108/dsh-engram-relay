@@ -48,6 +48,32 @@ function resolveNode(relay: EngramRelay, ref: string): EngramNode | undefined {
   return relay.store.byTitle(t) ?? relay.store.get(t)
 }
 
+/**
+ * 织网推荐：bge 语义余弦 × 时序归一化加权，返回 top-3 关联候选（供 AI 决策）。
+ * 语义门槛 0.40（推荐可比自动唤醒略宽——决策权在 AI）；时序权重：近 20 回合
+ * 内加权，远期收敛（1 / (1 + Δturn/20)）。
+ */
+async function recommendLinks(relay: EngramRelay, text: string, excludeId: string): Promise<string> {
+  const others = relay.store.all().filter((e) => e.id !== excludeId && e.status !== 'pending')
+  if (others.length === 0) return ''
+  const scores = await relay.model.embed(text.slice(0, 300), others).catch(() => null)
+  if (!scores || scores.size === 0) return ''
+  const curTurn = relay.lastTurnAt
+  const ranked = others
+    .map((e) => {
+      const cosine = scores.get(e.id) ?? 0
+      const turnDist = Math.abs(curTurn - (typeof e.turn === 'number' ? e.turn : 0))
+      const recency = 1 / (1 + turnDist / 20)
+      return { e, cosine, score: cosine * (0.7 + 0.3 * recency) }
+    })
+    .filter((x) => x.cosine >= 0.4)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3)
+  return ranked
+    .map((x, i) => `${i + 1}. [[${x.e.title}]]（语义 ${x.cosine.toFixed(2)} × 时序 ${x.score.toFixed(2)}）${x.e.summary.slice(0, 40)}`)
+    .join('\n')
+}
+
 /** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
 function entryLine(e: EngramNode): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
@@ -200,6 +226,16 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
           target.links.push(title)
           relay.store.add({ ...target, links: target.links }) // 持久化更新
         }
+      }
+      // 织网推荐：AI 没带任何边时，触发一次「bge 语义 + 时序」推荐（不自动建边，
+      // 由 AI 决策——认识的直接选，不认识的展开正文再定或跳过）。
+      if (causes.length === 0 && effects.length === 0 && links.length === 0) {
+        const rec = await recommendLinks(relay, `${title}：${summary}`, e.id)
+        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，无因果/链接）`
+        if (rec) {
+          return `${base}\n\n📎 推荐关联（bge 语义 × 时序，未自动建边——供决策）：\n${rec}\n\n决策：认识的标题直接采纳（engram_link 建边）；不认识的可先 engram_open 展开再定；都不合适就跳过。`
+        }
+        return base + '\n（当前无显著关联候选）'
       }
       return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条，因果 ↑${causes.length} ↓${effects.length}）`
     },
