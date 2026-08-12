@@ -62,21 +62,24 @@ export class BruteForceIndex implements VectorIndex {
     return this.rowById.has(id)
   }
 
-  /** 追加一条（行序 = add 顺序；删除标记 tombstone 惰性压缩）。 */
+  /** 追加一条（行序 = add 顺序；删除标记 tombstone 惰性压缩）。容量翻倍增长（摊还 O(1)/条）。 */
   add(id: string, vec: Float32Array): void {
     if (vec.length !== this.dim || this.rowById.has(id)) return
     const row = this.f16.length / this.dim
-    const nf16 = new Float32Array(this.f16.length + this.dim)
+    const need = this.f16.length + this.dim
+    const cap = Math.max(need, this.f16.length * 2 || 1024 * this.dim)
+    const nf16 = new Float32Array(cap)
     nf16.set(this.f16)
-    const ni8 = new Int8Array(this.i8.length + this.dim)
+    const ni8 = new Int8Array(cap)
     ni8.set(this.i8)
     const q = quantizeI8(vec)
     for (let i = 0; i < this.dim; i++) {
       nf16[row * this.dim + i] = vec[i]
       ni8[row * this.dim + i] = q[i]
     }
-    this.f16 = nf16
-    this.i8 = ni8
+    // 截断到实际长度（length 字段语义：已用行数 × dim）
+    this.f16 = nf16.length === need ? nf16 : nf16.subarray(0, need)
+    this.i8 = ni8.length === need ? ni8 : ni8.subarray(0, need)
     this.rowById.set(id, row)
     this.dirty = true
   }
