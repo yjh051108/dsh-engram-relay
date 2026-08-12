@@ -1,8 +1,9 @@
 # dsh-engram-relay
 
-> 单会话上下文增强：大一统记忆图谱（Obsidian 式双向链接 + 因果双向追溯 + 自组织聚类），
+> 跨会话分层记忆：大一统记忆图谱（Obsidian 式双向链接 + 因果双向追溯 + 自组织聚类），
 > N-gram 哈希确定性寻址 × bge 语义精排 × 因果传播的超稀疏主动唤醒，渐进披露
-> （入口 = `[[标题]]` + 摘要，按需展开正文）；会话结束即弃，不做跨会话记忆沉淀。
+> （入口 = `[[标题]]` + 摘要，按需展开正文）；**分层归属由 AI 自主决策**——
+> global 全局持久 / project 项目持久 / session 会话临时，跨会话沉淀与召回。
 
 ## 是什么
 
@@ -24,24 +25,32 @@
 │   ↑ 超稀疏文本注入（systemPrompt 记忆段，预算 600 token）  │
 ├────────────────────────────────────────────────────────┤
 │ Node 插件（llm/stream 转接，零第三方运行时依赖）           │
-│  ├─ 请求前：哈希粗筛 → bge 精排 → 因果传播 → 稀疏注入      │
-│  ├─ 写入：模型调 engram_store 落节点（标题/摘要/正文/因果） │
-│  ├─ 回合后：自动蒸馏（遗留 0.6B 轨，已移除时跳过）         │
-│  └─ 会话结束：agent/disposed → 清空该会话全部 engram      │
+│  ├─ 请求前：哈希粗筛 → 分层准入 → bge 精排 → 因果传播 →    │
+│  │           稀疏注入（global 全可见 / project 同 cwd /    │
+│  │           session 本会话）                             │
+│  ├─ 写入：模型调 engram_store 落节点（自主分层 + 因果）     │
+│  ├─ 维护：search/link/update/remove/promote（织图谱/转层） │
+│  └─ 会话结束：agent/disposed → 只清 session 层临时记忆     │
+│            （global/project 跨会话持久）                   │
 ├────────────────────────────────────────────────────────┤
 │ Python 转接服务（JSON 行协议）                            │
 │  └─ embed op：bge-small-zh-v1.5 编码（懒加载，本地离线）   │
 └────────────────────────────────────────────────────────┘
 ```
 
-- **大一统记忆图谱**：节点 = `{title, summary, content, links[], causes[], effects[]}`，
-  `[[标题]]` 双向链接（Obsidian 风格）+ 因果双向追溯；**不硬编码分层**——主题结构由
-  链接/因果密度自组织成簇（连通分量），唤醒时给出簇概览；
-- **渐进披露**：唤醒只注入入口（`[[标题]]` + 摘要 + ↑因/↓果），模型可经 `engram_open`
+- **大一统记忆图谱**：节点 = `{layer, title, summary, content, links[], causes[], effects[]}`，
+  `[[标题]]` 双向链接（Obsidian 风格）+ 因果双向追溯；**层是节点属性（不分家）**，
+  主题结构由链接/因果密度自组织成簇（连通分量），唤醒时给出簇概览；
+- **预设分层 + AI 自主决策**：3 层 = `global`（全局持久·所有会话）/ `project`（项目持久·
+  按工作目录隔离）/ `session`（会话临时·结束清理）；模型经 `engram_store` 写入时**自主决策**
+  归属层（跨会话长期→global、本项目→project、仅本次→session），可在会话结束前
+  `engram_promote` 把 session 临时记忆转长期；
+- **跨会话准入**：唤醒/检索按查看者视角过滤——global 所有会话可见、project 仅同工作目录、
+  session 仅本会话；session 层随会话结束清理，global/project 跨会话沉淀与召回；
+- **渐进披露**：唤醒只注入入口（`[[标题]]` + 层 + 摘要 + ↑因/↓果），模型可经 `engram_open`
   按需展开正文与因果邻居——超稀疏且不丢细节；
 - **与官方 compact 共存**：DSH 自带的 `dsh-compact-basic` 负责腾 KV（有损总结式折叠）；
-  engram 在折叠前实时留底（`agent/turn-stopping`），细节可唤醒找回；
-- **会话级**：只做单次会话上下文增强，`agent/disposed` 清空该会话记忆，无跨会话沉淀。
+  engram 在折叠前实时留底（`agent/turn-stopping`），细节可唤醒找回。
 
 ## 安装
 
@@ -58,10 +67,15 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 
 | 工具 | 作用 |
 |---|---|
-| `engram_recall` | 主动查询记忆（混合检索 + 因果链展开） |
-| `engram_store` | 显式写入（fact/decision/event/note，本会话内，会话结束即弃） |
-| `engram_open` | 展开入口（正文 + 链接 + 因果邻居，渐进披露第二层） |
-| `engram_status` | 查看记忆表状态（条目/槽位/模型/预算） |
+| `engram_recall` | 按需唤醒检索（跨会话分层准入 + 因果邻接，可过滤层） |
+| `engram_store` | 写入记忆（**AI 自主决策分层** + 因果前因/后果 + 双向链接） |
+| `engram_open` | 展开入口（正文 + 层 + 链接 + 因果邻居，渐进披露第二层） |
+| `engram_search` | 盘点记忆图谱（按层/项目/类型/关键词检索，遵守可见性） |
+| `engram_link` | 显式连接节点（因果/依赖/引用边，双向链接织图谱） |
+| `engram_update` | 修正节点（摘要/正文/链接/重要度/标题） |
+| `engram_remove` | 删除节点（谨慎，不可恢复） |
+| `engram_promote` | 提升层（session→project/global，会话结束前转长期） |
+| `engram_status` | 查看服务状态（分层统计/槽位/因果边/模型/预算） |
 
 ## 配置（profile patch，如 `~/.dsh/profiles/web/cordis.patch.yml`）
 

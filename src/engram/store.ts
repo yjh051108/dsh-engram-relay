@@ -24,10 +24,48 @@ import { NgramHashAddressing, type HashResult } from './hash.js'
 /** 记忆节点类型（统一，不预分轨；kind 仅作展示标签，非分层）。 */
 export type EngramKind = 'fact' | 'decision' | 'event' | 'note'
 
+/**
+ * 记忆分层（预设骨架，归属由 AI 自主决策）——分层的本质 = 生命周期 × 可见范围：
+ *  - global：全局持久，所有会话可见（长期事实/用户偏好）
+ *  - project：项目持久，仅同工作目录（cwd）会话可见（项目约定/决策）
+ *  - session：会话临时，仅本会话（会话结束清理）
+ * 层是**节点属性**（大一统图谱，不分家），不是物理分库。
+ */
+export type EngramLayer = 'global' | 'project' | 'session'
+
+/** 分层常量（工具 description 引用）。 */
+export const ENGRAM_LAYERS: EngramLayer[] = ['global', 'project', 'session']
+
+/**
+ * 分层可见性判定（跨会话准入的单源逻辑，wake/tools/图谱 API 共用）。
+ *  - global：所有会话可见；
+ *  - project：仅 node.projectId === viewer.cwd 的会话；
+ *  - session：仅 node.sessionId === viewer.sessionId 的本会话。
+ * 空 viewer（无 sessionId 且无 cwd）向后兼容全可见（生产路径总传 viewer，
+ * 缺省仅测试/直接调用）。
+ */
+export function isVisible(e: EngramNode, viewer: { sessionId?: string; cwd?: string }): boolean {
+  if (viewer.sessionId === undefined && viewer.cwd === undefined) return true
+  switch (e.layer) {
+    case 'global':
+      return true
+    case 'project':
+      return e.projectId !== null && e.projectId === viewer.cwd
+    case 'session':
+      return e.sessionId !== null && e.sessionId === viewer.sessionId
+    default:
+      return false
+  }
+}
+
 /** 渐进披露层级。 */
 export interface EngramNode {
   id: string
   kind: EngramKind
+  /** 分层归属（AI 自主决策）：global=全局持久 / project=项目持久 / session=会话临时。 */
+  layer: EngramLayer
+  /** project 层标识（会话工作目录；global/session 层为 null）。 */
+  projectId: string | null
   /** 入口锚点（唤醒列表展示；如 Obsidian 的页面标题）。 */
   title: string
   /** 一句话摘要（渐进披露第一层——入口列表只给这个）。 */
@@ -128,13 +166,17 @@ export class EngramStore {
   /**
    * 写入/更新一个记忆节点：按 title+summary 哈希寻址，挂到命中槽位。
    * 渐进披露：title/summary 是入口层，content 是展开层。
+   * layer 缺省 'session'（向后兼容：旧调用语义 = 会话级即弃）。
    */
-  add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots'>): EngramNode {
+  add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots' | 'layer' | 'projectId'>
+    & { layer?: EngramLayer; projectId?: string | null }): EngramNode {
     const keyText = `${input.title} ${input.summary}`
     const result = this.hasher.hash(keyText)
     const slots = this.hasher.slotKeys(result)
     const node: EngramNode = {
       ...input,
+      layer: input.layer ?? 'session',
+      projectId: input.projectId ?? null,
       id: createEngramId(),
       createdAt: Date.now(),
       hits: 0,
@@ -294,6 +336,80 @@ export class EngramStore {
     return this.slotIndex.size
   }
 
+  /**
+   * 分层统一查询（维护/检索入口）：按层/项目/会话/类型/时间过滤。
+   * 缺省按 importance 降序；recent=true 按创建时间倒序。
+   */
+  query(filter: {
+    layer?: EngramLayer
+    projectId?: string | null
+    sessionId?: string
+    kind?: EngramKind
+    since?: number
+    until?: number
+    limit?: number
+    recent?: boolean
+  } = {}): EngramNode[] {
+    let list = this.all()
+    if (filter.layer !== undefined) list = list.filter((e) => e.layer === filter.layer)
+    if (filter.projectId !== undefined) list = list.filter((e) => e.projectId === filter.projectId)
+    if (filter.sessionId !== undefined) list = list.filter((e) => e.sessionId === filter.sessionId)
+    if (filter.kind !== undefined) list = list.filter((e) => e.kind === filter.kind)
+    if (filter.since !== undefined) list = list.filter((e) => e.createdAt >= filter.since!)
+    if (filter.until !== undefined) list = list.filter((e) => e.createdAt <= filter.until!)
+    list = [...list]
+    if (filter.recent) list.sort((a, b) => b.createdAt - a.createdAt)
+    else list.sort((a, b) => b.importance - a.importance)
+    if (filter.limit !== undefined && filter.limit > 0) list = list.slice(0, filter.limit)
+    return list
+  }
+
+  /** 分层统计（status 工具用）。 */
+  layerCounts(): Record<EngramLayer, number> {
+    const counts: Record<EngramLayer, number> = { global: 0, project: 0, session: 0 }
+    for (const e of this.byId.values()) counts[e.layer] += 1
+    return counts
+  }
+
+  /**
+   * 提升/转层：改 layer 与 projectId（保留 id/因果/链接——引用不失效）。
+   * 会话结束前把 session 临时记忆提升为 project/global 跨会话持久。
+   */
+  promote(id: string, layer: EngramLayer, projectId: string | null = null): EngramNode | undefined {
+    const e = this.byId.get(id)
+    if (!e) return undefined
+    e.layer = layer
+    e.projectId = layer === 'project' ? projectId : null
+    this.persist()
+    return e
+  }
+
+  /** 修正节点字段（title 变更会同步标题索引；层变更用 promote）。 */
+  update(id: string, patch: Partial<Pick<EngramNode, 'title' | 'summary' | 'content' | 'links' | 'causes' | 'effects' | 'importance'>>): EngramNode | undefined {
+    const e = this.byId.get(id)
+    if (!e) return undefined
+    if (patch.title !== undefined && patch.title !== e.title) {
+      this.titleIndex.delete(e.title)
+      e.title = patch.title
+      if (e.title) this.titleIndex.set(e.title, e.id)
+    }
+    if (patch.summary !== undefined) e.summary = patch.summary
+    if (patch.content !== undefined) e.content = patch.content
+    if (patch.links !== undefined) e.links = patch.links
+    if (patch.causes !== undefined) e.causes = patch.causes
+    if (patch.effects !== undefined) e.effects = patch.effects
+    if (patch.importance !== undefined) e.importance = patch.importance
+    this.persist()
+    return e
+  }
+
+  /** 清空一个项目（project 层全部节点；项目移除/归档时）。 */
+  clearProject(projectId: string): number {
+    const doomed = this.all().filter((e) => e.layer === 'project' && e.projectId === projectId)
+    for (const e of doomed) this.remove(e.id)
+    return doomed.length
+  }
+
   /** 登记一次唤醒（LRU 衰减）。 */
   touch(id: string): void {
     const e = this.byId.get(id)
@@ -320,22 +436,13 @@ export class EngramStore {
   }
 
   /**
-   * 会话隔离：清空某会话的全部节点（单会话增强——会话结束即弃）。
+   * 会话隔离（分层生命周期）：只清该会话的 **session 层** 临时记忆；
+   * global/project 跨会话层保留——跨会话沉淀的核心转变。
+   * 复用 remove() 统一清理索引（byId/titleIndex/slotIndex）。
    */
   clearSession(sessionId: string): number {
-    const doomed = this.all().filter((e) => e.sessionId === sessionId)
-    for (const e of doomed) {
-      this.byId.delete(e.id)
-      if (e.title) this.titleIndex.delete(e.title)
-      for (const s of e.slots) {
-        const set = this.slotIndex.get(s)
-        if (set) {
-          set.delete(e.id)
-          if (set.size === 0) this.slotIndex.delete(s)
-        }
-      }
-    }
-    if (doomed.length > 0) this.persist()
+    const doomed = this.all().filter((e) => e.sessionId === sessionId && e.layer === 'session')
+    for (const e of doomed) this.remove(e.id)
     return doomed.length
   }
 }

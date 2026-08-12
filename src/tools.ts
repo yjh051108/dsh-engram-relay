@@ -1,19 +1,28 @@
 /**
- * installEngramTools — 模型面工具注册。
+ * installEngramTools — 模型面工具注册（跨会话分层记忆版）。
  *
- * 工具：
- *  - engram_recall：主动查询外置 engram 记忆（N-gram 哈希寻址 + 因果链）
- *  - engram_store：显式写入一条记忆（全局/项目/规则，绕过自动蒸馏）
- *  - engram_status：查看存储统计、槽位占用与唤醒情况
+ * 工具集（大一统记忆图谱 + 分层 + 因果链接）：
+ *  - engram_recall：按需唤醒检索（跨会话分层准入 + 因果邻接）
+ *  - engram_store：写入一条记忆（**AI 自主决策分层** + 因果前因/后果）
+ *  - engram_open：展开入口（渐进披露第二层：正文/链接/因果）
+ *  - engram_search：检索记忆图谱（分层/项目/类型/关键词，维护回顾）
+ *  - engram_link：显式连接节点（因果/双向链接——织图谱）
+ *  - engram_update：修正节点字段
+ *  - engram_remove：删除节点
+ *  - engram_promote：提升层（session→project/global，会话结束前转长期）
+ *  - engram_status：记忆服务状态（分层统计/索引/模型）
+ *
+ * 可见性边界（跨会话分层）：global 所有会话 / project 同工作目录 / session
+ * 本会话。工具 execute 从 exec.agent 取 sessionId + cwd 作为查看者视角。
  */
 
 import type { Context as CordisContext } from 'cordis'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import z from 'schemastery'
 
 import { EngramRelay } from './relay.js'
-import type { EngramKind } from './engram/store.js'
+import { ENGRAM_LAYERS, isVisible, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
+import type { CausalEdgeKind } from './engram/causal.js'
 
 type ToolsContext = CordisContext & { tools: ToolRegistry }
 
@@ -24,17 +33,42 @@ const TEXT_OUTPUT = {
 
 const KINDS: EngramKind[] = ['fact', 'decision', 'event', 'note']
 
+/** 查看者视角（跨会话可见性边界）：从工具执行上下文解析。 */
+function viewerOf(exec: unknown): { sessionId?: string; cwd?: string } {
+  const agent = (exec as { agent?: { session?: { id?: string; header?: { cwd?: string } } } })?.agent
+  return {
+    sessionId: agent?.session?.id,
+    cwd: agent?.session?.header?.cwd,
+  }
+}
+
+/** 节点引用解析：支持 id 或 [[标题]]/标题。 */
+function resolveNode(relay: EngramRelay, ref: string): EngramNode | undefined {
+  const t = String(ref).replace(/^\[\[|\]\]$/g, '').trim()
+  return relay.store.byTitle(t) ?? relay.store.get(t)
+}
+
+/** 入口行渲染（[[标题]][层] 摘要）。 */
+function entryLine(e: EngramNode): string {
+  return `- [[${e.title}]][${e.layer}] ${e.summary}`
+}
+
 export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () => void {
   const disposers: Array<() => void> = []
 
+  // ---- engram_recall：按需唤醒检索（跨会话分层准入） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（本会话内）。按当前查询匹配入口节点（[[标题]] + 摘要 + 因果邻接），返回的是入口层；看到 [[标题]] 后由你判断——需要详情就再用 engram_open 展开，不需要就直接用摘要作答。',
+    description: '主动唤醒记忆图谱入口（跨会话分层）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + 因果邻接）。缺省召回 global（全局）+ 本目录 project + 本会话 session（可见层全部）；看到 [[标题]] 后由你判断——需要详情就再 engram_open 展开，不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',
         required: true,
         description: '要回忆的内容（越具体命中越准，与写入时的表述一致最好）',
+      },
+      layer: {
+        type: 'string',
+        description: '可选：只召回指定层（逗号分隔如 "global,project"；缺省=可见层全部）',
       },
       limit: {
         type: 'number',
@@ -43,26 +77,32 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     },
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
-    execute: async (args) => {
-      const hit = await relay.recall(String(args.query), Number(args.limit ?? 3))
+    execute: async (args, exec) => {
+      const hit = await relay.recall(String(args.query), Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
       if (hit.engrams.length === 0) return `（无命中，reason=${hit.reason}）`
-      return hit.engrams.map((e) => `- [[${e.title}]]: ${e.summary}`).join('\n')
+      return hit.engrams.map((e) => entryLine(e)).join('\n')
     },
   })))
 
+  // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（本会话内，会话结束即弃）。大一统记忆图谱：title 是入口锚点，summary 是一句话摘要（入口层展示），content 是完整正文（展开层），links 是双向关联 [[标题]]。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因（已有节点 id）、effects 因果后果（已有节点 id）。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）；仅本次会话相关（临时进度/过程）→ session（会话结束清理，重要事后 engram_promote 转长期）。',
     parameters: {
+      layer: {
+        type: 'string',
+        required: true,
+        description: `记忆分层（AI 自主决策）：${ENGRAM_LAYERS.join('/')}（见 description 决策准则）`,
+      },
       kind: {
         type: 'string',
         required: true,
-        description: '记忆类型：fact/decision/event/note',
+        description: `记忆类型：${KINDS.join('/')}`,
       },
       title: {
         type: 'string',
         required: true,
-        description: '入口锚点标题（如 [[部署端口决策]]；唤醒列表展示）',
+        description: '入口锚点标题（如 [[部署端口决策]]；唤醒列表展示，Obsidian 风格）',
       },
       summary: {
         type: 'string',
@@ -76,40 +116,72 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       links: {
         type: 'array',
         items: { type: 'string' },
-        description: '可选：关联节点的标题（Obsidian 风格双向链接 [[标题]]）',
+        description: '可选：关联节点的标题（Obsidian 双向链接 [[标题]]）',
       },
       causes: {
         type: 'array',
         items: { type: 'string' },
-        description: '可选：导致本条记忆的已有节点 id 列表（因果边）',
+        description: '可选：导致本条记忆的已有节点 id 列表（因果前因）',
+      },
+      effects: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：本条记忆导致的已有节点 id 列表（因果后果）',
       },
     },
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
-    execute: async (args) => {
+    execute: async (args, exec) => {
+      const viewer = viewerOf(exec)
+      const layer = String(args.layer) as EngramLayer
+      if (!ENGRAM_LAYERS.includes(layer)) {
+        return `错误：layer 必须是 ${ENGRAM_LAYERS.join('/')}（收到 ${layer}）`
+      }
       const kind = String(args.kind)
+      if (!KINDS.includes(kind as EngramKind)) {
+        return `错误：kind 必须是 ${KINDS.join('/')}（收到 ${kind}）`
+      }
       const title = String(args.title)
       const summary = String(args.summary)
       const content = String(args.content ?? '')
       const links = Array.isArray(args.links) ? args.links.map(String) : []
       const causes = Array.isArray(args.causes) ? args.causes.map(String) : []
-      if (!KINDS.includes(kind as EngramKind)) {
-        return `错误：kind 必须是 ${KINDS.join('/')}（收到 ${kind}）`
+      const effects = Array.isArray(args.effects) ? args.effects.map(String) : []
+      // 分层归属校验：project 层需要当前工作目录；session 层需要会话 id
+      if (layer === 'project' && !viewer.cwd) {
+        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
+      }
+      if (layer === 'session' && !viewer.sessionId) {
+        return `错误：session 层需要会话上下文（无会话视角——建议改用 global）`
       }
       const e = relay.store.add({
         kind: kind as EngramKind,
+        layer,
+        projectId: layer === 'project' ? viewer.cwd! : null,
         title,
         summary,
         content,
         links,
-        sessionId: relay.currentSessionId,
+        sessionId: viewer.sessionId ?? relay.currentSessionId,
         turn: relay.lastTurnAt,
         causes,
-        effects: [],
+        effects,
         importance: 1,
       })
+      // 因果边：causes（前因 → 本节点）/ effects（本节点 → 后果）
       for (const causeId of causes) {
-        relay.graph.addEdge(causeId, e.id, 'causes', 1)
+        const c = relay.store.get(causeId)
+        if (c) {
+          relay.graph.addEdge(c.id, e.id, 'causes', 1)
+          if (!c.effects.includes(e.id)) relay.store.update(c.id, { effects: [...c.effects, e.id] })
+        }
+      }
+      for (const effectId of effects) {
+        const t = relay.store.get(effectId)
+        if (t) {
+          relay.graph.addEdge(e.id, t.id, 'causes', 1)
+          if (!t.causes.includes(e.id)) relay.store.update(t.id, { causes: [...t.causes, e.id] })
+        }
       }
       // 双向链接：为每个 [[标题]] 建关联（Obsidian 风格）
       for (const t of links) {
@@ -119,13 +191,14 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
           relay.store.add({ ...target, links: target.links }) // 持久化更新
         }
       }
-      return `已写入记忆节点 [[${e.title}]]（${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条）`
+      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条，因果 ↑${causes.length} ↓${effects.length}）`
     },
   })))
 
+  // ---- engram_open：展开入口（渐进披露第二层） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_open',
-    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 双向链接 + 因果前因/后果。当你看到 [[标题]] 入口需要详情时调用。',
+    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + 双向链接 + 因果前因/后果。当你看到 [[标题]] 入口需要详情时调用。',
     parameters: {
       title: {
         type: 'string',
@@ -135,10 +208,11 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     },
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
-    execute: async (args) => {
-      const title = String(args.title)
-      const node = relay.store.byTitle(title)
-      if (!node) return `未找到节点 [[${title}]]（可能已随会话结束清理）`
+    execute: async (args, exec) => {
+      const node = resolveNode(relay, String(args.title))
+      if (!node) return `未找到节点 [[${args.title}]]（可 engram_search 检索）`
+      // 可见性：只能展开自己可见层的节点
+      if (!isVisible(node, viewerOf(exec))) return `无权展开 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
       relay.store.touch(node.id)
       const causes = relay.store.getMany(node.causes)
       const effects = relay.store.getMany(node.effects)
@@ -146,7 +220,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         node.links.map((t) => relay.store.byTitle(t)?.id ?? '').filter(Boolean),
       )
       const parts: string[] = []
-      parts.push(`# [[${node.title}]] (${node.kind})`)
+      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''})`)
       parts.push(node.summary)
       if (node.content) parts.push(`\n${node.content}`)
       if (causes.length > 0) parts.push(`\n**前因**（因果 ↑）：${causes.map((c) => `[[${c.title}]]`).join('、')}`)
@@ -156,9 +230,233 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     },
   })))
 
+  // ---- engram_search：检索图谱（分层/项目/类型/关键词） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_search',
+    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤，遵守跨会话可见性（global + 本目录 project + 本会话 session）。返回入口列表（[[标题]] + 摘要）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
+    parameters: {
+      query: {
+        type: 'string',
+        description: '可选：标题/摘要关键词（子串匹配，大小写不敏感）',
+      },
+      layer: {
+        type: 'string',
+        description: `可选：只查指定层（${ENGRAM_LAYERS.join('/')}）`,
+      },
+      kind: {
+        type: 'string',
+        description: `可选：只查指定类型（${KINDS.join('/')}）`,
+      },
+      projectId: {
+        type: 'string',
+        description: '可选：只查指定项目（project 层；缺省=当前工作目录）',
+      },
+      limit: {
+        type: 'number',
+        description: '最多返回条数（默认 20）',
+      },
+      recent: {
+        type: 'boolean',
+        description: '可选：按最近创建排序（缺省按重要度）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const viewer = viewerOf(exec)
+      const layer = String(args.layer ?? '')
+      const kind = String(args.kind ?? '')
+      const projectId = args.projectId !== undefined && String(args.projectId) !== ''
+        ? String(args.projectId) : (viewer.cwd ?? undefined)
+      let nodes = relay.store.query({
+        layer: layer && ENGRAM_LAYERS.includes(layer as EngramLayer) ? layer as EngramLayer : undefined,
+        projectId: projectId !== undefined ? projectId : undefined,
+        kind: kind && KINDS.includes(kind as EngramKind) ? kind as EngramKind : undefined,
+        limit: Number(args.limit ?? 20),
+        recent: args.recent === true,
+      })
+      // 可见性：只返回当前会话可见的
+      nodes = nodes.filter((e) => isVisible(e, viewer))
+      const q = String(args.query ?? '').trim().toLowerCase()
+      if (q) nodes = nodes.filter((e) => e.title.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
+      if (nodes.length === 0) return '（无匹配记忆）'
+      const lines = nodes.map((e) => entryLine(e))
+      return `记忆图谱（${nodes.length} 条）：\n${lines.join('\n')}`
+    },
+  })))
+
+  // ---- engram_link：显式连接节点（织图谱） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_link',
+    description: '显式连接两个记忆节点（把记忆织成图谱）。kind=causes 表示 from 是 to 的前因（因果边）；depends-on 表示 from 依赖 to；references 表示单纯引用。bidirectional=true 同时建立双向 [[标题]] 链接。',
+    parameters: {
+      from: {
+        type: 'string',
+        required: true,
+        description: '源节点（id 或 [[标题]]）',
+      },
+      to: {
+        type: 'string',
+        required: true,
+        description: '目标节点（id 或 [[标题]]）',
+      },
+      kind: {
+        type: 'string',
+        description: '边类型：causes（默认）/depends-on/references',
+      },
+      bidirectional: {
+        type: 'boolean',
+        description: '可选：同时建立双向链接（Obsidian 风格）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const from = resolveNode(relay, String(args.from))
+      const to = resolveNode(relay, String(args.to))
+      if (!from) return `未找到源节点 [[${args.from}]]`
+      if (!to) return `未找到目标节点 [[${args.to}]]`
+      if (from.id === to.id) return '错误：不能连接节点自身'
+      const viewer = viewerOf(exec)
+      if (!isVisible(from, viewer) || !isVisible(to, viewer)) {
+        return '错误：只能连接当前会话可见的节点（global + 本目录 project + 本会话 session）'
+      }
+      const kind = (String(args.kind ?? 'causes') as CausalEdgeKind)
+      relay.graph.addEdge(from.id, to.id, kind, 1)
+      // 同步 store 的因果数组（graph 从 store rebuild，保持一致）
+      if (kind === 'causes') {
+        if (!from.effects.includes(to.id)) relay.store.update(from.id, { effects: [...from.effects, to.id] })
+        if (!to.causes.includes(from.id)) relay.store.update(to.id, { causes: [...to.causes, from.id] })
+      } else {
+        relay.graph.addEdge(from.id, to.id, 'references', 1)
+      }
+      if (args.bidirectional === true) {
+        if (!to.links.includes(from.title)) {
+          relay.store.update(to.id, { links: [...to.links, from.title] })
+        }
+        if (!from.links.includes(to.title)) {
+          relay.store.update(from.id, { links: [...from.links, to.title] })
+        }
+      }
+      return `已连接：[[${from.title}]] --${kind}--> [[${to.title}]]${args.bidirectional === true ? '（双向链接）' : ''}`
+    },
+  })))
+
+  // ---- engram_update：修正节点 ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_update',
+    description: '修正一个记忆节点（摘要/正文/链接/因果/重要度/标题）。用于记忆过时或写错后订正。',
+    parameters: {
+      ref: {
+        type: 'string',
+        required: true,
+        description: '要修正的节点（id 或 [[标题]]）',
+      },
+      title: {
+        type: 'string',
+        description: '可选：新标题',
+      },
+      summary: {
+        type: 'string',
+        description: '可选：新摘要',
+      },
+      content: {
+        type: 'string',
+        description: '可选：新正文',
+      },
+      links: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：替换整个关联列表',
+      },
+      importance: {
+        type: 'number',
+        description: '可选：重要度 0-1（唤醒排序权重）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const node = resolveNode(relay, String(args.ref))
+      if (!node) return `未找到节点 [[${args.ref}]]`
+      if (!isVisible(node, viewerOf(exec))) return `无权修正 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
+      const patch: Parameters<typeof relay.store.update>[1] = {}
+      if (args.title !== undefined) patch.title = String(args.title)
+      if (args.summary !== undefined) patch.summary = String(args.summary)
+      if (args.content !== undefined) patch.content = String(args.content)
+      if (args.links !== undefined) patch.links = (args.links as string[]).map(String)
+      if (args.importance !== undefined) patch.importance = Number(args.importance)
+      const updated = relay.store.update(node.id, patch)
+      return updated ? `已修正 [[${updated.title}]]` : '修正失败（节点不存在）'
+    },
+  })))
+
+  // ---- engram_remove：删除节点 ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_remove',
+    description: '删除一个记忆节点（**谨慎：删除不可恢复**）。用于记忆确已无用/错误。删除后其因果边与链接不再可追踪。',
+    parameters: {
+      ref: {
+        type: 'string',
+        required: true,
+        description: '要删除的节点（id 或 [[标题]]）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const node = resolveNode(relay, String(args.ref))
+      if (!node) return `未找到节点 [[${args.ref}]]`
+      if (!isVisible(node, viewerOf(exec))) return `无权删除 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
+      const ok = relay.store.remove(node.id)
+      return ok ? `已删除记忆节点 [[${node.title}]]（${node.layer}·${node.kind}）` : '删除失败'
+    },
+  })))
+
+  // ---- engram_promote：提升层（session→project/global） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_promote',
+    description: '提升记忆层：session→project/global（会话结束前把临时记忆转长期跨会话持久）或 project→global。层只能升不能降。',
+    parameters: {
+      ref: {
+        type: 'string',
+        required: true,
+        description: '要提升的节点（id 或 [[标题]]）',
+      },
+      layer: {
+        type: 'string',
+        required: true,
+        description: '提升到哪一层（project/global）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const viewer = viewerOf(exec)
+      const node = resolveNode(relay, String(args.ref))
+      if (!node) return `未找到节点 [[${args.ref}]]`
+      if (!isVisible(node, viewer)) return `无权提升 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
+      const target = String(args.layer) as EngramLayer
+      if (!ENGRAM_LAYERS.includes(target) || target === 'session') {
+        return '错误：目标层必须是 project 或 global（不能降级回 session）'
+      }
+      // 只能升不能降：global 已是最高
+      if (node.layer === 'global') return `[[${node.title}]] 已是 global 层（最高），无需提升`
+      if (node.layer === target) return `[[${node.title}]] 已在 ${target} 层`
+      if (target === 'project' && !viewer.cwd) {
+        return `错误：提升到 project 层需要当前工作目录（无 cwd——只能提升到 global）`
+      }
+      const promoted = relay.store.promote(node.id, target, viewer.cwd ?? null)
+      return promoted
+        ? `已提升 [[${promoted.title}]]：${node.layer} → ${target}${promoted.projectId ? `（项目 ${promoted.projectId}）` : ''}，跨会话持久`
+        : '提升失败'
+    },
+  })))
+
+  // ---- engram_status：服务状态 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_status',
-    description: '查看 engram 条件记忆表状态：条目数、哈希槽位数、因果图边数、模型状态、注入预算。',
+    description: '查看 engram 记忆服务状态：分层统计（global/project/session 条数）、哈希槽位、因果图边数、模型状态、注入预算。',
     parameters: {},
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,

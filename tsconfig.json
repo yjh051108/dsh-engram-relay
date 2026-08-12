@@ -14,5 +14,6 @@
     "rootDir": "src",
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": ["src/client"]
 }

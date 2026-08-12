@@ -1,0 +1,145 @@
+/**
+ * installGraphApi — engram 记忆图谱 Web API（host 侧）。
+ *
+ * 供 web client「图谱」Tab 消费：按查看者视角（sessionId → cwd）做**分层
+ * 准入**后返回节点 + 边（因果边 + 双向链接边），以及单节点详情（渐进披露
+ * 第二层：正文/因果/链接）。
+ *
+ * 路由（prefix /engram-relay/api）：
+ *  - GET /graph?sessionId=…        → { nodes, edges, layerCounts, total }
+ *  - GET /node/<title>?sessionId=… → 节点详情（content + 前因/后果/关联）
+ *
+ * 可见性边界与唤醒/工具一致：global 所有会话 / project 同 cwd / session 本会话。
+ */
+
+import type { Context as CordisContext } from 'cordis'
+
+import { isVisible, type EngramNode } from './engram/store.js'
+import type { EngramRelay } from './relay.js'
+
+type HttpCtx = CordisContext & {
+  httpServer: {
+    register(route: {
+      kind: string
+      path: string
+      handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void> | void
+    }): () => void
+  }
+}
+
+/** 发送 JSON 响应。 */
+function sendJson(res: import('node:http').ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body)
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(text)
+}
+
+/** 从请求 query 解析查看者视角：sessionId → cwd（agents 服务解析会话工作目录）。 */
+function resolveViewer(ctx: CordisContext, url: URL): { sessionId?: string; cwd?: string } {
+  const sessionId = url.searchParams.get('sessionId') ?? undefined
+  const agents = ctx.get('agents') as { get?: (id: string) => { session?: { header?: { cwd?: string } } } } | undefined
+  const cwd = sessionId !== undefined
+    ? agents?.get?.(sessionId)?.session?.header?.cwd
+    : undefined
+  return { sessionId, cwd }
+}
+
+/** 节点视图（图谱渲染最小集）。 */
+function nodeView(n: EngramNode) {
+  return {
+    id: n.id,
+    title: n.title,
+    summary: n.summary,
+    kind: n.kind,
+    layer: n.layer,
+    projectId: n.projectId,
+    importance: n.importance,
+    hits: n.hits,
+    createdAt: n.createdAt,
+  }
+}
+
+/** 边视图。 */
+interface EdgeView { from: string; to: string; kind: 'causes' | 'link' }
+
+export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
+  return ctx.httpServer.register({
+    kind: 'prefix',
+    path: '/engram-relay/api',
+    handler: async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://localhost')
+      const viewer = resolveViewer(ctx, url)
+
+      // GET /graph：可见节点 + 边（分层准入）
+      if (req.method === 'GET' && url.pathname === '/engram-relay/api/graph') {
+        // 无会话视角（未传 sessionId）→ 只暴露 global 层——浏览器端是用户
+        // 可见界面，必须保守：不泄露他人项目/会话记忆（isVisible 的空
+        // viewer 宽容分支只用于 wake/tools 的向后兼容）。
+        const visible = relay.store.all().filter((n) =>
+          viewer.sessionId === undefined && viewer.cwd === undefined
+            ? n.layer === 'global'
+            : isVisible(n, viewer))
+        const ids = new Set(visible.map((n) => n.id))
+        const edges: EdgeView[] = []
+        const seen = new Set<string>()
+        const addEdge = (from: string, to: string, kind: EdgeView['kind']): void => {
+          const key = `${from}|${to}|${kind}`
+          if (seen.has(key)) return
+          seen.add(key)
+          edges.push({ from, to, kind })
+        }
+        for (const n of visible) {
+          // 因果边（前因/后果双向展开）
+          for (const c of n.causes) if (ids.has(c)) addEdge(c, n.id, 'causes')
+          for (const e of n.effects) if (ids.has(e)) addEdge(n.id, e, 'causes')
+          // 双向链接边（Obsidian 风格 [[标题]]）
+          for (const l of n.links) {
+            const t = relay.store.byTitle(l)
+            if (t && ids.has(t.id) && t.id !== n.id) addEdge(n.id, t.id, 'link')
+          }
+        }
+        sendJson(res, 200, {
+          nodes: visible.map(nodeView),
+          edges,
+          layerCounts: relay.store.layerCounts(),
+          total: visible.length,
+          viewer,
+        })
+        return
+      }
+
+      // GET /node/<title>：节点详情（渐进披露第二层）
+      const match = /^\/engram-relay\/api\/node\/(.+)$/.exec(url.pathname)
+      if (req.method === 'GET' && match !== null) {
+        const title = decodeURIComponent(match[1]).replace(/^\[\[|\]\]$/g, '')
+        const node = relay.store.byTitle(title)
+        if (!node) {
+          sendJson(res, 404, { error: `node not found: ${title}` })
+          return
+        }
+        // 无会话视角 → 只看 global 层（隐私边界，同上）
+        const visible = viewer.sessionId === undefined && viewer.cwd === undefined
+          ? node.layer === 'global'
+          : isVisible(node, viewer)
+        if (!visible) {
+          sendJson(res, 403, { error: `node ${title} is not visible to this session` })
+          return
+        }
+        relay.store.touch(node.id)
+        sendJson(res, 200, {
+          ...nodeView(node),
+          content: node.content,
+          causes: relay.store.getMany(node.causes).map((c) => nodeView(c)),
+          effects: relay.store.getMany(node.effects).map((e) => nodeView(e)),
+          links: node.links.map((t) => {
+            const target = relay.store.byTitle(t)
+            return target ? nodeView(target) : { id: '', title: t, summary: '', kind: 'note', layer: 'global', projectId: null, importance: 0, hits: 0, createdAt: 0 }
+          }),
+        })
+        return
+      }
+
+      sendJson(res, 404, { error: 'not found' })
+    },
+  })
+}

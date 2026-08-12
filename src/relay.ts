@@ -26,8 +26,10 @@ import type CompactService from '@deepseek-ai/dsh-compact'
 import { EngramStore } from './engram/store.js'
 import { CausalGraph } from './engram/causal.js'
 import { NgramHashAddressing } from './engram/hash.js'
-import { EngramWakeEngine } from './engram/wake.js'
+import { EngramWakeEngine, type WakeViewer } from './engram/wake.js'
 import { RelayModel } from './model/relay-model.js'
+import { installGraphApi } from './graph-api.js'
+import type { EngramLayer, EngramNode } from './engram/store.js'
 import type { EngramRelayConfig } from './types.js'
 
 export interface EngramRelayDeps {
@@ -74,7 +76,9 @@ export class EngramRelay {
       if (this.config.enabled) {
         const sessionId = (options as { sessionId?: string }).sessionId
         if (sessionId) {
-          void this.wake.maybeWake(sessionId, options).catch((error) => {
+          // 分层准入需要查看者视角：sessionId + 当前工作目录（cwd 经
+          // turn-stopping 持续追踪）
+          void this.wake.maybeWake(sessionId, options, { cwd: this.currentCwd ?? undefined }).catch((error) => {
             this.ctx.logger?.warn?.('[engram-relay] wake failed: %s', String(error))
           })
           // 训练模型的原生回忆（异步，结果缓存供记忆段渲染）
@@ -104,6 +108,9 @@ export class EngramRelay {
       if (!this.config.enabled) return
       this.lastTurnAt = turn
       this.currentSessionId = agent.session.id
+      // 持续追踪当前工作目录（分层准入：project 层按 cwd 过滤）
+      const cwd = agent.session.header?.cwd
+      if (typeof cwd === 'string' && cwd !== '') this.currentCwd = cwd
       const messages = extractRecentTurn(agent.session.deriveMessages(), turn)
       this.lastConversationText = messages
       void this.maybeDistill().catch((error) => {
@@ -111,15 +118,20 @@ export class EngramRelay {
       })
     })
 
-    // 4. 会话结束即弃（单会话上下文增强的核心约束）：
-    //    agent/disposed（会话销毁）→ 清空该会话的全部 engram，
-    //    记忆不跨会话残留。
+    // 4. 会话结束（分层生命周期）：只清该会话的 session 层临时记忆；
+    //    global/project 跨会话层持久保留——跨会话沉淀的核心转变。
     this.ctx.on('agent/disposed', ({ agent }) => {
       if (!this.config.enabled) return
       const cleared = this.store.clearSession(agent.session.id)
       if (cleared > 0) {
-        this.ctx.logger?.info?.('[engram-relay] session %s ended, cleared %d engrams', agent.session.id, cleared)
+        this.ctx.logger?.info?.('[engram-relay] session %s ended, cleared %d session-layer engrams (global/project kept)', agent.session.id, cleared)
       }
+    })
+
+    // 5. 图谱 Web API（web-only）：记忆图谱 Tab 的数据面（分层准入）。
+    this.ctx.inject(['httpServer'], (webCtx) => {
+      const disposeGraphApi = installGraphApi(webCtx as never, this)
+      this.disposers.push(disposeGraphApi)
     })
 
     return () => {
@@ -163,12 +175,24 @@ export class EngramRelay {
   currentSessionId: string | null = null
   /** 当前回合号（工具写入时归属）。 */
   lastTurnAt = 0
+  /** 当前工作目录（分层准入：project 层按 cwd 过滤；turn-stopping 持续追踪）。 */
+  currentCwd: string | null = null
 
-  /** 供工具使用的唤醒查询入口。 */
-  async recall(query: string, limit?: number): Promise<WakeResult> {
-    const hit = await this.wake.query(query, limit ?? this.config.maxWakePerTurn)
+  /**
+   * 供工具使用的唤醒查询入口。
+   * @param viewer - 查看者视角（分层准入：{ sessionId, cwd }）。
+   * @param layer - 可选层过滤（逗号分隔如 'global,project'；缺省不过滤，
+   *   由 viewer 准入决定可见层）。
+   */
+  async recall(query: string, limit?: number, viewer: WakeViewer = {}, layer?: string): Promise<WakeResult> {
+    const hit = await this.wake.query(query, limit ?? this.config.maxWakePerTurn, viewer)
+    let engrams = hit.engrams
+    if (layer !== undefined && layer.trim() !== '') {
+      const layers = layer.split(',').map((s) => s.trim()).filter(Boolean) as EngramLayer[]
+      if (layers.length > 0) engrams = engrams.filter((e) => layers.includes(e.layer))
+    }
     return {
-      engrams: hit.engrams,
+      engrams,
       reason: hit.reason,
       injectedTokens: hit.injectedTokens,
     }
@@ -179,10 +203,12 @@ export class EngramRelay {
       enabled: this.config.enabled,
       storeDir: this.store.dir,
       engramCount: this.store.count(),
+      layerCounts: this.store.layerCounts(),
       slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
       model: await this.model.describe(),
       budgetTokens: this.config.injectBudgetTokens,
+      currentCwd: this.currentCwd,
       compactCoexist: (this.ctx as unknown as { compact?: unknown }).compact !== undefined,
     }
   }

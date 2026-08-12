@@ -20,13 +20,25 @@
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { NgramHashAddressing } from './hash.js'
 import { CausalGraph } from './causal.js'
-import { EngramStore, type EngramNode } from './store.js'
+import { EngramStore, isVisible, type EngramLayer, type EngramNode } from './store.js'
 import type { EngramRelayConfig } from '../types.js'
 
 export interface WakeHit {
   engrams: EngramNode[]
   reason: string
   injectedTokens: number
+}
+
+/**
+ * 查看者视角（分层准入依据）：
+ *  - global：所有会话可唤醒；
+ *  - project：仅 node.projectId === viewer.cwd 的会话；
+ *  - session：仅 node.sessionId === viewer.sessionId 的本会话。
+ * 无 cwd/sessionId 的视角（subagent 等）只看 global 层。
+ */
+export interface WakeViewer {
+  sessionId?: string
+  cwd?: string
 }
 
 /** 打分回调：embedder（语义精排）优先，scorer（遗留门控）兜底。 */
@@ -49,22 +61,25 @@ export class EngramWakeEngine {
   ) {}
 
   /** 每回合入口：收到一次模型请求时尝试唤醒。 */
-  async maybeWake(sessionId: string, _options: GenerateOptions): Promise<WakeHit> {
+  async maybeWake(sessionId: string, _options: GenerateOptions, viewer: WakeViewer = {}): Promise<WakeHit> {
     if (this.store.count() === 0) return { engrams: [], reason: 'empty-store', injectedTokens: 0 }
 
     const query = extractQuery(_options)
     if (query.trim() === '') return { engrams: [], reason: 'no-query', injectedTokens: 0 }
 
-    const hit = await this.query(query, this.config.maxWakePerTurn)
+    const hit = await this.query(query, this.config.maxWakePerTurn, { sessionId, ...viewer })
     this.lastInjection = hit
     return hit
   }
 
-  /** 核心查询：哈希粗筛 → 语义精排（bge）/门控兜底 → 因果传播 → 分层稀疏选择。 */
-  async query(query: string, limit: number): Promise<WakeHit> {
-    // 1. 确定性哈希粗筛：当前查询命中哪些槽位（含跨会话记忆——
-    //    全局/项目/规则记忆以固定种子文本写入，永远可命中）。
-    const candidates = this.store.lookup(query, 32)
+  /** 核心查询：哈希粗筛 → 分层准入 → 语义精排（bge）/门控兜底 → 因果传播 → 分层稀疏选择。 */
+  async query(query: string, limit: number, viewer: WakeViewer = {}): Promise<WakeHit> {
+    // 1. 确定性哈希粗筛（多取候选：分层准入会过滤掉一部分，保证命中不因
+    //    层过滤而丢失——global 常驻候选始终可见）。
+    let candidates = this.store.lookup(query, 64)
+    // 分层准入：global 所有会话 / project 同 cwd / session 本会话。
+    // 这是「跨会话记忆」的可见性边界——看不到的记忆不会被唤醒注入。
+    candidates = candidates.filter((e) => isVisible(e, viewer))
     if (candidates.length === 0) return { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
 
     // 2. 打分：bge 语义精排（首选）→ 遗留门控 → 重要度兜底。
@@ -148,7 +163,7 @@ export class EngramWakeEngine {
     return hit
   }
 
-  /** 渲染记忆注入段（渐进披露第一层：入口列表 + 簇概览，超稀疏）。 */
+  /** 渲染记忆注入段（渐进披露第一层：能力声明 + 入口列表 + 簇概览，超稀疏）。 */
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
@@ -156,7 +171,7 @@ export class EngramWakeEngine {
     let tokens = 0
     for (const e of engrams) {
       if (tokens >= budgetTokens) break
-      // 入口层：title + summary（不含 content——按需展开）
+      // 入口层：title + 层标注 + 因果邻接 + summary（不含 content——按需展开）
       const causes = this.graph.causesOf(e.id)
       const effects = this.graph.effectsOf(e.id)
       const causeNote = causes.length > 0
@@ -165,7 +180,7 @@ export class EngramWakeEngine {
       const effectNote = effects.length > 0
         ? ` ↓果:${effects.map((c) => c.title).join(';').slice(0, 60)}`
         : ''
-      lines.push(`- [[${e.title}]]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`)
+      lines.push(`- [[${e.title}]][${e.layer}]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`)
       tokens += estimateTokens(e.title) + estimateTokens(e.summary)
     }
     // 自组织簇概览：让模型看到主题结构（不硬编码，连接密度自然成簇）
@@ -179,7 +194,7 @@ export class EngramWakeEngine {
       }
     }
     return lines.length > 0
-      ? `<engram-memory>（大一统记忆图谱入口。摘要足够就直接用；需要细节时自行调用 engram_open 展开 [[标题]] 看正文/因果/关联，不需要就不展开）\n${lines.join('\n')}\n</engram-memory>`
+      ? `<engram-memory>（跨会话记忆服务：global=全局持久·project=本目录持久·session=本会话临时（结束清理，重要记得 engram_promote 转长期）。能力：recall 检索 / open 展开 / store 写入(自主分层) / link 连接因果 / promote 转长期。摘要足够直接用，需细节自行展开 [[标题]]）\n${lines.join('\n')}\n</engram-memory>`
       : ''
   }
 
