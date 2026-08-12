@@ -122,12 +122,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       causes: {
         type: 'array',
         items: { type: 'string' },
-        description: '可选：导致本条记忆的已有节点 id 列表（因果前因）',
+        description: '可选：导致本条记忆的已有节点（id 或 [[标题]]，标题自动解析）',
       },
       effects: {
         type: 'array',
         items: { type: 'string' },
-        description: '可选：本条记忆导致的已有节点 id 列表（因果后果）',
+        description: '可选：本条记忆导致的已有节点（id 或 [[标题]]，标题自动解析）',
       },
     },
     output: TEXT_OUTPUT,
@@ -146,8 +146,17 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const summary = String(args.summary)
       const content = String(args.content ?? '')
       const links = Array.isArray(args.links) ? args.links.map(String) : []
-      const causes = Array.isArray(args.causes) ? args.causes.map(String) : []
-      const effects = Array.isArray(args.effects) ? args.effects.map(String) : []
+      // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
+      const resolveRef = (ref: string): string | null => {
+        const clean = ref.replace(/^\[\[|\]\]$/g, '').trim()
+        if (relay.store.get(clean)) return clean // 已是 id
+        const byTitle = relay.store.byTitle(clean)
+        return byTitle ? byTitle.id : null
+      }
+      const causes = (Array.isArray(args.causes) ? args.causes.map(String) : [])
+        .map(resolveRef).filter((x): x is string => x !== null)
+      const effects = (Array.isArray(args.effects) ? args.effects.map(String) : [])
+        .map(resolveRef).filter((x): x is string => x !== null)
       // 分层归属校验：project 层需要当前工作目录；session 层需要会话 id
       if (layer === 'project' && !viewer.cwd) {
         return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
@@ -233,12 +242,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       causes: {
         type: 'array',
         items: { type: 'string' },
-        description: '可选：导致本条记忆的已有节点 id 列表（因果前因）',
+        description: '可选：导致本条记忆的已有节点（id 或 [[标题]]，标题自动解析）',
       },
       effects: {
         type: 'array',
         items: { type: 'string' },
-        description: '可选：本条记忆导致的已有节点 id 列表（因果后果）',
+        description: '可选：本条记忆导致的已有节点（id 或 [[标题]]，标题自动解析）',
       },
     },
     output: TEXT_OUTPUT,
@@ -257,8 +266,17 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const summary = String(args.summary)
       const content = String(args.content ?? '')
       const links = Array.isArray(args.links) ? args.links.map(String) : []
-      const causes = Array.isArray(args.causes) ? args.causes.map(String) : []
-      const effects = Array.isArray(args.effects) ? args.effects.map(String) : []
+      // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
+      const resolveRef = (ref: string): string | null => {
+        const clean = ref.replace(/^\[\[|\]\]$/g, '').trim()
+        if (relay.store.get(clean)) return clean
+        const byTitle = relay.store.byTitle(clean)
+        return byTitle ? byTitle.id : null
+      }
+      const causes = (Array.isArray(args.causes) ? args.causes.map(String) : [])
+        .map(resolveRef).filter((x): x is string => x !== null)
+      const effects = (Array.isArray(args.effects) ? args.effects.map(String) : [])
+        .map(resolveRef).filter((x): x is string => x !== null)
       if (layer === 'project' && !viewer.cwd) {
         return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
       }
