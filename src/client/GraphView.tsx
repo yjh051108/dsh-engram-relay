@@ -38,13 +38,6 @@ interface GraphData {
   total: number
 }
 
-interface NodeDetail extends GraphNodeData {
-  content: string
-  causes: GraphNodeData[]
-  effects: GraphNodeData[]
-  links: GraphNodeData[]
-}
-
 /** 层 → 颜色。 */
 export const LAYER_COLORS: Record<string, string> = {
   global: '#4a7dff',
@@ -62,7 +55,6 @@ interface GraphViewProps {
 
 export function GraphView({ t, sessionId }: GraphViewProps) {
   const [data, setData] = useState<GraphData | null>(null)
-  const [detail, setDetail] = useState<NodeDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   // 无限画布视口（viewBox 四元组）：世界坐标无限，视口自由缩放/平移。
@@ -317,7 +309,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       if (e.button !== 0) return
       const target = e.target as Element
       if (target.closest?.('[data-node-id]')) return // 节点上的按下不拖拽
-      if (target.closest?.('.' + (styles as unknown as Record<string, string>).detail)) return // 详情面板
       setSelectedId(null) // 空白按下取消高亮
       const rect = svg.getBoundingClientRect()
       dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect, moved: false }
@@ -355,14 +346,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       window.removeEventListener('mouseup', onUp)
     }
   }, [loading, nodes.length])
-
-  const openDetail = (node: GraphNodeData): void => {
-    const q = sessionId !== undefined && sessionId !== '' ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
-    void fetch(`/engram-relay/api/node/${encodeURIComponent(node.title)}${q}`)
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((d: NodeDetail) => setDetail(d))
-      .catch((e: unknown) => setError(String((e as Error)?.message ?? e)))
-  }
 
   return (
     <div className={styles.root}>
@@ -512,8 +495,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   key={n.id}
                   data-node-id={n.id}
                   className={`${styles.node} ${isSemantic ? styles.nodeSemantic : ''}`}
-                  onClick={() => { setSelectedId(n.id); setDetail(null) }}
-                  onDoubleClick={() => openDetail(n)}
+                  onClick={() => setSelectedId(n.id)}
                   role="button"
                   tabIndex={0}
                   opacity={opacity}
@@ -561,48 +543,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               {t('graph.legend.solo')}
             </span>
             <span><span className={styles.legendCluster} />{t('graph.legend.clusterRing')}</span>
-          </div>
-        </div>
-      )}
-
-      {/* 详情侧栏（渐进披露第二层） */}
-      {detail !== null && (
-        <div className={styles.detail}>
-          <div className={styles.detailHead}>
-            <span className={styles.detailTitle}>
-              [[{detail.title}]] ({detail.kind} · {t(`graph.layer.${detail.layer}`)})
-            </span>
-            <button className={styles.detailClose} onClick={() => setDetail(null)}>{t('graph.detail.close')}</button>
-          </div>
-          <p className={styles.detailSummary}>{detail.summary}</p>
-          {detail.content !== '' && (
-            <pre className={styles.detailContent}>{detail.content}</pre>
-          )}
-          <div className={styles.detailSection}>
-            <span className={styles.detailSectionTitle}>{t('graph.detail.causes')}</span>
-            {detail.causes.length > 0
-              ? detail.causes.map((c) => (
-                <button key={c.id} className={styles.detailNode} onClick={() => openDetail(c)}>[[{c.title}]]</button>
-              ))
-              : <span className={styles.detailNone}>{t('graph.detail.none')}</span>}
-          </div>
-          <div className={styles.detailSection}>
-            <span className={styles.detailSectionTitle}>{t('graph.detail.effects')}</span>
-            {detail.effects.length > 0
-              ? detail.effects.map((c) => (
-                <button key={c.id} className={styles.detailNode} onClick={() => openDetail(c)}>[[{c.title}]]</button>
-              ))
-              : <span className={styles.detailNone}>{t('graph.detail.none')}</span>}
-          </div>
-          <div className={styles.detailSection}>
-            <span className={styles.detailSectionTitle}>{t('graph.detail.links')}</span>
-            {detail.links.length > 0
-              ? detail.links.map((c) => (
-                <button key={c.id !== '' ? c.id : c.title} className={styles.detailNode} onClick={() => c.id !== '' && openDetail(c)}>
-                  [[{c.title}]]
-                </button>
-              ))
-              : <span className={styles.detailNone}>{t('graph.detail.none')}</span>}
           </div>
         </div>
       )}
