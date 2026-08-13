@@ -175,8 +175,8 @@ export class EngramStore {
   private byId = new Map<string, EngramNode>()
   /** 槽位索引：slotKey -> Set<nodeId>（派生索引，写入/加载时构建）。 */
   private slotIndex = new Map<string, Set<string>>()
-  /** 标题索引：title -> nodeId（双向链接解析用）。 */
-  private titleIndex = new Map<string, string>()
+  /** 标题索引：title -> id[]（多值——跨项目同标题合法存在；解析时消歧）。 */
+  private titleIndex = new Map<string, string[]>()
 
   constructor(storeDir: string, private hasher: NgramHashAddressing = new NgramHashAddressing()) {
     this.dir = storeDir === '' ? join(homedir(), '.dsh', 'engram-relay') : resolve(storeDir)
@@ -221,7 +221,7 @@ export class EngramStore {
           e.reinforces = Array.isArray(e.reinforces) ? e.reinforces : [e.createdAt || Date.now()]
           this.byId.set(e.id, e)
           for (const s of e.slots) this.indexSlot(s, e.id)
-          if (e.title) this.titleIndex.set(e.title, e.id)
+          if (e.title) this.indexTitle(e.title, e.id)
           loaded++
         } catch {
           corrupt++
@@ -341,15 +341,43 @@ export class EngramStore {
     }
     this.byId.set(node.id, node)
     for (const s of slots) this.indexSlot(s, node.id)
-    if (node.title) this.titleIndex.set(node.title, node.id)
+    if (node.title) this.indexTitle(node.title, node.id)
     this.persist()
     return node
   }
 
-  /** 按标题取节点（双向链接 [[title]] 解析）。 */
+  /** 标题索引登记（多值聚合，去重）。 */
+  private indexTitle(title: string, id: string): void {
+    const arr = this.titleIndex.get(title)
+    if (arr) {
+      if (!arr.includes(id)) arr.push(id)
+    } else {
+      this.titleIndex.set(title, [id])
+    }
+  }
+
+  /** 标题索引移除（只摘该项，不影响同名其他节点）。 */
+  private unindexTitle(title: string, id: string): void {
+    const arr = this.titleIndex.get(title)
+    if (!arr) return
+    const i = arr.indexOf(id)
+    if (i >= 0) arr.splice(i, 1)
+    if (arr.length === 0) this.titleIndex.delete(title)
+  }
+
+  /** 按标题取节点（双向链接 [[title]] 解析）。同名消歧：最近写入优先。
+   *  ⚠️ 曾有 Map<title,单id> 覆盖 bug——同名节点互相顶掉；多值后不再丢。 */
   byTitle(title: string): EngramNode | undefined {
-    const id = this.titleIndex.get(title)
-    return id ? this.byId.get(id) : undefined
+    const arr = this.titleIndex.get(title)
+    if (!arr || arr.length === 0) return undefined
+    return this.byId.get(arr[arr.length - 1])
+  }
+
+  /** 按标题取全部同名节点（消歧/盘点用：跨项目同标题、版本链同主题）。 */
+  byTitles(title: string): EngramNode[] {
+    return (this.titleIndex.get(title) ?? [])
+      .map((id) => this.byId.get(id))
+      .filter((e): e is EngramNode => !!e)
   }
 
   /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序）。 */
@@ -545,9 +573,9 @@ export class EngramStore {
     const e = this.byId.get(id)
     if (!e) return undefined
     if (patch.title !== undefined && patch.title !== e.title) {
-      this.titleIndex.delete(e.title)
+      this.unindexTitle(e.title, e.id)
       e.title = patch.title
-      if (e.title) this.titleIndex.set(e.title, e.id)
+      if (e.title) this.indexTitle(e.title, e.id)
     }
     if (patch.summary !== undefined) e.summary = patch.summary
     if (patch.content !== undefined) e.content = patch.content
@@ -612,7 +640,7 @@ export class EngramStore {
     const e = this.byId.get(id)
     if (!e) return false
     this.byId.delete(id)
-    if (e.title) this.titleIndex.delete(e.title)
+    if (e.title) this.unindexTitle(e.title, e.id)
     for (const s of e.slots) {
       const set = this.slotIndex.get(s)
       if (set) {

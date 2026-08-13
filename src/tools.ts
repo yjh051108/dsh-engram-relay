@@ -70,7 +70,10 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
   return ranked
-    .map((x, i) => `${i + 1}. [[${x.e.title}]]（语义 ${x.cosine.toFixed(2)} × 时序 ${x.score.toFixed(2)}）${x.e.summary.slice(0, 40)}`)
+    .map((x, i) => {
+      const proj = x.e.projectId ? `·${String(x.e.projectId).split(/[\\/]/).pop()}` : ''
+      return `${i + 1}. [[${x.e.title}]][${x.e.layer}${proj}]（语义 ${x.cosine.toFixed(2)} × 时序 ${x.score.toFixed(2)}）${x.e.summary.slice(0, 40)}`
+    })
     .join('\n')
 }
 
