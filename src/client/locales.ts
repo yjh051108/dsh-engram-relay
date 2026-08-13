@@ -29,8 +29,10 @@ export const zh = {
   'graph.detail.open': '展开详情',
   'graph.legend.causes': '—— 因果边',
   'graph.legend.link': '··· 双向链接',
-  'graph.legend.cluster': '⭘ 自发簇（连通分量；虚线=多项目融合）',
-  'graph.hint': '节点=记忆（颜色分层），实线=因果，虚线=双向链接；点击节点看详情；拖拽空白平移（无限画布）；按住 Ctrl + 滚轮缩放。',
+  'graph.legend.cluster': '● 知识族（同色=同簇）',
+  'graph.legend.solo': '○ 孤立节点（通用知识）',
+  'graph.legend.clusterRing': '⭘ 簇边界（虚线=跨项目融合）',
+  'graph.hint': '节点=记忆（**同簇同色**，大小=连接数，发光=固化知识）；实线=因果，虚线=双向链接；点击节点看详情；拖拽空白平移（无限画布）；按住 Ctrl + 滚轮缩放。',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -60,6 +62,8 @@ export const en: Record<keyof typeof zh, string> = {
   'graph.detail.open': 'Expand',
   'graph.legend.causes': '—— causal edge',
   'graph.legend.link': '··· bidirectional link',
-  'graph.legend.cluster': '⭘ emergent cluster (connected component; dashed = cross-project fusion)',
-  'graph.hint': 'Nodes are memories (color = layer), solid = causal, dashed = link; click a node for details; drag empty space to pan (infinite canvas); Ctrl+wheel to zoom.',
+  'graph.legend.cluster': '● knowledge cluster (same color = same cluster)',
+  'graph.legend.solo': '○ isolated node (general knowledge)',
+  'graph.legend.clusterRing': '⭘ cluster boundary (dashed = cross-project fusion)',
+  'graph.hint': 'Nodes are memories (same color = same cluster; size = link count; glow = consolidated knowledge); solid = causal, dashed = link; click a node for details; drag empty space to pan (infinite canvas); Ctrl+wheel to zoom.',
 }

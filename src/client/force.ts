@@ -53,6 +53,17 @@ export interface ForceLayoutOptions {
   alphaDecay?: number
   /** 最大速度钳制（防抖；缺省 20，宽松即可）。 */
   maxMove?: number
+  /**
+   * 同簇引力（v0.5 视觉：Obsidian 聚类感）——nodeId → clusterId。
+   * 同簇节点对在距离 > clusterTarget 时被柔和拉近（弱弹簧风格，正比
+   * (d−target)），簇自然聚团、簇间分离；距离内不受力（不压缩簇结构，
+   * collide 已防重叠）。
+   */
+  clusters?: Map<string, string>
+  /** 簇内目标间距（缺省 110——略大于弹簧长度，簇内结构舒展）。 */
+  clusterTarget?: number
+  /** 簇引力强度（0-1；缺省 0.04——弱，只聚团不压扁）。 */
+  clusterStrength?: number
 }
 
 /** 布局结果：nodeId → 中心点坐标。 */
@@ -76,6 +87,9 @@ export function layoutForce(
     velocityDecay = 0.55,
     alphaDecay = 0.02,
     maxMove = 40,
+    clusters,
+    clusterTarget = 110,
+    clusterStrength = 0.04,
   } = opts
 
   if (nodes.length === 0) return new Map()
@@ -85,20 +99,53 @@ export function layoutForce(
   const ringRadius = Math.max(40, Math.min(width, height) / 2 - 60)
   const n = nodes.length
 
-  // 确定性初始：均匀圆环 + 按索引的确定性微扰（打破完美对称，防对称坍缩）。
+  // 确定性初始（v0.5 取经 obsidian-graph-spawn：**先按簇散布再力导**——
+  // Obsidian 图谱聚类感差的头号原因是从同一点出发导致局部收敛差；
+  // 簇中心均匀分布圆环、簇内节点围绕簇中心散布 → 簇天然分离、收敛快）。
   interface Body { x: number; y: number; vx: number; vy: number; weight: number }
   const bodies = new Map<string, Body>()
-  nodes.forEach((node, i) => {
-    const angle = (2 * Math.PI * i) / n
-    const jig = ((i * 2654435761) % 1000) / 1000 - 0.5 // 确定性伪随机 [-0.5, 0.5)
-    bodies.set(node.id, {
-      x: cx + (ringRadius + jig * 4) * Math.cos(angle) + jig * 4,
-      y: cy + (ringRadius + jig * 4) * Math.sin(angle) + jig * 4,
-      vx: 0,
-      vy: 0,
-      weight: Math.max(0.5, node.weight ?? 1),
+  if (clusters !== undefined && clusters.size > 0) {
+    // 簇 → 簇内节点（保持输入序）
+    const byCluster = new Map<string, string[]>()
+    for (const node of nodes) {
+      const c = clusters.get(node.id) ?? '__solo__'
+      const arr = byCluster.get(c) ?? []
+      arr.push(node.id)
+      byCluster.set(c, arr)
+    }
+    const clusterIds = [...byCluster.keys()]
+    const clusterCount = clusterIds.length
+    clusterIds.forEach((cid, ci) => {
+      const angle = (2 * Math.PI * ci) / clusterCount
+      const ccx = cx + ringRadius * Math.cos(angle)
+      const ccy = cy + ringRadius * Math.sin(angle)
+      const members = byCluster.get(cid)!
+      members.forEach((id, mi) => {
+        const inner = clusterCount === 1 ? 0 : (2 * Math.PI * mi) / Math.max(1, members.length)
+        const rr = Math.min(70, 26 + (mi % 5) * 8)
+        const jig = ((mi * 2654435761) % 1000) / 1000 - 0.5
+        bodies.set(id, {
+          x: ccx + (rr + jig * 3) * Math.cos(inner) + jig * 3,
+          y: ccy + (rr + jig * 3) * Math.sin(inner) + jig * 3,
+          vx: 0,
+          vy: 0,
+          weight: Math.max(0.5, nodes.find((nd) => nd.id === id)?.weight ?? 1),
+        })
+      })
     })
-  })
+  } else {
+    nodes.forEach((node, i) => {
+      const angle = (2 * Math.PI * i) / n
+      const jig = ((i * 2654435761) % 1000) / 1000 - 0.5 // 确定性伪随机 [-0.5, 0.5)
+      bodies.set(node.id, {
+        x: cx + (ringRadius + jig * 4) * Math.cos(angle) + jig * 4,
+        y: cy + (ringRadius + jig * 4) * Math.sin(angle) + jig * 4,
+        vx: 0,
+        vy: 0,
+        weight: Math.max(0.5, node.weight ?? 1),
+      })
+    })
+  }
 
   // 边索引（弹簧只沿实际连接）。
   const edgePairs = edges
@@ -149,6 +196,34 @@ export function layoutForce(
       s.vy += y * l
       t.vx -= x * l
       t.vy -= y * l
+    }
+
+    // ---- 同簇引力（v0.5：Obsidian 聚类感——同族节点柔和聚拢）----
+    if (clusters !== undefined && clusters.size > 1) {
+      const clusterPairs: Array<[Body, Body]> = []
+      for (let i = 0; i < list.length; i += 1) {
+        const [ida, bi] = list[i]!
+        const ca = clusters.get(ida)
+        if (ca === undefined) continue
+        for (let j = i + 1; j < list.length; j += 1) {
+          const [idb, bj] = list[j]!
+          if (clusters.get(idb) === ca) clusterPairs.push([bi, bj])
+        }
+      }
+      for (const [s, t] of clusterPairs) {
+        const x = t.x - s.x
+        const y = t.y - s.y
+        const dist = Math.sqrt(x * x + y * y)
+        const dx = dist - clusterTarget
+        if (dx > 0) {
+          // 柔和拉力：正比 (d−target)，弱强度——只聚团不压扁
+          const w = (dx / dist) * a * clusterStrength
+          s.vx += x * w
+          s.vy += y * w
+          t.vx -= x * w
+          t.vy -= y * w
+        }
+      }
     }
 
     // ---- collide：硬防重叠（d3 forceCollide；不乘 alpha——硬约束必须在

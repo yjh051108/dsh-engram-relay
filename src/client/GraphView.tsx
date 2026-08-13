@@ -91,37 +91,20 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  // 层过滤 + 布局（确定性力导向）。
-  const { nodes, edges, layout } = useMemo(() => {
-    if (data === null) return { nodes: [], edges: [], layout: new Map<string, ForcePoint>() }
+  // 层过滤（确定性力导向布局在簇计算之后——布局需要 clusterOf）。
+  const { nodes, edges } = useMemo(() => {
+    if (data === null) return { nodes: [], edges: [] }
     const visible = filter === 'all' ? data.nodes : data.nodes.filter((n) => n.layer === filter)
     const ids = new Set(visible.map((n) => n.id))
     const visibleEdges = data.edges.filter((e) => ids.has(e.from) && ids.has(e.to))
-    const layout = layoutForce(
-      visible.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
-      visibleEdges.map((e) => ({ from: e.from, to: e.to })),
-      {
-        width: VIEW_W, height: VIEW_H, iterations: 500,
-        // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
-        // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
-        // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
-        // v0.5 视觉优化：collideRadius 24→34（容纳节点下方标签，防标签
-        // 重叠——力导向图最扎眼的视觉问题）；springLength 80→90（边舒展）。
-        charge: -300,
-        spring: 0.1,
-        springLength: 90,
-        collideRadius: 34,
-        centerStrength: 0.08,
-      },
-    )
-    return { nodes: visible, edges: visibleEdges, layout }
+    return { nodes: visible, edges: visibleEdges }
   }, [data, filter])
 
   // 自发簇（v0.4 终态优先）：前端对边做连通分量——簇由链接/因果密度
-  // 自然形成（不依赖项目标签）。项目标签只作着色（硬编码簇 = 脚手架；
+  // 自然形成（不依赖项目标签）。项目标签只作簇名（硬编码簇 = 脚手架；
   // 簇跨项目 = 融会贯通/套娃在图上可见）。
   const clusters = useMemo(() => {
-    if (nodes.length === 0) return []
+    if (nodes.length === 0) return { list: [], clusterOf: new Map<string, string>() }
     const adj = new Map<string, Set<string>>()
     for (const n of nodes) adj.set(n.id, new Set())
     for (const e of edges) {
@@ -129,7 +112,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       adj.get(e.to)?.add(e.from)
     }
     const visited = new Set<string>()
-    const out: Array<{ ids: string[]; projects: Set<string | null> }> = []
+    const list: Array<{ ids: string[]; projects: Set<string | null> }> = []
+    const clusterOf = new Map<string, string>()
     for (const n of nodes) {
       if (visited.has(n.id)) continue
       const ids: string[] = []
@@ -144,13 +128,50 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           if (!visited.has(nb)) { visited.add(nb); queue.push(nb) }
         }
       }
-      out.push({ ids, projects })
+      const cid = `c${list.length}`
+      for (const id of ids) clusterOf.set(id, cid)
+      list.push({ ids, projects })
     }
-    return out
+    return { list, clusterOf }
   }, [nodes, edges])
+  const clusterList = clusters.list
+  const clusterOf = clusters.clusterOf
+
+  // 确定性力导向布局（簇感知：同簇引力 + 初始按簇散布——取经
+  // obsidian-graph-spawn：先散布簇再力导，簇天然分离聚团）。
+  const layout = useMemo(() => layoutForce(
+    nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
+    edges.map((e) => ({ from: e.from, to: e.to })),
+    {
+      width: VIEW_W, height: VIEW_H, iterations: 500,
+      // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
+      // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
+      // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
+      // v0.5 视觉优化：collideRadius 24→34（容纳节点下方标签，防标签
+      // 重叠）；springLength 80→90（边舒展）
+      charge: -300,
+      spring: 0.1,
+      springLength: 90,
+      collideRadius: 34,
+      centerStrength: 0.08,
+      clusters: clusterOf.size > 0 ? clusterOf : undefined,
+      clusterTarget: 110,
+      clusterStrength: 0.04,
+    },
+  ), [nodes, edges, clusterOf])
+
+  // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
+  const degreeOf = useMemo(() => {
+    const deg = new Map<string, number>()
+    for (const e of edges) {
+      deg.set(e.from, (deg.get(e.from) ?? 0) + 1)
+      deg.set(e.to, (deg.get(e.to) ?? 0) + 1)
+    }
+    return deg
+  }, [edges])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
-  const clusterCircles = useMemo(() => clusters
+  const clusterCircles = useMemo(() => clusterList
     .filter((c) => c.ids.length >= 2)
     .map((c) => {
       const pts = c.ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
@@ -167,7 +188,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       return { cx, cy, radius, label, multi: c.projects.size > 1 }
     })
     .filter((c): c is { cx: number; cy: number; radius: number; label: string; multi: boolean } => c !== null),
-  [clusters, layout])
+  [clusterList, layout])
 
   /** 项目着色（v0.4）：projectId 哈希取色；null（通用知识）灰色。 */
   const projectColor = (projectId: string | null): string => {
@@ -175,6 +196,15 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     let h = 0
     for (const ch of projectId) h = (h * 31 + ch.charCodeAt(0)) >>> 0
     return `hsl(${h % 360} 55% 55%)`
+  }
+
+  /** 簇着色（v0.5 取经 Obsidian color groups：**同簇同色**——分类感知的
+   *  核心。簇色相从簇 id 确定性哈希；孤立节点回退项目色）。 */
+  const clusterColor = (clusterId: string): string => {
+    let h = 0
+    for (const ch of clusterId) h = (h * 131 + ch.charCodeAt(0)) >>> 0
+    // 色相错开（黄金角）+ 高饱和亮色（暗色背景下醒目）
+    return `hsl(${(h + 35) % 360} 65% 62%)`
   }
 
   // Ctrl+滚轮缩放（围绕鼠标位置，作用于视口）。必须用原生非 passive 监听：
@@ -344,13 +374,16 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               if (a === undefined || b === undefined) return null
               if (e.kind === 'causes') {
                 const src = nodes.find((n) => n.id === e.from)
-                const color = src ? projectColor(src.projectId) : '#8a94a6'
+                const scid = src ? clusterOf.get(src.id) : undefined
+                const color = scid !== undefined
+                  ? clusterColor(scid)
+                  : (src ? projectColor(src.projectId) : '#8a94a6')
                 return (
                   <line
                     key={`${e.from}|${e.to}|${e.kind}`}
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                     stroke={color}
-                    strokeOpacity={0.45}
+                    strokeOpacity={0.4}
                     strokeWidth={1.5}
                     markerEnd="url(#arrow-causes)"
                     className={styles.edge}
@@ -369,17 +402,20 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                 />
               )
             })}
-            {/* 节点（v0.5 视觉分层：semantic=固化知识 大+光环；episodic=新事件
-                常规；大小随重要度；标签 halo 保证任何背景下可读） */}
+            {/* 节点（v0.5 视觉分层：**同簇同色**（Obsidian color groups——
+                分类感知核心）+ **大小按度**（链接多=hub 骨架大）+
+                semantic 光环 + 标签 halo） */}
             {nodes.map((n) => {
               const p = layout.get(n.id)
               if (p === undefined) return null
-              // v0.4：按项目着色（哈希色板；通用知识灰色）——项目即标签
-              const color = projectColor(n.projectId)
+              // 簇色优先（同簇同色）；孤立节点回退项目色（灰色）
+              const cid = clusterOf.get(n.id)
+              const color = cid !== undefined ? clusterColor(cid) : projectColor(n.projectId)
               const selected = detail !== null && detail.id === n.id
               const isSemantic = n.state === 'semantic'
-              // 半径：semantic 14-16，episodic 9-13（随重要度）
-              const r = (isSemantic ? 12 : 8) + n.importance * 4 + (selected ? 2 : 0)
+              // 半径：度中心性为主（hub 大），semantic 加成，重要度微调
+              const deg = degreeOf.get(n.id) ?? 0
+              const r = 7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5 + (selected ? 2 : 0)
               return (
                 <g
                   key={n.id}
@@ -395,7 +431,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     cx={p.x} cy={p.y}
                     r={r}
                     fill={color}
-                    fillOpacity={isSemantic ? 0.95 : 0.8}
+                    fillOpacity={isSemantic ? 0.95 : 0.82}
                     stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
                     strokeWidth={selected ? 2 : isSemantic ? 1.5 : 1}
                   />
@@ -416,14 +452,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             <span><span className={styles.legendLineSolid} />{t('graph.legend.causes')}</span>
             <span><span className={styles.legendLineDash} />{t('graph.legend.link')}</span>
             <span>
-              <span className={styles.legendDot} style={{ background: projectColor('D:\\x') }} />
-              {t('graph.layer.project')}
+              <span className={styles.legendDot} style={{ background: clusterColor('c0') }} />
+              {t('graph.legend.cluster')}
             </span>
             <span>
               <span className={styles.legendDot} style={{ background: projectColor(null) }} />
-              {t('graph.layer.global')}
+              {t('graph.legend.solo')}
             </span>
-            <span><span className={styles.legendCluster} />{t('graph.legend.cluster')}</span>
+            <span><span className={styles.legendCluster} />{t('graph.legend.clusterRing')}</span>
           </div>
         </div>
       )}
