@@ -248,16 +248,19 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   // fitToCurrent 的最新引用（拖拽 effect 的 onUp 闭包需要）
   const fitToCurrentRef = useRef(fitToCurrent)
   fitToCurrentRef.current = fitToCurrent
-  // 数据就绪 → 一次性 fit（瞬移，秒显示全图）
-  const didInitFitRef = useRef(false)
+  // 自动适配视口：数据就绪 / **canvasSize 变化**（ResizeObserver 异步回调
+  // 晚于首次渲染——布局重新按容器比例（如 2.12:1）展开后必须重新 fit，
+  // 否则节点仍挤在默认 900×620 的中间方形区域；用户手动缩放不触发）
+  const lastFitKeyRef = useRef('')
   useEffect(() => {
-    if (didInitFitRef.current) return
     if (nodes.length === 0 || layout.size === 0) return
-    didInitFitRef.current = true
+    const key = `${nodes.length}|${canvasSize.w}x${canvasSize.h}`
+    if (lastFitKeyRef.current === key) return
+    lastFitKeyRef.current = key
     const f = fitToCurrent()
     if (f !== null) setView(f)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, layout])
+  }, [nodes, layout, canvasSize])
 
   // 项目大圆（v0.6 用户诉求：**每个项目一个大圆形**——同 projectId 节点
   // ≥3 个画项目级圆，标签=项目名；项目是标签不是硬边界，跨项目融合簇
