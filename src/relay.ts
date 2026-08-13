@@ -176,6 +176,14 @@ export class EngramRelay {
       if (typeof cwd === 'string' && cwd !== '') this.currentCwd = cwd
       const messages = extractRecentTurn(agent.session.deriveMessages(), turn)
       this.lastConversationText = messages
+      // 工作快照（远景场景 6"继续昨天的工作"）：聚合最近写入的进行中状态
+      if (typeof cwd === 'string' && cwd !== '') {
+        try {
+          this.store.upsertSnapshot(cwd, turn, this.currentSessionId)
+        } catch (error) {
+          this.ctx.logger?.warn?.('[engram-relay] snapshot failed: %s', String(error))
+        }
+      }
       void this.maybeDistill().catch((error) => {
         this.ctx.logger?.warn?.('[engram-relay] distill failed: %s', String(error))
       })

@@ -73,7 +73,7 @@ import { dirname, join, resolve } from 'node:path'
 import { NgramHashAddressing, type HashResult } from './hash.js'
 
 /** 记忆节点类型（统一，不预分轨；kind 仅作展示标签，非分层）。 */
-export type EngramKind = 'fact' | 'decision' | 'event' | 'note'
+export type EngramKind = 'fact' | 'decision' | 'event' | 'note' | 'snapshot'
 
 /**
  * 记忆分层（预设骨架，归属由 AI 自主决策）——分层的本质 = 生命周期 × 可见范围：
@@ -413,6 +413,49 @@ export class EngramStore {
     return (this.titleIndex.get(title) ?? [])
       .map((id) => this.byId.get(id))
       .filter((e): e is EngramNode => !!e)
+  }
+
+  /**
+   * 工作快照（远景场景 6"继续昨天的工作"）：聚合 cwd 最近写入的进行中
+   * 状态 → 快照节点（kind=snapshot，episodic 起步，每次更新即强化保持活跃）。
+   * 幂等：同 cwd 已有快照且内容未变 → 不写盘；内容变化 → 原地更新 + 强化。
+   * 快照是"当前状态"不是"事实"——原地更新，不建版本链。
+   */
+  upsertSnapshot(cwd: string, turn: number, sessionId: string | null = null): EngramNode | null {
+    if (!cwd) return null
+    const latest = this.query({ projectId: cwd, recent: true, limit: 6 })
+      .filter((e) => e.kind !== 'snapshot' && !isSuperseded(e))
+    if (latest.length === 0) return null
+    const body = latest.map((e) => `- [[${e.title}]]：${e.summary.slice(0, 60)}`).join('\n')
+    const summary = `进行中：${latest[0].title}${latest.length > 1 ? ` 等 ${latest.length} 项` : ''}`
+    const existing = this.query({ kind: 'snapshot', projectId: cwd })
+    if (existing.length > 0) {
+      const snap = existing[existing.length - 1]
+      if (snap.content !== body) {
+        this.update(snap.id, {
+          summary,
+          content: body,
+          links: [...new Set([...(snap.links ?? []), ...latest.map((e) => e.title)])],
+        })
+        this.reinforce(snap.id) // 每次更新 = 强化（快照不沉睡）
+      }
+      return snap
+    }
+    const base = String(cwd).split(/[\\/]/).pop() || '项目'
+    return this.add({
+      kind: 'snapshot',
+      layer: 'project',
+      projectId: cwd,
+      title: `工作快照·${base}`,
+      summary,
+      content: body,
+      links: latest.map((e) => e.title),
+      sessionId,
+      turn,
+      causes: [],
+      effects: [],
+      importance: 0.9,
+    })
   }
 
   /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序；不含废止节点）。 */
