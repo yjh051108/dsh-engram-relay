@@ -66,6 +66,21 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect; moved: boolean } | null>(null)
   const lastWheelRef = useRef(0)
+  // ⚠️ v0.6 布局区域跟随容器实际尺寸（用户反馈：宽屏画布节点只占中间
+  // 小正方形、左右大片空白——布局固定 900×620 世界区域导致）：
+  // ResizeObserver 读 canvas 容器宽高 → 布局在容器比例的区域内展开 →
+  // fit 后节点铺满画布
+  const [canvasSize, setCanvasSize] = useState({ w: VIEW_W, h: VIEW_H })
+  useEffect(() => {
+    const el = svgRef.current?.parentElement
+    if (!el) return
+    const ro = new ResizeObserver(() => {
+      const r = el.getBoundingClientRect()
+      if (r.width > 0 && r.height > 0) setCanvasSize({ w: r.width, h: r.height })
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [loading])
 
   // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**——屏幕大小 =
   // 世界值 × (svgWidth/vw)，要屏幕恒定 → 世界值 = 基准 × (vw/VIEW_W) =
@@ -142,24 +157,34 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterList = clusters.list
   const clusterOf = clusters.clusterOf
 
-  // ---- 静态布局（v0.6：一开始就显示全、秒显示）----
+  // ---- 静态布局（v0.6：一开始就显示全、秒显示；布局区域跟随容器）----
   // 迭代 250（实测 292 节点 500 迭代 81ms / 250 迭代 45ms——布局质量
   // 足够，减半提速；初始按簇散布收敛快）
-  const layout = useMemo(() => layoutForce(
-    nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
-    edges.map((e) => ({ from: e.from, to: e.to })),
-    {
-      width: VIEW_W, height: VIEW_H, iterations: 250,
-      charge: -100,
-      spring: 0.1,
-      springLength: 110,
-      collideRadius: 30,
-      centerStrength: 0.08,
-      clusters: clusterOf.size > 0 ? clusterOf : undefined,
-      clusterTarget: 110,
-      clusterStrength: 0.04,
-    },
-  ), [nodes, edges, clusterOf])
+  const layout = useMemo(() => {
+    // ⚠️ 项目引力分组（nodeId → projectId；null 项目（通用）不参与——散点）
+    const projectGroups = new Map<string, string>()
+    for (const n of nodes) {
+      if (n.projectId !== null) projectGroups.set(n.id, n.projectId)
+    }
+    return layoutForce(
+      nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
+      edges.map((e) => ({ from: e.from, to: e.to })),
+      {
+        width: canvasSize.w, height: canvasSize.h, iterations: 250,
+        charge: -100,
+        spring: 0.1,
+        springLength: 110,
+        collideRadius: 30,
+        centerStrength: 0.08,
+        clusters: clusterOf.size > 0 ? clusterOf : undefined,
+        clusterTarget: 110,
+        clusterStrength: 0.04,
+        projectGroups: projectGroups.size > 0 ? projectGroups : undefined,
+        projectTarget: 320,
+        projectStrength: 0.025,
+      },
+    )
+  }, [nodes, edges, clusterOf, canvasSize])
 
   // ---- 渲染性能（v0.6 用户反馈"加载很久很卡"：卡顿根源 = 缩放/平移时
   // 每帧全量重渲染 1000+ SVG 元素）----
@@ -201,13 +226,13 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }, [selectedId, edges])
 
   // ---- 视口（v0.6：静态图——**一开始就显示全**，无运镜动画）----
-  // fitToCurrent：当前布局包围盒 ∪ 中心点（全图适配）
+  // fitToCurrent：当前布局包围盒 ∪ 中心点（全图适配；中心 = 布局区域中心）
   const fitToCurrent = (): { vx: number; vy: number; vw: number; vh: number } | null => {
     const pts = nodes
       .map((n) => layout.get(n.id))
       .filter((p): p is ForcePoint => p !== undefined)
     if (pts.length === 0) return null
-    pts.push({ x: VIEW_W / 2, y: VIEW_H / 2 }) // 中心始终在画面内
+    pts.push({ x: canvasSize.w / 2, y: canvasSize.h / 2 }) // 中心始终在画面内
     const pad = 80
     const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
     const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
@@ -234,9 +259,34 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, layout])
 
-  // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
+  // 项目大圆（v0.6 用户诉求：**每个项目一个大圆形**——同 projectId 节点
+  // ≥3 个画项目级圆，标签=项目名；项目是标签不是硬边界，跨项目融合簇
+  // 仍按连通分量）
+  const projectCircles = useMemo(() => {
+    const byProject = new Map<string | null, string[]>()
+    for (const n of nodes) {
+      const arr = byProject.get(n.projectId) ?? []
+      arr.push(n.id)
+      byProject.set(n.projectId, arr)
+    }
+    const out: Array<{ cx: number; cy: number; radius: number; label: string; color: string; multi: boolean }> = []
+    for (const [pid, ids] of byProject) {
+      if (ids.length < 3) continue // 项目节点太少不画圆（视觉噪音）
+      const pts = ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
+      if (pts.length < 3) continue
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length
+      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length
+      const radius = Math.max(70, ...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 50
+      const label = pid === null ? '通用' : (String(pid).split(/[\\/]/).pop() || '项目')
+      out.push({ cx, cy, radius, label, color: projectColor(pid), multi: pid === null })
+    }
+    return out
+  }, [nodes, layout])
+
+  // 连通分量簇圆：**只画大簇（≥5 节点）**——小簇不画圆（v0.6 用户反馈
+  // "那么多族"——满屏小圆是噪音；项目大圆承担分组，小簇以节点本身可辨）
   const clusterCircles = useMemo(() => clusterList
-    .filter((c) => c.ids.length >= 2)
+    .filter((c) => c.ids.length >= 5)
     .map((c) => {
       const pts = c.ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
       if (pts.length === 0) return null
@@ -399,7 +449,36 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               height={view.vh + 4000}
               fill="url(#dot-grid)"
             />
-            {/* 自发簇大圆（连通分量；项目标签作簇名——簇跨项目即融合/套娃） */}
+            {/* 项目大圆（v0.6：**每个项目一个大圆形**——同项目节点 ≥3 个；
+                项目色淡填充 + 项目名标签；底层） */}
+            {projectCircles.map((c, i) => (
+              <g key={`project-${i}`} className={styles.cluster}>
+                <circle
+                  cx={c.cx} cy={c.cy} r={c.radius}
+                  fill={c.color}
+                  fillOpacity={0.06}
+                  stroke={c.color}
+                  strokeOpacity={0.35}
+                  strokeWidth={1.5 / zc}
+                  strokeDasharray={c.multi ? '6 4' : undefined}
+                />
+                <text
+                  x={c.cx} y={c.cy - c.radius + 24 / zc}
+                  textAnchor="middle"
+                  className={styles.clusterLabel}
+                  style={{
+                    fontSize: 13 / zc,
+                    fontWeight: 700,
+                    paintOrder: 'stroke',
+                    stroke: 'rgba(10,14,22,0.85)',
+                    strokeWidth: 3 / zc,
+                  }}
+                >
+                  {c.label}
+                </text>
+              </g>
+            ))}
+            {/* 连通分量簇圆（≥5 节点才画——小簇以节点本身可辨） */}
             {clusterCircles.map((c, i) => (
               <g key={`cluster-${i}`} className={styles.cluster}>
                 <circle

@@ -68,6 +68,17 @@ export interface ForceLayoutOptions {
   clusterTarget?: number
   /** 簇引力强度（0-1；缺省 0.04——弱，只聚团不压扁）。 */
   clusterStrength?: number
+  /**
+   * 项目引力（v0.6 用户诉求"每个项目一个大圆形"）——nodeId → projectId。
+   * 同项目节点在距离 > projectTarget 时柔和拉近（比连通分量引力弱、
+   * 距离远）——**项目级大簇**形成（内部连通分量子结构保持），不同项目
+   * 分离。
+   */
+  projectGroups?: Map<string, string>
+  /** 项目内目标间距（缺省 320——项目圆尺度）。 */
+  projectTarget?: number
+  /** 项目引力强度（缺省 0.025——弱，大尺度聚团不压扁子结构）。 */
+  projectStrength?: number
 }
 
 /** 布局结果：nodeId → 中心点坐标。 */
@@ -112,6 +123,9 @@ export function createForceSimulator(
     clusters,
     clusterTarget = 110,
     clusterStrength = 0.04,
+    projectGroups,
+    projectTarget = 320,
+    projectStrength = 0.025,
   } = opts
 
   const cx = width / 2
@@ -225,6 +239,30 @@ export function createForceSimulator(
           const dx = dist - clusterTarget
           if (dx > 0) {
             const w = (dx / dist) * a * clusterStrength
+            bi.vx += x * w
+            bi.vy += y * w
+            bj.vx -= x * w
+            bj.vy -= y * w
+          }
+        }
+      }
+    }
+    // ---- 项目引力（v0.6：同项目节点聚成项目级大簇——比连通分量引力
+    // 弱、距离远：大尺度聚团，内部子结构不被压扁）----
+    if (projectGroups !== undefined && projectGroups.size > 1 && list.length > 1) {
+      for (let i = 0; i < list.length; i += 1) {
+        const [ida, bi] = list[i]!
+        const pa = projectGroups.get(ida)
+        if (pa === undefined) continue
+        for (let j = i + 1; j < list.length; j += 1) {
+          const [idb, bj] = list[j]!
+          if (projectGroups.get(idb) !== pa) continue
+          const x = bj.x - bi.x
+          const y = bj.y - bi.y
+          const dist = Math.sqrt(x * x + y * y)
+          const dx = dist - projectTarget
+          if (dx > 0) {
+            const w = (dx / dist) * a * projectStrength
             bi.vx += x * w
             bi.vy += y * w
             bj.vx -= x * w
