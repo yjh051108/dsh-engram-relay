@@ -106,6 +106,19 @@
   pointer-events: none;
 }
 
+/* 自发簇大圆（连通分量）——项目即标签的几何形态 */
+.cluster {
+  pointer-events: none;
+}
+
+.clusterLabel {
+  fill: var(--ds-color-text-3, #6a7284);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  user-select: none;
+}
+
 .node {
   cursor: pointer;
 }
@@ -158,6 +171,16 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+
+.legendCluster {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px dashed rgba(138, 148, 166, 0.5);
   margin-right: 5px;
   vertical-align: middle;
 }

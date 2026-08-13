@@ -121,6 +121,66 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return { nodes: visible, edges: visibleEdges, layout }
   }, [data, filter])
 
+  // 自发簇（v0.4 终态优先）：前端对边做连通分量——簇由链接/因果密度
+  // 自然形成（不依赖项目标签）。项目标签只作着色（硬编码簇 = 脚手架；
+  // 簇跨项目 = 融会贯通/套娃在图上可见）。
+  const clusters = useMemo(() => {
+    if (nodes.length === 0) return []
+    const adj = new Map<string, Set<string>>()
+    for (const n of nodes) adj.set(n.id, new Set())
+    for (const e of edges) {
+      adj.get(e.from)?.add(e.to)
+      adj.get(e.to)?.add(e.from)
+    }
+    const visited = new Set<string>()
+    const out: Array<{ ids: string[]; projects: Set<string | null> }> = []
+    for (const n of nodes) {
+      if (visited.has(n.id)) continue
+      const ids: string[] = []
+      const projects = new Set<string | null>()
+      const queue = [n.id]
+      visited.add(n.id)
+      while (queue.length > 0) {
+        const id = queue.shift()!
+        ids.push(id)
+        projects.add(nodes.find((x) => x.id === id)?.projectId ?? null)
+        for (const nb of adj.get(id) ?? []) {
+          if (!visited.has(nb)) { visited.add(nb); queue.push(nb) }
+        }
+      }
+      out.push({ ids, projects })
+    }
+    return out
+  }, [nodes, edges])
+
+  // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
+  const clusterCircles = useMemo(() => clusters
+    .filter((c) => c.ids.length >= 2)
+    .map((c) => {
+      const pts = c.ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
+      if (pts.length === 0) return null
+      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length
+      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length
+      const radius = Math.max(60, ...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 40
+      const projNames = [...c.projects].map((p) => {
+        if (p === null) return '通用'
+        const parts = String(p).split(/[\\/]/)
+        return parts[parts.length - 1] || '项目'
+      })
+      const label = c.projects.size > 1 ? `${projNames.join(' ⇄ ')}（融合）` : projNames[0]
+      return { cx, cy, radius, label, multi: c.projects.size > 1 }
+    })
+    .filter((c): c is { cx: number; cy: number; radius: number; label: string; multi: boolean } => c !== null),
+  [clusters, layout])
+
+  /** 项目着色（v0.4）：projectId 哈希取色；null（通用知识）灰色。 */
+  const projectColor = (projectId: string | null): string => {
+    if (projectId === null) return '#8a94a6'
+    let h = 0
+    for (const ch of projectId) h = (h * 31 + ch.charCodeAt(0)) >>> 0
+    return `hsl(${h % 360} 55% 55%)`
+  }
+
   // Ctrl+滚轮缩放（围绕鼠标位置，作用于视口）。必须用原生非 passive 监听：
   // React 的 onWheel 在根容器以 passive 注册，preventDefault 拦不住页面缩放。
   useEffect(() => {
@@ -230,6 +290,21 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             viewBox={`${view.vx} ${view.vy} ${view.vw} ${view.vh}`}
             className={styles.svg}
           >
+            {/* 自发簇大圆（连通分量；项目标签作簇名——簇跨项目即融合/套娃） */}
+            {clusterCircles.map((c, i) => (
+              <g key={`cluster-${i}`} className={styles.cluster}>
+                <circle
+                  cx={c.cx} cy={c.cy} r={c.radius}
+                  fill={c.multi ? 'rgba(138,148,166,0.05)' : 'rgba(255,255,255,0.03)'}
+                  stroke={c.multi ? 'rgba(138,148,166,0.4)' : 'rgba(255,255,255,0.12)'}
+                  strokeWidth={1.5}
+                  strokeDasharray={c.multi ? '6 4' : undefined}
+                />
+                <text x={c.cx} y={c.cy - c.radius + 16} textAnchor="middle" className={styles.clusterLabel}>
+                  {c.label}
+                </text>
+              </g>
+            ))}
             {/* 边 */}
             {edges.map((e) => {
               const a = layout.get(e.from)
@@ -251,7 +326,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             {nodes.map((n) => {
               const p = layout.get(n.id)
               if (p === undefined) return null
-              const color = LAYER_COLORS[n.layer] ?? '#888'
+              // v0.4：按项目着色（哈希色板；通用知识灰色）——项目即标签
+              const color = projectColor(n.projectId)
               const selected = detail !== null && detail.id === n.id
               return (
                 <g
@@ -284,12 +360,15 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <div className={styles.legend}>
             <span><span className={styles.legendLineSolid} />{t('graph.legend.causes')}</span>
             <span><span className={styles.legendLineDash} />{t('graph.legend.link')}</span>
-            {(['global', 'project'] as const).map((layer) => (
-              <span key={layer}>
-                <span className={styles.legendDot} style={{ background: LAYER_COLORS[layer] }} />
-                {t(`graph.layer.${layer}`)}
-              </span>
-            ))}
+            <span>
+              <span className={styles.legendDot} style={{ background: projectColor('D:\\x') }} />
+              {t('graph.layer.project')}
+            </span>
+            <span>
+              <span className={styles.legendDot} style={{ background: projectColor(null) }} />
+              {t('graph.layer.global')}
+            </span>
+            <span><span className={styles.legendCluster} />{t('graph.legend.cluster')}</span>
           </div>
         </div>
       )}
