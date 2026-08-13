@@ -73,7 +73,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const viewRef = useRef(view)
   viewRef.current = view
   const svgRef = useRef<SVGSVGElement>(null)
-  const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect } | null>(null)
+  const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect; moved: boolean } | null>(null)
 
   // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**——屏幕大小 =
   // 世界值 × (svgWidth/vw)，要屏幕恒定 → 世界值 = 基准 × (vw/VIEW_W) =
@@ -146,117 +146,71 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterList = clusters.list
   const clusterOf = clusters.clusterOf
 
-  // 最终布局（确定性力导向，全量一次收敛——布局质量与"静态图"一致；
-  // v0.5 曾用增量模拟器实时演化，每帧迭代少 + alpha 回升导致旧节点被
-  // 新节点推得乱晃 → 改为**预计算 + 入场插值**：动画只做"节点从中心
-  // 飞向最终位置"，过程丝滑、终局不凌乱）。
-  const finalLayout = useMemo(() => layoutForce(
-    nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
-    edges.map((e) => ({ from: e.from, to: e.to })),
-    {
-      width: VIEW_W, height: VIEW_H, iterations: 500,
-      // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
-      // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
-      // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
-      // ⚠️ v0.6 布局紧凑化：charge -300 → -100（253 节点互相排斥爆散到
-      // ±1000，fit 后节点仅 3.9px 不可见——用户反馈"位置左上角/空"根因）；
-      // springLength 90→110（边舒展）；collideRadius 34→30（布局更密）。
-      // 实测：fit 后布局 ~1680 宽、节点屏幕 ~6.4px（可见）
+  // ---- 实时演化布局（v0.6 用户要求：**实时渲染，不先算完再做动画**）----
+  // 增量力导向模拟器：节点按 createdAt 时序分帧加入（从中心弹出被斥力
+  // 推开），每帧 step(60) 实时演化渲染——加载即渲染、边加载边生长
+  // （Obsidian 观感），**无"先算完布局"的等待**。alpha 回升温和避免
+  // 旧节点乱晃；速度衰减 0.6 更平滑。
+  const [layout, setLayout] = useState<ForceLayout>(new Map())
+  const joinedAtRef = useRef(new Map<string, number>())
+  const simRef = useRef<ForceSimulator | null>(null)
+  useEffect(() => {
+    if (nodes.length === 0) {
+      setLayout(new Map())
+      return
+    }
+    setTarget(null) // 切换过滤/重新加载 → 重置运镜目标（越界检测接管）
+    const sim = createForceSimulator([], edges.map((e) => ({ from: e.from, to: e.to })), {
+      width: VIEW_W, height: VIEW_H,
       charge: -100,
       spring: 0.1,
       springLength: 110,
       collideRadius: 30,
       centerStrength: 0.08,
+      velocityDecay: 0.6,
       clusters: clusterOf.size > 0 ? clusterOf : undefined,
       clusterTarget: 110,
       clusterStrength: 0.04,
-    },
-  ), [nodes, edges, clusterOf])
-
-  // 入场动画进度 0→1（约 1.8 秒）：节点按 createdAt 时序依次从中心
-  // 缓动飞向最终位置 + 淡入（Obsidian"动力学球一点点生成"的观感，
-  // 但每个节点平滑到位——不凌乱）。
-  const [animT, setAnimT] = useState(1)
-  const animTRef = useRef(1)
-  animTRef.current = animT
-  useEffect(() => {
-    if (nodes.length === 0) return
-    setAnimT(0)
+    })
+    simRef.current = sim
+    joinedAtRef.current = new Map()
+    const sorted = [...nodes].sort((a, b) => a.createdAt - b.createdAt)
+    let idx = 0
     let raf = 0
-    let last = performance.now()
-    const tick = (now: number): void => {
-      const dt = (now - last) / 1000
-      last = now
-      const t = animTRef.current
-      // ⚠️ 终点 1.05（不是 1）：最后批次节点进度 (1.05-0.99)×36 > 1 长完
-      if (t < 1.05) {
-        setAnimT(Math.min(1.05, t + dt * 0.55))
-      } else {
-        cancelAnimationFrame(raf)
-        return
+    const tick = (): void => {
+      // 分帧加入（约 45 批——加载即渲染，无需等待）
+      const batch = Math.max(3, Math.ceil(nodes.length / 45))
+      for (let i = 0; i < batch && idx < sorted.length; i += 1, idx += 1) {
+        const n = sorted[idx]!
+        sim.addNode(n.id, 0.6 + n.importance)
+        joinedAtRef.current.set(n.id, performance.now())
       }
-      raf = requestAnimationFrame(tick)
+      // 每帧 60 迭代——平滑演化（之前 24 太糙会乱晃）
+      sim.step(60)
+      setLayout(sim.layout())
+      if (idx < sorted.length || sim.alpha() > 0.004) {
+        raf = requestAnimationFrame(tick)
+      }
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
   }, [nodes, edges, clusterOf])
 
-  // 节点时序序号（入场顺序 = createdAt 升序）
-  const nodeOrder = useMemo(() => {
-    const m = new Map<string, number>()
-    nodes.slice()
-      .sort((a, b) => a.createdAt - b.createdAt)
-      .forEach((n, i) => m.set(n.id, i))
-    return m
-  }, [nodes])
-
-  // 动画渲染用布局：位置 = 中心 → 最终位置（easeOutCubic 插值）
-  const layout = useMemo(() => {
-    const out: ForceLayout = new Map()
-    for (const n of nodes) {
-      const fp = finalLayout.get(n.id)
-      if (fp === undefined) continue
-      const t = progressOf(n.id)
-      if (t >= 1) {
-        out.set(n.id, { x: fp.x, y: fp.y })
-      } else {
-        const ease = 1 - (1 - t) ** 3 // easeOutCubic
-        out.set(n.id, {
-          x: VIEW_W / 2 + (fp.x - VIEW_W / 2) * ease,
-          y: VIEW_H / 2 + (fp.y - VIEW_H / 2) * ease,
-        })
-      }
-    }
-    return out
-  }, [finalLayout, animT, nodes, nodeOrder])
-
-  // 节点进度（0→1）：按 createdAt 时序 + **确定性抖动**（出现时机微随机
-  // ——v0.6 用户反馈"固定位置生成"：均匀排队太机械，抖动更自然）
-  // ⚠️ 动画终点 1.05：最后节点 pos≈0.99 时 t=(1.05-0.99)×36≈2>1 长完
-  const progressOf = (id: string): number => {
-    if (animT >= 1.05) return 1
-    const count = Math.max(1, nodes.length)
-    const idx = nodeOrder.get(id) ?? 0
-    const jig = ((idx * 2654435761) % 1000) / 1000 // 确定性伪随机 [0,1)
-    // 出现时机 = 序号位置 ± 15% 抖动
-    const pos = (idx + (jig - 0.5) * 0.3) / count
-    return Math.max(0, Math.min(1, (animT - pos) * 36))
-  }
-
-  // 节点淡入/生长进度（动画期间；animT≥1 后恒定 1）
-  const fadeOf = (id: string): number => progressOf(id)
-
-  // 生长缩放（v0.6 用户反馈：要"自我繁殖壮大"感——节点出现时从
-  // 小点**弹性膨胀**到完整大小（easeOutBack 微过冲），不是固定位置
-  // 凭空出现）
+  // 节点生长（v0.6 "繁殖壮大"感）：加入后 350ms 内从 0.12 小点弹性
+  // 膨胀到 1.08 再回落 1（easeOutBack 微过冲）——"砰"地长出来
   const growScaleOf = (id: string): number => {
-    const t = progressOf(id)
-    if (t >= 1) return 1
-    // easeOutBack：过冲约 10%（1.08 → 1）——"砰"地长出来
+    const joined = joinedAtRef.current.get(id)
+    if (joined === undefined) return 1
+    const t = Math.min(1, (performance.now() - joined) / 350)
     const c1 = 1.70158
     const c3 = c1 + 1
     const u = t - 1
     return Math.max(0.12, 1 + c3 * u ** 3 + c1 * u ** 2)
+  }
+  const fadeOf = (id: string): number => {
+    const joined = joinedAtRef.current.get(id)
+    if (joined === undefined) return 1
+    return Math.min(1, (performance.now() - joined) / 350)
   }
 
   // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
@@ -289,16 +243,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
 
   // ---- 闭环运镜系统（v0.6 用户建议：不开环瞬移——感知画面内外 +
   // 平滑摄像头移动）----
-  // 目标视口：可见节点包围盒 ∪ 动画起点（中心）——生成阶段**绝对显示全**
-  const targetView = useMemo(() => {
-    if (nodes.length === 0 || finalLayout.size === 0) return null
+  // 目标视口计算（fitToCurrent：当前布局包围盒 ∪ 中心点——生成阶段
+  // 节点从中心弹出，中心必须始终在画面内）
+  const fitToCurrent = (): { vx: number; vy: number; vw: number; vh: number } | null => {
     const pts = nodes
-      .map((n) => finalLayout.get(n.id))
+      .map((n) => layout.get(n.id))
       .filter((p): p is ForcePoint => p !== undefined)
     if (pts.length === 0) return null
-    // ⚠️ 闭环关键：动画起点 (W/2, H/2) 必须也在视口内——否则生成阶段
-    // 节点从画面外飞进来（"画面内画面外可感知"的闭环要求）
-    pts.push({ x: VIEW_W / 2, y: VIEW_H / 2 })
+    pts.push({ x: VIEW_W / 2, y: VIEW_H / 2 }) // 闭环：中心始终在画面内
     const pad = 80
     const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
     const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
@@ -310,15 +262,18 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       vw: Math.max(200, maxX - minX),
       vh: Math.max(150, maxY - minY),
     }
-  }, [nodes, finalLayout])
+  }
   const [target, setTarget] = useState<{ vx: number; vy: number; vw: number; vh: number } | null>(null)
   const targetRef = useRef(target)
   targetRef.current = target
+  // fitToCurrent 的最新引用（拖拽 effect 的 onUp 闭包需要）
+  const fitToCurrentRef = useRef(fitToCurrent)
+  fitToCurrentRef.current = fitToCurrent
   // 用户手动缩放/拖动 → 停止自动运镜（避免打架）；0.6s 无操作后恢复跟随
   const lastUserOpRef = useRef(0)
   const isUserControlled = (): boolean => Date.now() - lastUserOpRef.current < 600
-  // 闭环：目标视口变化（fit/越界）→ PID 式指数平滑运镜（时间常数 0.25s，
-  // 等效 PD：平滑逼近无振荡，不瞬移）
+  // 闭环：目标视口变化（越界/回全图）→ PID 式指数平滑运镜（时间常数
+  // 0.25s，等效 PD：平滑逼近无振荡，不瞬移）
   useEffect(() => {
     if (target === null) return
     let raf = 0
@@ -352,19 +307,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
   }, [target])
-  // 触发：filter 变化 / 最终布局就绪 → 设目标（运镜）
-  const lastFitRef = useRef<string>('')
+  // 闭环越界检测（生成阶段绝对显示全）：实时演化期间每帧检查当前
+  // 布局是否都在画面内（含余量）——越界则更新目标视口（视口平滑
+  // 跟随生长中的网络展开）
   useEffect(() => {
-    if (lastFitRef.current === filter) return
-    if (targetView === null) return
-    lastFitRef.current = filter
-    setTarget(targetView)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter, nodes, targetView])
-  // 闭环越界检测（生成阶段绝对显示全）：动画期间每帧检查插值位置，
-  // 越界则更新目标视口（视口平滑跟随生长中的网络）
-  useEffect(() => {
-    if (animT >= 1) return
     if (isUserControlled()) return
     const pts = nodes
       .map((n) => layout.get(n.id))
@@ -387,7 +333,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, animT, nodes])
+  }, [layout, nodes])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
@@ -467,12 +413,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       setSelectedId(null) // 点空白取消高亮（回到总图）
       lastUserOpRef.current = Date.now() // 用户操作 → 暂停自动运镜
       const rect = svg.getBoundingClientRect()
-      dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect }
+      dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect, moved: false }
       e.preventDefault()
     }
     const onMove = (e: MouseEvent): void => {
       const d = dragRef.current
       if (d === null) return
+      // 记录移动量（区分单击/拖拽）
+      d.moved = d.moved || Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > 3
       const dx = (e.clientX - d.startX) / d.rect.width // 屏幕像素 → 视口比例
       const dy = (e.clientY - d.startY) / d.rect.height
       setView((v) => ({
@@ -481,7 +429,16 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
         vy: d.startView.vy - dy * d.startView.vh,
       }))
     }
-    const onUp = (): void => { dragRef.current = null }
+    const onUp = (): void => {
+      const d = dragRef.current
+      dragRef.current = null
+      // 单击空白（无位移）= 取消高亮 + **运镜回全图**（v0.6 用户要求）
+      if (d !== null && !d.moved) {
+        setSelectedId(null)
+        const f = fitToCurrentRef.current()
+        if (f !== null) setTarget(f)
+      }
+    }
     svg.addEventListener('mousedown', onDown)
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -519,7 +476,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => { lastFitRef.current = ''; if (targetView !== null) setTarget(targetView) }}>{t('graph.reset')}</button>
+          <button className={styles.refresh} onClick={() => { const f = fitToCurrent(); if (f !== null) setTarget(f) }}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
@@ -660,7 +617,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                 <g
                   key={n.id}
                   className={`${styles.node} ${isSemantic ? styles.nodeSemantic : ''}`}
-                  onClick={() => setSelectedId(n.id)}
+                  onClick={() => { setSelectedId(n.id); setDetail(null) }}
                   onDoubleClick={() => openDetail(n)}
                   role="button"
                   tabIndex={0}
