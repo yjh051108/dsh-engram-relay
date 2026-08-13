@@ -335,11 +335,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     const onUp = (): void => {
       const d = dragRef.current
       dragRef.current = null
-      // 单击空白（无位移）= 取消高亮 + **直接回全图**（瞬移，v0.6）
+      // 单击空白（无位移）= **只取消高亮**（v0.6 用户指正：不要 fit 回全图
+      // ——视口保持当前缩放/位置，避免"点一下空白就最小化"的割裂感）
       if (d !== null && !d.moved) {
         setSelectedId(null)
-        const f = fitToCurrentRef.current()
-        if (f !== null) setView(f)
       }
     }
     svg.addEventListener('mousedown', onDown)
@@ -505,6 +504,9 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   tabIndex={0}
                   opacity={opacity}
                 >
+                  {/* ⚠️ 透明热区（v0.6 用户指正：鼠标必须精确点到圆圈才算点击
+                      ——热区扩大到覆盖文字标签，r+22/zc，pointerEvents 全开） */}
+                  <circle cx={p.x} cy={p.y} r={r + 22 / zc} fill="transparent" pointerEvents="all" />
                   {isSemantic && (
                     <circle cx={p.x} cy={p.y} r={r + 9 / zc} fill="url(#halo-grad)" pointerEvents="none" />
                   )}
