@@ -74,7 +74,12 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   // 补偿系数 zc = max(zoomScale, 1)：放大（zoomScale>1）屏幕恒定；
   // 缩小（zoomScale<1）世界尺寸不变 → 屏幕按比例变小，不挤成一坨。
   const zoomScale = VIEW_W / view.vw
-  const zc = Math.max(zoomScale, 1)
+  // ⚠️ 补偿系数三分段（v0.6 用户要求"放大到够稀疏就该真放大——摄像头靠前"）：
+  //  缩小（zoomScale<1）    → zc=1：元素世界尺寸不变，屏幕跟随缩小（不挤）
+  //  放大初期（1..2.5）     → zc=zoomScale：屏幕恒定，间距变大（变稀疏）
+  //  放大后期（>2.5 已够稀疏）→ zc=2.5 封顶：元素屏幕开始随缩放**一起变大**
+  //    （整体放大感——稀疏度不再变，是摄像头靠前）
+  const zc = Math.max(1, Math.min(zoomScale, 2.5))
 
   const loadGraph = (): void => {
     setLoading(true)
