@@ -3,12 +3,16 @@
   display: flex;
   flex-direction: column;
   height: 100%;
+  /* ⚠️ v0.6 兜底：宿主容器可能本身超高（conversation.view 容器高度异常）
+     导致图谱组件假设的可视区超出屏幕实际可视区（用户实测'下面看不见、
+     要下滑'）——max-height:100vh 保证图谱**绝不超出屏幕可视高度**；
+     父容器正常（≤视口）时不生效 */
+  max-height: 100vh;
   gap: 8px;
   padding: 12px;
   box-sizing: border-box;
   font-size: 13px;
-  /* ⚠️ v0.6 修复：图谱 Tab 自身禁止滚动——内容超出时由 canvas 内部消化，
-     不产生页面滚动条（用户实测：显示框只占可视区 2/3，下 1/3 是滑动条） */
+  /* 图谱 Tab 自身禁止滚动——内容超出时由 canvas 内部消化 */
   overflow: hidden;
 }
 
