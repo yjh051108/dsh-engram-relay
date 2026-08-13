@@ -21,7 +21,7 @@ import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { EngramRelay } from './relay.js'
-import { ENGRAM_LAYERS, isVisible, isSuperseded, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
+import { ENGRAM_LAYERS, isVisible, isSuperseded, type EngramKind, type EngramLayer, type EngramNode, type EngramStore } from './engram/store.js'
 import type { CausalEdgeKind } from './engram/causal.js'
 
 type ToolsContext = CordisContext & { tools: ToolRegistry }
@@ -133,10 +133,35 @@ async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<st
   return woven
 }
 
-/** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
-function entryLine(e: EngramNode): string {
+/** 入口行渲染（[[标题]][层] 摘要 + **因果/链接邻接**——渐进披露入口层
+ *  就给导航信息：↑因/↓果（因果链）→ 关联（双向链接），模型看到即可
+ *  决定顺着哪条边探究（engram_open 展开正文），不用盲目逐个 open。 */
+function entryLine(e: EngramNode, store: EngramStore): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
-  return `- [[${e.title}]][${e.layer}]${pendingMark} ${e.summary}`
+  return `- [[${e.title}]][${e.layer}]${pendingMark} ${e.summary}${neighborsOf(e, store)}`
+}
+
+/** 邻接摘要：↑因/↓果/关联（id 解析标题 + 按重要度排序 + 截断——入口
+ *  层只给导航线索，别让因果链淹没摘要；展开留给 engram_open）。 */
+function neighborsOf(e: EngramNode, store: EngramStore): string {
+  const parts: string[] = []
+  const titlesOf = (ids: string[], max: number): string[] => {
+    const withImp = ids
+      .map((id) => store.get(id))
+      .filter((n): n is EngramNode => !!n)
+      .sort((a, b) => b.importance - a.importance)
+      .map((n) => n.title)
+    return withImp.slice(0, max)
+  }
+  const causes = titlesOf(e.causes ?? [], 4)
+  const effects = titlesOf(e.effects ?? [], 4)
+  const links = (e.links ?? []).slice(0, 3)
+    .map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim())
+  const wrap = (ts: string[]): string => ts.map((t) => `[[${t}]]`).join(' ')
+  if (causes.length > 0) parts.push(`↑因:${wrap(causes)}${(e.causes?.length ?? 0) > 4 ? '…' : ''}`)
+  if (effects.length > 0) parts.push(`↓果:${wrap(effects)}${(e.effects?.length ?? 0) > 4 ? '…' : ''}`)
+  if (links.length > 0) parts.push(`→:${wrap(links)}`)
+  return parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
 }
 
 export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () => void {
@@ -166,7 +191,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     execute: async (args, exec) => {
       const hit = await relay.recall(String(args.query), Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
       if (hit.engrams.length === 0) return `（无命中，reason=${hit.reason}）`
-      return hit.engrams.map((e) => entryLine(e)).join('\n')
+      return hit.engrams.map((e) => entryLine(e, relay.store)).join('\n')
     },
   })))
 
@@ -587,7 +612,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const q = String(args.query ?? '').trim().toLowerCase()
       if (q) nodes = nodes.filter((e) => e.title.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
       if (nodes.length === 0) return '（无匹配记忆）'
-      const lines = nodes.map((e) => entryLine(e))
+      const lines = nodes.map((e) => entryLine(e, relay.store))
       return `记忆图谱（${nodes.length} 条）：\n${lines.join('\n')}`
     },
   })))
