@@ -330,12 +330,23 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       })
       // 修订路径：旧版因果/链接继承 + 邻居指针迁移 + 版本链（旧版废止可追溯）
       let revisedOld: string | null = null
+      let conflictNote = ''
       if (dedupe && dedupe.id !== e.id) {
         revisedOld = dedupe.title
         const old = dedupe
+        const mergedCauses = [...new Set([...(e.causes ?? []), ...(old.causes ?? [])])]
+        const mergedEffects = [...new Set([...(e.effects ?? []), ...(old.effects ?? [])])]
+        // ⚠️ 反向矛盾边（第七轮新 agent 实测）：继承边与本次显式 causes
+        // 指向同一节点时，同一节点会同时出现在 causes 和 effects（双向
+        // 矛盾）——causes 优先，从 effects 移除重叠，回执提示
+        const overlap = mergedCauses.filter((id) => mergedEffects.includes(id))
+        if (overlap.length > 0) {
+          conflictNote = `（合并时检测到 ${overlap.length} 条反向矛盾边，已按 causes 优先保留）`
+        }
+        const cleanEffects = mergedEffects.filter((id) => !mergedCauses.includes(id))
         relay.store.update(e.id, {
-          causes: [...new Set([...(e.causes ?? []), ...(old.causes ?? [])])],
-          effects: [...new Set([...(e.effects ?? []), ...(old.effects ?? [])])],
+          causes: mergedCauses,
+          effects: cleanEffects,
           links: [...new Set([...(e.links ?? []), ...(old.links ?? [])])],
         })
         for (const c of old.causes ?? []) {
@@ -381,7 +392,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       }
       const linkNote = woven > 0 ? `，自动织网 ${woven} 条（三维度加权）` : ''
       if (revisedOld !== null) {
-        return `已修订记忆 [[${e.title}]]（${layer}·${kind}）：同主题旧版 [[${revisedOld}]] 已废止（版本链可追溯），因果/链接已继承——检索只命中当前版${linkNote}`
+        return `已修订记忆 [[${e.title}]]（${layer}·${kind}）：同主题旧版 [[${revisedOld}]] 已废止（版本链可追溯），因果/链接已继承——检索只命中当前版${conflictNote}${linkNote}`
       }
       // 织网推荐（因果边仍由 AI 决策：自动织网只做弱关系 link，因果是强语义）
       // ⚠️ 条件只查 causes/effects：links 已带但漏因果（常见偷懒）也必须推荐。
@@ -594,7 +605,8 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       // open 邻接补「依赖/引用」展示（graph 层查询）
       const deps = relay.graph.depsOf(node.id)
       const parts: string[] = []
-      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''} · ${node.state ?? 'episodic'})`)
+      const supMark = isSuperseded(node) ? '（已废止）' : ''
+      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''} · ${node.state ?? 'episodic'})${supMark}`)
       parts.push(node.summary)
       if (node.content) parts.push(`\n${node.content}`)
       // ⚠️ 邻接契约：无因果/链接时显式占位（新 agent 实测：段落缺席被误判为 bug）

@@ -391,14 +391,15 @@ export class EngramRelay {
       enabled: this.config.enabled,
       // 人话摘要（新 agent 实测驱动）：字段含义一行讲清
       brief: `记忆图谱共 ${count} 条（已归档 ${archived}，硬上限 ${maxNodes}），`
+        + `分层：${JSON.stringify(this.store.layerCounts())}（global/project）；`
         + '跨会话全可见；语义引擎为纯算法（词汇/图/共现，零外部模型）；'
         + '写入自动查重修订+织网，检索用 engram_recall，展开用 engram_open。'
         + ` 其余字段：slotCount=${slots}（哈希检索槽位总数，内部指标）；`
-        + `budgetTokens=${budget}（单次注入预算）；stateCounts（巩固状态：`
+        + `budgetTokens=${budget}（单次记忆注入预算，token）；stateCounts（巩固状态：`
         + `episodic=新写 ${states.episodic} / semantic=已固化 ${states.semantic} / dormant=沉睡 ${states.dormant}）；`
         + `pendingCount=${this.store.pending().length}（待确认节点数）；`
         + `graphEdges=${this.graph.edgeCount()}（因果/链接边总数）；`
-        + `currentCwd=当前工作目录（可能为 null=无 cwd 上下文）；`
+        + `storeDir=数据目录（见上）；currentCwd=当前工作目录（可能为 null=无 cwd 上下文）；`
         + `compactCoexist=与官方上下文压缩（compact）共存检测（布尔）。`,
       storeDir: this.store.dir,
       engramCount: count,

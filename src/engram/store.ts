@@ -449,11 +449,17 @@ export class EngramStore {
     if (arr.length === 0) this.titleIndex.delete(title)
   }
 
-  /** 按标题取节点（双向链接 [[title]] 解析）。同名消歧：最近写入优先。
-   *  ⚠️ 曾有 Map<title,单id> 覆盖 bug——同名节点互相顶掉；多值后不再丢。 */
+  /** 按标题取节点（双向链接 [[title]] 解析）。同名消歧：**未废止（active）优先**，
+   *  其次最近写入——否则链接解析会取到废止旧版（第七轮新 agent 实测：
+   *  邻接标注错乱根因）。⚠️ 曾有 Map<title,单id> 覆盖 bug——多值后不再丢。 */
   byTitle(title: string): EngramNode | undefined {
     const arr = this.titleIndex.get(title)
     if (!arr || arr.length === 0) return undefined
+    // active 优先：从后往前找第一个未废止的
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const e = this.byId.get(arr[i])
+      if (e && !isSuperseded(e)) return e
+    }
     return this.byId.get(arr[arr.length - 1])
   }
 
