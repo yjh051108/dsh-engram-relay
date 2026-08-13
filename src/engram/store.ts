@@ -254,7 +254,7 @@ export class EngramStore {
           e.layer = (e as { layer: string }).layer === 'session' ? 'project' : (e.layer ?? 'project')
           e.projectId = e.projectId ?? null
           e.slots = Array.isArray(e.slots) ? e.slots : []
-          e.links = Array.isArray(e.links) ? e.links : []
+          e.links = Array.isArray(e.links) ? e.links.map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean) : []
           e.causes = Array.isArray(e.causes) ? e.causes : []
           e.effects = Array.isArray(e.effects) ? e.effects : []
           e.importance = typeof e.importance === 'number' ? e.importance : 0

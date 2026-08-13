@@ -291,7 +291,11 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const title = String(args.title)
       const summary = String(args.summary)
       const content = String(args.content ?? '')
-      const links = Array.isArray(args.links) ? args.links.map(String) : []
+      // ⚠️ 归一化链接格式（第八轮新 agent 实测：links 混存 [[标题]] 与裸标题
+      // 导致邻接标注双标/误标）——统一存裸标题
+      const links = Array.isArray(args.links)
+        ? args.links.map(String).map((l) => l.replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
+        : []
       // v0.4 自由多标签（命名空间约定：全局/项目:xxx/教训:xxx）
       const tags = Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : []
       // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
@@ -473,7 +477,11 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const title = String(args.title)
       const summary = String(args.summary)
       const content = String(args.content ?? '')
-      const links = Array.isArray(args.links) ? args.links.map(String) : []
+      // ⚠️ 归一化链接格式（第八轮新 agent 实测：links 混存 [[标题]] 与裸标题
+      // 导致邻接标注双标/误标）——统一存裸标题
+      const links = Array.isArray(args.links)
+        ? args.links.map(String).map((l) => l.replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
+        : []
       // v0.4 自由多标签（命名空间约定：全局/项目:xxx/教训:xxx）
       const tags = Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : []
       // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
@@ -590,6 +598,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         ? `\n（⚠️ 标题「${node.title}」有 ${allVersions.length} 个节点——当前展开最近写入的（id ${node.id.slice(-6)}）；`
         + '用 engram_search 可盘点全部，同主题可经 engram_store 写入触发自动修订合并）'
         : ''
+      // 矛盾边提示（第八轮新 agent 实测：同一节点同时出现在 causes 与 effects
+      // ——继承边与显式边合并的历史残留，展示层告警）
+      const conflictIds = (node.causes ?? []).filter((id) => (node.effects ?? []).includes(id))
+      const conflictNote = conflictIds.length > 0
+        ? `\n（⚠️ 检测到 ${conflictIds.length} 个节点同时是前因与后果（${conflictIds.map((id) => `[[${relay.store.get(id)?.title ?? id}]]`).join('、')}）——数据矛盾，可能是修订合并的历史残留，可用 engram_update 修正）`
+        : ''
       // 可见性：只能展开自己可见层的节点
       if (!isVisible(node, viewerOf(exec))) return `无权展开 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
       // 展开 = 深度使用 → 强化（激活模型 B 增量）
@@ -617,7 +631,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (linked.length > 0) parts.push(`**关联**（双向链接）：${linked.map((c) => `[[${c.title}]]`).join('、')}`)
       else parts.push('**关联**（双向链接）：（无）')
       if (deps.length > 0) parts.push(`**依赖/引用**：${deps.map((c) => `[[${c.title}]]`).join('、')}`)
-      return parts.join('\n') + dupNote
+      return parts.join('\n') + dupNote + conflictNote
     },
   })))
 
@@ -700,7 +714,33 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         const current = (active.length > 0 ? active : group).sort((a, b) => b.importance - a.importance)[0]
         const dupMark = group.length > 1 ? ` ×${group.length}` : ''
         const supersededMark = isSuperseded(current) ? '（已废止）' : ''
-        lines.push(`${entryLine(current, relay.store)}${dupMark}${supersededMark}`)
+        // ⚠️ 完全内联渲染（第八轮：模块级 entryLine/neighborsOf 在工具进程
+        // 表现异常——byTitle 返回 active 却渲染（已废止）。这里用与 DBG 验证
+        // 一致的内联逻辑（byTitle + isSuperseded 直查），保证标注准确）
+        const stateMark = current.state === 'semantic' ? '[语义]' : ''
+        const pendingMark = current.status === 'pending' ? ' ⏳' : ''
+        const parts: string[] = []
+        const renderTitles = (ts: string[]): string => ts
+          .map((t) => {
+            const target = relay.store.byTitle(t)
+            return `[[${t}]]${target && isSuperseded(target) ? '（已废止）' : ''}`
+          })
+          .join(' ')
+        const titlesOf = (ids: string[], max: number): string[] => ids
+          .map((id) => relay.store.get(id))
+          .filter((n): n is EngramNode => !!n)
+          .sort((a, b) => b.importance - a.importance)
+          .slice(0, max)
+          .map((n) => n.title)
+        const causes = titlesOf(current.causes ?? [], 4)
+        const effects = titlesOf(current.effects ?? [], 4)
+        const links = (current.links ?? []).slice(0, 3)
+          .map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim())
+        if (causes.length > 0) parts.push(`↑因:${renderTitles(causes)}${(current.causes?.length ?? 0) > 4 ? '…' : ''}`)
+        if (effects.length > 0) parts.push(`↓果:${renderTitles(effects)}${(current.effects?.length ?? 0) > 4 ? '…' : ''}`)
+        if (links.length > 0) parts.push(`→:${renderTitles(links)}`)
+        const nbr = parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
+        lines.push(`- [[${current.title}]][${current.layer}]${stateMark}${pendingMark}${supersededMark} ${current.summary}${nbr}${dupMark}`)
         shown++
       }
       const total = nodes.length
