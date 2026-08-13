@@ -170,7 +170,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_recall：按需唤醒检索（跨会话分层准入） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（跨会话分层）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + 因果邻接）。缺省召回 global（全局）+ 本目录 project（可见层全部）；看到 [[标题]] 后由你判断——需要详情就再 engram_open 展开，不需要就直接用摘要作答。',
+    description: '主动唤醒记忆图谱入口（跨会话全可见，项目即标签）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + **因果/链接邻接**：↑因/↓果/→）。看到 [[标题]] 后由你判断：需要详情就 engram_open 展开，顺着邻接可继续探究（递归导航），不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',
@@ -198,7 +198,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；**layer 决策（v0.4 项目即标签，融会贯通）**：默认 **project**（归属当前工作目录项目）；**通用知识写 global**（开发者喜好/全局要求——换个项目还有用的）；**跨项目关联用 causes/links 织桥**（如"本项目的 X 方案引用 Y 项目的做法"→ links 填 [[Y 项目记忆标题]]，两项目自动关联）。**tags 自由分类（三类命名空间）**：`全局`（开发者喜好/全局要求）、`项目:xxx`（项目自由命名）、`教训:xxx`（教训自由子分类：代码/思想/流程…）——一节点可多标签（如 `["项目:dsh", "教训:代码"]`），自由创建不设枚举。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；⑥ **价值门槛（判别——先问：这条值得写吗？）**：值得写——可复用知识/决策/踩坑/约定/规律（换个时间还有用）；**不值得写——寒暄/过程流水/一次性琐事/对话里已说清且不会再用的细节**（事件洪水会淹没可复用知识）。拿不准就写（宁多勿漏，系统有查重/归档兜底），但过程性流水账不要写；**layer 决策（v0.4 项目即标签，融会贯通）**：默认 **project**（归属当前工作目录项目）；**通用知识写 global**（开发者喜好/全局要求——换个项目还有用的）；**跨项目关联用 causes/links 织桥**（如"本项目的 X 方案引用 Y 项目的做法"→ links 填 [[Y 项目记忆标题]]，两项目自动关联）。**tags 自由分类（三类命名空间）**：`全局`（开发者喜好/全局要求）、`项目:xxx`（项目自由命名）、`教训:xxx`（教训自由子分类：代码/思想/流程…）——一节点可多标签（如 `["项目:dsh", "教训:代码"]`），自由创建不设枚举。',
     parameters: {
       layer: {
         type: 'string',
@@ -527,7 +527,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_open：展开入口（渐进披露第二层） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_open',
-    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + 双向链接 + 因果前因/后果。当你看到 [[标题]] 入口需要详情时调用。',
+    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + 双向链接 + 因果前因/后果。当你看到 [[标题]] 入口需要详情时调用；展开后可顺着 ↑因/↓果/→ 的 [[标题]] 继续递归探究（记忆图谱导航）。',
     parameters: {
       title: {
         type: 'string',
@@ -565,7 +565,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_search：检索图谱（分层/项目/类型/关键词） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_search',
-    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤，遵守跨会话可见性（global + 本目录 project）。返回入口列表（[[标题]] + 摘要）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
+    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤（跨会话全可见）。返回入口列表（[[标题]] + 摘要 + 邻接）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
     parameters: {
       query: {
         type: 'string',
@@ -790,7 +790,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_status：服务状态 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_status',
-    description: '查看 engram 记忆服务状态：分层统计（global/project 条数）、哈希槽位、因果图边数、模型状态、注入预算。',
+    description: '查看 engram 记忆服务状态：分层统计（global/project）、巩固状态（episodic/semantic/dormant）、归档数/硬上限、哈希槽位、因果图边数、语义引擎状态、注入预算。',
     parameters: {},
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
