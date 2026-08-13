@@ -25,4 +25,10 @@ export interface EngramRelayConfig {
   distillRequireConfirm: boolean
   /** 唤醒语义阈值：bge 余弦相似度下限（低于此值不注入，宁缺毋滥）。 */
   semanticMinScore: number
+  /** 时序 recency 加权强度（排序乘法项 1+w·e^(-Δturn/20)；仿真显示方向需
+   *  数据驱动——0 关闭，负数反转"旧更相关"；默认 0.25 保守）。 */
+  recencyWeight: number
+  /** 唤醒采样日志：记录查询/候选分数/注入选择到 storeDir/wake-samples.jsonl
+   *  （实战样本积累，供融合权重离线拟合；默认开）。 */
+  wakeSampleLog: boolean
 }

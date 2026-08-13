@@ -152,14 +152,15 @@ export class EngramRelay {
       return next()
     })
 
-    // 2. 记忆能力说明（固定文本，零动态：system 稳定 → 前缀缓存保持命中）。
-    //    动态召回内容走消息尾注入（上方），需要时也可用 engram_recall 工具。
+    // 2. 记忆能力说明（固定文本，零动态：静态到头——order 靠前，工具 schema
+    //    变更时静态段仍缓存命中；动态召回内容走消息尾注入（下方），永不进
+    //    system 头部）。
     //    ⚠️ 必须挂 ctx.effect：裸注册在 fiber 重建（热重载/失败回滚）时不注销，
     //    残留导致下次 apply duplicate "engram:relay already registered"。
     this.ctx.effect(() => this.ctx.systemPrompt.context({
       name: 'engram:relay',
-      order: 9997,
-      text: '本环境有 engram 跨会话记忆图谱（global/project/session 分层、因果链接、渐进披露）。需要时用 engram_recall 检索、engram_store 写入、engram_open 展开；每轮请求会自动把相关记忆追加到消息末尾。',
+      order: -85,
+      text: '本环境有 engram 记忆图谱（分层/因果/链接）。engram_recall 等 engram_* 工具直接可用；每轮请求会自动把相关记忆追加到消息末尾。',
     }), 'engram-relay: memory-context')
 
     // 3. 回合后蒸馏（agent/turn-stopping：回合关闭边界，serial 不 veto）。

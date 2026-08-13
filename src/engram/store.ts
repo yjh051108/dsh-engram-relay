@@ -203,6 +203,7 @@ export class EngramStore {
       }
       const cleaned = raw.replace(/\0+/g, '')
       let loaded = 0
+      let corrupt = 0
       for (const line of cleaned.split('\n')) {
         if (line.trim() === '') continue
         try {
@@ -223,7 +224,7 @@ export class EngramStore {
           if (e.title) this.titleIndex.set(e.title, e.id)
           loaded++
         } catch {
-          // 单条损坏跳过，不拖垮整个存储
+          corrupt++
         }
       }
       if (loaded > 0) {
@@ -233,6 +234,13 @@ export class EngramStore {
             writeFileSync(this.file, cleaned, 'utf8')
           } catch { /* 写回失败不阻塞 */ }
         }
+        return
+      }
+      // ⚠️ 主文件无节点但全部可解析 = 合法空库（如 clearSession 清空后），
+      // 不是损坏——绝不回退备份（否则会把已删除的会话记忆恢复回来，
+      // 实测「清空后重载残留」bug 的根因）。但含 NUL 的原始内容（写坏
+      // 的文件）仍是损坏，必须回退备份恢复。
+      if (src === this.file && corrupt === 0 && !raw.includes('\0')) {
         return
       }
       // 该来源全坏 → 下一个（更旧的备份）

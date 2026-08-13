@@ -37,7 +37,32 @@ test('client: missing server file degrades to null', async () => {
 
 const BGE_PATH = process.env.ENGRAM_EMBED_MODEL || 'F:/dsh/01-memory/engram-trial/bge-small-zh'
 
-test('client: load with missing model dir degrades to loaded:false (no crash)', async () => {
+/**
+ * 真实服务测试的环境探测：Python 可 spawn 且 engram server 能握手才跑。
+ * 无 Python/torch 环境的机器（如纯 TS ONNX embedder 部署）skip 而非 fail，
+ * 保留真实 bge 服务在完整环境下的验证价值。
+ */
+async function pythonServiceAvailable() {
+  try {
+    const { PythonEngramClient } = await import('../lib/model/python-client.js')
+    const probe = new PythonEngramClient('python', '')
+    try {
+      const status = await probe.status()
+      return status !== null
+    } finally {
+      probe.stop()
+    }
+  } catch {
+    return false
+  }
+}
+
+test('client: load with missing model dir degrades to loaded:false (no crash)', async (t) => {
+  const ok = await pythonServiceAvailable()
+  if (!ok) {
+    t.skip('Python 嵌入服务不可用（缺 python/torch 环境）——真实服务测试跳过')
+    return
+  }
   const { PythonEngramClient } = await import('../lib/model/python-client.js')
   const client = new PythonEngramClient('python', 'Qwen/Qwen3-0.6B')
   const status = await client.load()
@@ -46,7 +71,13 @@ test('client: load with missing model dir degrades to loaded:false (no crash)', 
   client.stop()
 })
 
-test('client: embed op returns 512-dim vectors + query vec (bge 真实服务)', async () => {
+test('client: embed op returns 512-dim vectors + query vec (bge 真实服务)', async (t) => {
+  const ok = await pythonServiceAvailable()
+  const bgeOk = await import('node:fs').then((fs) => fs.existsSync(BGE_PATH)).catch(() => false)
+  if (!ok || !bgeOk) {
+    t.skip(`Python 服务或 bge 模型不可用（python=${ok} bge=${bgeOk}）——真实嵌入测试跳过`)
+    return
+  }
   const { PythonEngramClient } = await import('../lib/model/python-client.js')
   const client = new PythonEngramClient('python', '', '', BGE_PATH)
   const out = await client.embed(

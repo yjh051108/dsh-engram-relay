@@ -54,6 +54,8 @@ export interface Config {
   embedModel: string
   distillRequireConfirm: boolean
   semanticMinScore: number
+  recencyWeight: number
+  wakeSampleLog: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -83,6 +85,10 @@ export const Config: z<Config> = z.object({
     .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
   semanticMinScore: z.number().min(0).max(1).default(0.42)
     .description('唤醒语义阈值：bge 余弦相似度下限（低于此值不注入；无关记忆零注入）'),
+  recencyWeight: z.number().min(-2).max(2).default(0.25)
+    .description('时序 recency 加权强度（1+w·e^(-Δturn/20)；仿真标定显示方向需数据驱动：0=关闭，负=旧记忆优先，默认 0.25 保守）'),
+  wakeSampleLog: z.boolean().default(true)
+    .description('唤醒采样日志（storeDir/wake-samples.jsonl）：记录查询/候选分数/注入选择，供融合权重离线拟合'),
 })
 
 /** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；旧 engram-trial 路径存在则沿用。 */
@@ -117,6 +123,8 @@ export function apply(ctx: Context, config: Config): void {
     embedModel: resolveEmbedModel(config.embedModel),
     distillRequireConfirm: config.distillRequireConfirm,
     semanticMinScore: config.semanticMinScore,
+    recencyWeight: config.recencyWeight,
+    wakeSampleLog: config.wakeSampleLog,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入

@@ -112,53 +112,59 @@ export class EngramWakeEngine {
     candidates = candidates.filter((e) => isVisible(e, viewer))
     if (candidates.length === 0) return { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
 
-    // 2. 打分：bge 语义精排（唯一语义判断）→ 重要度仅作排序兜底。
-    //    ⚠️ 相关性门槛（宁缺毋滥）：不相关的记忆一律不注入——
-    //      哈希命中只是粗筛，语义余弦低于阈值的候选直接剔除；
-    //      embedder 不可用时无法判断语义相关性，本轮不注入
-    //      （重要度垫底会带来弱相关污染 + 每轮注入的缓存损耗，宁可空手）。
-    const semanticMin = this.config.semanticMinScore ?? 0.42
-    // 自动唤醒更严：明显相关才注入（0.42 + 0.08 ≈ 0.50），手动 recall 保持 0.42。
-    const autoBoost = opts.auto ? 0.08 : 0
-    // 多重比较校正（温和版）：候选越多误过概率越高，但真实系统哈希第一道防线
-    // 已把无关候选压到个位数——仅对候选异常膨胀时温和收紧。
-    const threshold = semanticMin + autoBoost + 0.03 * Math.log2(Math.max(1, candidates.length / 16))
+    // 2. 打分降级链：embedder（bge 语义精排）→ scorer（遗留门控）→ 重要度垫底。
+    //    ⚠️ 契约（AGENTS.md + hybrid/wake 测试）：哈希命中永不因打分器缺失被
+    //    丢弃——打分只决定排序与截断顺序，不做硬性剔除（「宁缺毋滥」由自动
+    //    唤醒的 top-1 注入执行，而非在候选层丢命中）。
     let raw: Map<string, number> | null | undefined
     if (this.scorers?.embedder) {
       raw = await this.scorers.embedder(query, candidates).catch(() => null)
     }
     if (!raw || raw.size === 0) {
-      return { engrams: [], reason: 'no-embedder', injectedTokens: 0 }
+      // 降级第二级：遗留 scorer（embedder 抛错/不可用时的门控打分）
+      if (this.scorers?.scorer) {
+        raw = await this.scorers.scorer(query, candidates).catch(() => null)
+      }
     }
-    // 阈值过滤仅限「主席位」资格：前因/后果的语义常与查询不同（因果邻接
-    // 不是语义相似），若在此处全量过滤会把因果邻居挡在传播之外。
-    // 因果席位从全候选的传播结果选取（见第 3 步），不受阈值限制。
-    const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= threshold)
-    if (relevant.length === 0) {
-      return { engrams: [], reason: 'below-threshold', injectedTokens: 0 }
+    const scores = new Map<string, number>()
+    if (raw && raw.size > 0) {
+      // 打分器部分缺分 → 重要度垫底（打分器不丢哈希命中）
+      for (const e of candidates) scores.set(e.id, raw.get(e.id) ?? e.importance)
+    } else {
+      // 纯重要度兜底 + 同文本精确命中加权：与查询完全同文的条目（确定性
+      // 寻址的精确保底）优先于同槽位的弱相关条目（测试契约：同文本必中）。
+      const q = query.trim()
+      for (const e of candidates) {
+        let score = e.importance
+        if (q && (e.summary.includes(q) || e.title.includes(q))) score += 0.5
+        scores.set(e.id, score)
+      }
     }
-    const scores = new Map<string, number>(
-      candidates.map((e) => [e.id, raw!.get(e.id) ?? e.importance]),
-    )
+    // 哈希候选全保留（混合保底：语义分只决定排序，不硬剔哈希命中）。
+    const relevant = candidates
 
-    // 3. 因果传播（前因/后果双向）——基于全候选分数（含低于阈值的邻居种子）。
+    // 3. 因果传播（前因/后果双向）——基于全候选分数（含弱分邻居种子）。
     const activated = this.graph.propagate(scores)
 
     // 4. 分层稀疏选择（因果席位保证）：
-    //    - 主席位：**阈值内**候选按激活分数排序；
-    //    - 因果席位：传播激活的因果邻居（可低于阈值）占独立席位。
+    //    - 主席位：全部哈希候选按激活分数排序（混合保底，不做语义硬剔）；
+    //    - 因果席位：传播激活的因果邻居占独立席位。
     const relevantIds = new Set(relevant.map((e) => e.id))
     const hitIds = new Set(candidates.map((e) => e.id))
     const causalSlots = Math.max(1, Math.ceil(limit / 2))
 
-    // 时序衰减权重：近期记忆加分（新近优先，20 回合指数衰减；无 turn 信息时退化为 1）
+    // 时序衰减权重：近期记忆加分（w·e^(-Δturn/20) 指数衰减；w = recencyWeight
+    // 配置可调——仿真标定显示方向需数据驱动（默认 0.25 保守，0 关闭，负=旧优先）。
+    // 无 turn 信息时退化为 1（不调制）。
     const curTurn = viewer.turn
     const nodeById = new Map(candidates.map((e) => [e.id, e]))
     const recency = (id: string): number => {
       const e = nodeById.get(id)
       if (!e || typeof curTurn !== 'number' || typeof e.turn !== 'number') return 1
+      const w = this.config.recencyWeight ?? 0.25
+      if (w === 0) return 1
       const d = Math.max(0, curTurn - e.turn)
-      return 1 + 0.25 * Math.exp(-d / 20)
+      return 1 + w * Math.exp(-d / 20)
     }
 
     // 类脑激活加权（阶段 3）：排序分数 = 语义激活 × sigmoid(基础激活 - 基准)，
@@ -172,7 +178,7 @@ export class EngramWakeEngine {
     }
 
     const ranked: Array<[string, number]> = []
-    // 主席位：**阈值内**候选按「语义激活 × 激活加权 × 时序权重」排序
+    // 主席位：全部哈希候选按「语义激活 × 激活加权 × 时序权重」排序
     const hitRanked = [...activated.entries()]
       .filter(([id]) => hitIds.has(id) && relevantIds.has(id))
       .sort((a, b) => b[1] * actBias(b[0]) * recency(b[0]) - a[1] * actBias(a[0]) * recency(a[0]))
@@ -201,15 +207,12 @@ export class EngramWakeEngine {
     }
     ranked.length = Math.min(ranked.length, limit)
 
-    // 动态注入（分数团）：top1 的 0.9 倍以内的都注入（上限 limit）——
-    // 明显第一只注入 1 条（确定，省噪声）；并列相关注入 2-3 条。
-    // 自动唤醒（limit=1）自然收窄到 1 条；手动 recall 可到 3 条。
+    // 稀疏注入：limit 内全部按序注入（哈希命中不因分数差距被丢弃——契约
+    // 「混合保底」；稀疏性由 limit + token 预算 + 自动唤醒 top-1 保证）。
     const picked: EngramNode[] = []
     let tokens = 0
-    const topScore = ranked[0]?.[1] ?? 0
-    for (const [id, score] of ranked) {
+    for (const [id, _score] of ranked) {
       if (picked.length >= limit) break
-      if (picked.length > 0 && score < topScore * 0.9) break
       const e = this.store.get(id)
       if (!e) continue
       const cost = estimateTokens(e.title) + estimateTokens(e.summary)
@@ -224,9 +227,45 @@ export class EngramWakeEngine {
       reason: picked.length > 0 ? `hybrid-wake:${picked.length}` : 'below-threshold',
       injectedTokens: tokens,
     }
+    // 实战样本积累：记录查询/候选分数/注入选择（异步落盘，不阻塞主流程；
+    // 供融合权重离线拟合——仿真阶段 ① 的 τ 标定数据源）
+    if (this.config.wakeSampleLog) {
+      const actOf = (id: string): number | null => {
+        if (!this.activation) return null
+        try { return Number(this.activation.get(id).toFixed(4)) } catch { return null }
+      }
+      void this.appendSample({
+        time: Date.now(),
+        auto: opts.auto === true,
+        limit,
+        query: query.slice(0, 500),
+        cwd: viewer.cwd ?? null,
+        candidates: candidates.slice(0, 20).map((e) => ({
+          id: e.id, title: e.title, layer: e.layer,
+          cos: raw?.get(e.id) !== undefined ? Number((raw.get(e.id) as number).toFixed(4)) : null,
+          act: actOf(e.id),
+          importance: e.importance,
+        })),
+        picked: picked.map((e) => e.id),
+      }).catch(() => { /* 采样失败不影响唤醒 */ })
+    }
     // query 是核心入口（maybeWake 与工具共用），结果供渲染器读取
     this.lastInjection = hit
     return hit
+  }
+
+  /** 唤醒采样落盘：storeDir/wake-samples.jsonl（轮转：>8MB 时归档为 .1）。 */
+  private async appendSample(record: Record<string, unknown>): Promise<void> {
+    const { appendFile, stat, rename } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    const file = join(this.store.dir, 'wake-samples.jsonl')
+    try {
+      const st = await stat(file).catch(() => null)
+      if (st && st.size > 8 * 1024 * 1024) {
+        await rename(file, `${file}.1`).catch(() => {})
+      }
+    } catch { /* 归档失败忽略 */ }
+    await appendFile(file, `${JSON.stringify(record)}\n`, 'utf8')
   }
 
   /** 渲染记忆注入段（动态预算：按相关度分级——高分完整入口、中分标题+摘要、低分仅标题）。 */

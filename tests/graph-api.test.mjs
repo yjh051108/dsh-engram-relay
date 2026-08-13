@@ -38,11 +38,11 @@ function setupStore(store) {
   store.add({ kind: 'event', layer: 'session', projectId: null, title: 'A临时', summary: '正在调试端口', content: '临时正文', links: [], sessionId: 'sess-a', turn: 3, causes: [], effects: [], importance: 0.6 })
 }
 
-/** 收集路由的 fake httpServer。 */
+/** 收集路由的 fake webServer（rc：httpServer 服务已改名 webServer）。 */
 function fakeHttpServer() {
   const routes = []
   return {
-    httpServer: { register: (route) => { routes.push(route); return () => { routes.splice(routes.indexOf(route), 1) } } },
+    webServer: { register: (route) => { routes.push(route); return () => { routes.splice(routes.indexOf(route), 1) } } },
     routes,
   }
 }
@@ -65,13 +65,13 @@ test('graph: 分层准入——session A 见 global+本project+本session，sess
   const store = makeStore(dir)
   setupStore(store)
   const relay = fakeRelay(dir)
-  const { httpServer, routes } = fakeHttpServer()
+  const { webServer, routes } = fakeHttpServer()
   const ctx = {
     get: (key) => key === 'agents'
       ? { get: (id) => ({ session: { header: { cwd: id === 'sess-a' ? '/proj-a' : '/proj-b' } } }) }
       : undefined,
   }
-  installGraphApi({ ...ctx, httpServer }, relay)
+  installGraphApi({ ...ctx, webServer }, relay)
   const route = routes[0]
 
   // 会话 A（cwd=/proj-a）：全三层的节点可见
@@ -102,8 +102,8 @@ test('graph: 边聚合（因果边 + 双向链接边）', async () => {
   const a = store.add({ kind: 'decision', layer: 'global', projectId: null, title: '根因', summary: '磁盘满了', content: '', links: ['故障'], sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8 })
   const b = store.add({ kind: 'event', layer: 'global', projectId: null, title: '故障', summary: '服务挂了', content: '', links: ['根因'], sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.8 })
   const relay = fakeRelay(dir)
-  const { httpServer, routes } = fakeHttpServer()
-  installGraphApi({ get: () => undefined, httpServer }, relay)
+  const { webServer, routes } = fakeHttpServer()
+  installGraphApi({ get: () => undefined, webServer }, relay)
   const route = routes[0]
   const g = await callRoute(route, 'GET', '/engram-relay/api/graph')
   assert.equal(g.status, 200)
@@ -124,13 +124,13 @@ test('node: 详情返回 + 可见性 403 + 不存在 404', async () => {
   const store = makeStore(dir)
   setupStore(store)
   const relay = fakeRelay(dir)
-  const { httpServer, routes } = fakeHttpServer()
+  const { webServer, routes } = fakeHttpServer()
   const ctx = {
     get: (key) => key === 'agents'
       ? { get: (id) => ({ session: { header: { cwd: id === 'sess-a' ? '/proj-a' : '/proj-b' } } }) }
       : undefined,
   }
-  installGraphApi({ ...ctx, httpServer }, relay)
+  installGraphApi({ ...ctx, webServer }, relay)
   const route = routes[0]
 
   // 会话 A 展开自己 project 层节点：详情含 content + 因果/链接
