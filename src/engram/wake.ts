@@ -183,27 +183,83 @@ export class EngramWakeEngine {
       .filter(([id]) => hitIds.has(id) && relevantIds.has(id))
       .sort((a, b) => b[1] * actBias(b[0]) * recency(b[0]) - a[1] * actBias(a[0]) * recency(a[0]))
     const mainQuota = Math.max(1, limit - causalSlots)
-    const mainPicked = hitRanked.slice(0, mainQuota)
+    // MMR 多样性选择（建模命题 1 的已知缺口：纯 top-K 在同主题簇内发散——
+    // 注入预算有限时 3 条应覆盖 3 个主题）。主题相似度代理 = 哈希槽位
+    // Jaccard（零成本：slots 已持久化，同主题文本 n-gram 重叠高）。
+    // 贪心：每轮选 score − λ·max(与已选者的槽位相似度) 最高者；第一名
+    // 不受惩罚（与原 top-1 一致）。λ=0.6 相对惩罚：同主题第二条即使原始
+    // 分高（同文本加权 +0.5）也会被压到异主题中分之下（标定见 mmr.test）。
+    const mmrLambda = 0.6
+    const slotSets = new Map<string, Set<string>>()
+    const getSlotSet = (id: string): Set<string> => {
+      let s = slotSets.get(id)
+      if (!s) {
+        s = new Set(nodeById.get(id)?.slots ?? [])
+        slotSets.set(id, s)
+      }
+      return s
+    }
+    const slotJaccard = (a: Set<string>, b: Set<string>): number => {
+      if (a.size === 0 || b.size === 0) return 0
+      let inter = 0
+      for (const x of a) if (b.has(x)) inter++
+      return inter / (a.size + b.size - inter)
+    }
+    const pool = [...hitRanked]
+    const mainPicked: Array<[string, number]> = []
+    while (mainPicked.length < mainQuota && pool.length > 0) {
+      let bestIdx = 0
+      let bestScore = -Infinity
+      for (let i = 0; i < pool.length; i++) {
+        const [id, base] = pool[i]!
+        let maxSim = 0
+        const slots = getSlotSet(id)
+        for (const [pid] of mainPicked) {
+          const j = slotJaccard(slots, getSlotSet(pid))
+          if (j > maxSim) maxSim = j
+        }
+        const s = base * actBias(id) * recency(id) * (1 - mmrLambda * maxSim)
+        if (s > bestScore) { bestScore = s; bestIdx = i }
+      }
+      mainPicked.push(pool.splice(bestIdx, 1)[0]!)
+    }
     ranked.push(...mainPicked)
     const mainIds = new Set(mainPicked.map(([id]) => id))
 
-    // 因果席位：activated 中未进主席位的节点（含被截断的哈希命中邻居）
-    // 按「因果传播增益」排序——激活分数高于自身重要性者优先
+    // 因果席位：只给**真正有传播增益的因果邻居**（gain > 0）——这是因果
+    // 通道补盲的本意（跨语义关联）。无增益的普通高分候选不占因果席位。
     const baseScores = scores
-    const causalCandidates = [...activated.entries()]
-      .filter(([id]) => !mainIds.has(id))
-      .sort((a, b) => {
-        const gainA = a[1] - (baseScores.get(a[0]) ?? 0)
-        const gainB = b[1] - (baseScores.get(b[0]) ?? 0)
-        return gainB - gainA || b[1] - a[1]
-      })
-    ranked.push(...causalCandidates.slice(0, causalSlots))
-    // 主席位不足时用其余节点补齐
-    let extra = ranked.length
-    const rest = causalCandidates.slice(causalSlots)
-    while (extra < limit && rest.length > 0) {
-      ranked.push(rest[extra - ranked.length])
-      extra += 1
+    const gainOf = (id: string, act: number): number => act - (baseScores.get(id) ?? 0)
+    const causalNeighbors = [...activated.entries()]
+      .filter(([id]) => !mainIds.has(id) && gainOf(id, (activated.get(id) ?? 0)) > 0.0001)
+      .sort((a, b) => gainOf(b[0], b[1]) - gainOf(a[0], a[1]))
+    ranked.push(...causalNeighbors.slice(0, causalSlots))
+    const pickedIds = new Set(ranked.map(([id]) => id))
+
+    // 剩余位置（主席位+因果席位不足 limit 时）：其余候选统一走 MMR
+    // （对已选全体做多样性惩罚）——防止同主题高分普通候选挤占补位。
+    const restPool = [...activated.entries()]
+      .filter(([id]) => !pickedIds.has(id))
+      .sort((a, b) => b[1] - a[1])
+    while (ranked.length < limit && restPool.length > 0) {
+      let bestIdx = 0
+      let bestScore = -Infinity
+      for (let i = 0; i < restPool.length; i++) {
+        const [id, base] = restPool[i]!
+        let maxSim = 0
+        const slots = getSlotSet(id)
+        // ⚠️ pickedIds 是 Set<string>：直接迭代元素，不能解构（[pid] 会取
+        // 字符串第一个字符 → 查空 → 惩罚恒 0 → MMR 静默失效）
+        for (const pid of pickedIds) {
+          const j = slotJaccard(slots, getSlotSet(pid))
+          if (j > maxSim) maxSim = j
+        }
+        const s = base * actBias(id) * recency(id) * (1 - mmrLambda * maxSim)
+        if (s > bestScore) { bestScore = s; bestIdx = i }
+      }
+      const pickedItem = restPool.splice(bestIdx, 1)[0]!
+      ranked.push(pickedItem)
+      pickedIds.add(pickedItem[0])
     }
     ranked.length = Math.min(ranked.length, limit)
 
