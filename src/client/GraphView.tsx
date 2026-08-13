@@ -280,12 +280,13 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   return (
     <div className={styles.root}>
       <div className={styles.toolbar}>
-        <div className={styles.filters}>
+        <div className={styles.filters} title={t('graph.filter.title')}>
           {['all', 'global', 'project'].map((f) => (
             <button
               key={f}
               className={`${styles.filterBtn} ${filter === f ? styles.filterActive : ''}`}
               onClick={() => setFilter(f)}
+              title={f === 'all' ? t('graph.filter.title') : `${t(`graph.filter.${f}`)} — ${t('graph.filter.title')}`}
             >
               {t(`graph.filter.${f}`)}
             </button>
