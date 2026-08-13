@@ -519,6 +519,23 @@ export class EngramStore {
     return this.lookupHash(result, text, limit)
   }
 
+  /** token 倒排查询（v0.6 共现扩展粗筛用）：含任一 token 的记忆并集
+   *  ——与词袋语义对齐，支持"查询词共现邻居"召回。 */
+  lookupTokens(tokens: string[], limit = 16): EngramNode[] {
+    const ids = new Set<string>()
+    for (const t of tokens) {
+      const s = this.tokenIndex.get(t)
+      if (s) for (const id of s) ids.add(id)
+    }
+    const out: EngramNode[] = []
+    for (const id of ids) {
+      const e = this.byId.get(id)
+      if (e && e.status !== 'pending' && !isSuperseded(e)) out.push(e)
+    }
+    out.sort((a, b) => b.importance - a.importance)
+    return out.slice(0, limit)
+  }
+
   /** 按已计算的哈希结果寻址（避免重复哈希）；text 供 token 倒排词袋召回。 */
   lookupHash(result: HashResult, text = '', limit = 8): EngramNode[] {
     const keys = this.hasher.slotKeys(result)

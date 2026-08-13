@@ -33,7 +33,7 @@ import { ActivationCache } from './engram/activation.js'
 import { EngramWakeEngine, type WakeViewer } from './engram/wake.js'
 import { RelayModel } from './model/relay-model.js'
 import { installGraphApi } from './graph-api.js'
-import { ENGRAM_LAYERS, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
+import { ENGRAM_LAYERS, isSuperseded, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
 import type { EngramRelayConfig } from './types.js'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -404,6 +404,10 @@ export class EngramRelay {
       storeDir: this.store.dir,
       engramCount: count,
       pendingCount: this.store.pending().length,
+      isolatedCount: this.store.all().filter((e) =>
+        !isSuperseded(e) && e.status !== 'pending'
+        && (e.causes?.length ?? 0) === 0 && (e.effects?.length ?? 0) === 0 && (e.links?.length ?? 0) === 0,
+      ).length,
       layerCounts: this.store.layerCounts(),
       stateCounts: states,
       archivedCount: archived,

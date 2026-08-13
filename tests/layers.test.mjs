@@ -185,7 +185,7 @@ function fakeRelay(dir) {
   }
 }
 
-test('tools: 注册完整工具集（12 个，含用户确认制 propose/confirm/reject）', () => {
+test('tools: 注册完整工具集（13 个，含织网清洗 weave）', () => {
   const ctx = fakeToolCtx()
   const relay = fakeRelay(tempDir())
   const dispose = installEngramTools(ctx, relay)
@@ -203,6 +203,7 @@ test('tools: 注册完整工具集（12 个，含用户确认制 propose/confirm
     'engram_status',
     'engram_store',
     'engram_update',
+    'engram_weave',
   ])
   dispose()
 })

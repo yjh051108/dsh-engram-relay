@@ -157,8 +157,9 @@ class CoocSemantics {
     return total
   }
 
-  /** 统计语义分 [0,1]：查询-记忆共现强度归一化（能桥接「缓存」↔「cache」）。 */
-  score(query: string, memText: string): number {
+  /** 原始共现强度（未归一化——外层按候选集 max 相对归一化，见
+   *  SemanticScorer.score。能桥接「缓存」↔「cache」）。 */
+  rawScore(query: string, memText: string): number {
     this.ensure()
     const qWords = [...wordsOf(query).keys()]
     const mWords = [...wordsOf(memText).keys()]
@@ -173,11 +174,23 @@ class CoocSemantics {
       }
     }
     const cross = this.queryStrength(qWords, mWords)
-    // 归一化：cross+direct 相对查询词数（均值化），映射到 [0,1]（sigmoid 变体）
-    const raw = (cross + direct) / Math.max(1, qWords.length)
-    // 经验标定：raw 均值随库规模漂移——用 log 压缩 + 阈值映射
-    if (raw <= 0) return 0
-    return Math.min(1, Math.log1p(raw) / Math.log1p(50))
+    // 均值化（相对查询词数）——不映射（映射交给外层相对归一化）
+    return (cross + direct) / Math.max(1, qWords.length)
+  }
+
+  /** 查询扩展（v0.6 粗筛语义对齐）：查询词 + 每个词的 top-k 共现邻居
+   *  ——「滚轮」↔「onwheel」这类共现桥进粗筛，语义相关但 token 零共享
+   *  的记忆不再被倒排挡在候选外。 */
+  expandWords(words: string[], topK = 3): string[] {
+    this.ensure()
+    const out = new Set(words)
+    for (const w of words) {
+      const row = this.co.get(w)
+      if (!row) continue
+      const sorted = [...row.entries()].sort((a, b) => b[1] - a[1])
+      for (const [nb] of sorted.slice(0, topK)) out.add(nb)
+    }
+    return [...out]
   }
 }
 
@@ -232,11 +245,25 @@ export class SemanticScorer {
         }
       }
       // 统计语义（共现桥——「缓存」↔「cache」）
-      const cooc = this.cooc.score(query, text)
+      const cooc = this.cooc.rawScore(query, text)
       out.set(e.id, {
-        score: Math.min(1, alpha * lexical + beta * graph + gamma * cooc),
+        score: 0, // 占位，下方统一计算（cooc 需候选集内相对归一化）
         lexical: Number(lexical.toFixed(4)),
         graph: Number(graph.toFixed(2)),
+        cooc: cooc,
+      })
+    }
+    // ⚠️ cooc 查询内相对归一化（v0.6：raw 值巨大（max 数百）且 log1p(50)
+    // 映射过早饱和 → 无关候选 cooc 也全 1.0 无区分度）：候选内最强 = 1.0，
+    // 其余按比例——同主题候选（共现高）相对分高，无关候选低。
+    let maxRaw = 1
+    for (const s of out.values()) if (s.cooc > maxRaw) maxRaw = s.cooc
+    for (const [id, s] of out) {
+      const cooc = s.cooc > 0 ? s.cooc / maxRaw : 0
+      out.set(id, {
+        score: Math.min(1, alpha * s.lexical + beta * s.graph + gamma * cooc),
+        lexical: s.lexical,
+        graph: s.graph,
         cooc: Number(cooc.toFixed(4)),
       })
     }
@@ -246,5 +273,10 @@ export class SemanticScorer {
   /** 图语义种子暴露（调试/测试）。 */
   hits(): Set<string> {
     return this.queryHits
+  }
+
+  /** 查询扩展词（粗筛用——共现邻居进 token 倒排，语义对齐）。 */
+  expandQuery(query: string, topK = 3): string[] {
+    return this.cooc.expandWords([...wordsOf(query).keys()], topK)
   }
 }

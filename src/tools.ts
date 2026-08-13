@@ -85,7 +85,18 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
  * 返回 { dup, detailed }——detailed（通道分解）复用给自动织网。
  */
 async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<{ dup: EngramNode | null; detailed: Map<string, { score: number; lexical: number; graph: number; cooc: number }> | null }> {
-  const cands = relay.store.lookup(text, 64)
+  // ⚠️ v0.6 粗筛语义对齐：候选 = 哈希/token 倒排 + **共现扩展词倒排**
+  // （查询词 → 共现邻居 → 倒排召回——「滚轮」↔「onwheel」这类共现桥
+  // 进粗筛，同主题不同表述不再被挡在候选外）
+  const candSet = new Map<string, EngramNode>()
+  for (const c of relay.store.lookup(text, 64)) candSet.set(c.id, c)
+  try {
+    const expanded = relay.model.scorer.expandQuery(text.slice(0, 300), 3)
+    if (expanded.length > 0) {
+      for (const c of relay.store.lookupTokens(expanded, 64)) candSet.set(c.id, c)
+    }
+  } catch { /* 扩展失败不阻塞（退化为基础粗筛） */ }
+  const cands = [...candSet.values()]
   if (cands.length === 0) return { dup: null, detailed: null }
   const detailed = relay.model.semanticScores(text.slice(0, 300), cands)
   if (detailed && detailed.size > 0) {
@@ -105,18 +116,20 @@ async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLay
 
 /**
  * 自动织网（v0.4 核心原则：**怎么索引就怎么推荐，可逆才可解释**）：
- * 写入即织网——**lexical 通道 ≥ 0.5 判同主题**（词汇重叠是织网的可靠
- * 信号，比融合分阈值稳——融合分含图/PCA 分量会稀释词汇信号），排序
- * 用融合分（三维度加权，与检索同款）。因果强关系仍由 AI/蒸馏提供
- * （causes/effects），系统自动织的是弱关系（link）——写入织的边 =
- * 未来检索召回的理由（可逆）。
+ * 写入即织网——**融合分 ≥ 0.55 判同主题**（v0.6：同主题不同表述的
+ * 词汇重叠低（lexical 0.05-0.09），纯词汇阈值织不上；融合分含共现语义
+ * （候选内相对归一化）能抓住同主题），排序用融合分（与检索同款）。
+ * 因果强关系仍由 AI/蒸馏提供（causes/effects），系统自动织的是弱关系
+ * （link）——写入织的边 = 未来检索召回的理由（可逆）。
  */
 async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<string, { score: number; lexical: number; graph: number; cooc: number }>): Promise<number> {
+  // ⚠️ 若 detailed 无候选（findDuplicate 的 lookup 候选可能漏掉共现语义
+  // 相关但 token 零共享的记忆）——用共现扩展词补一轮粗筛再打分
   const ranked = [...detailed.entries()]
     .filter(([id, s]) => {
       const target = relay.store.get(id)
       // ⚠️ 排除自身与废止节点（修订路径中旧版已被 supersede——给它织链接无意义）
-      return id !== node.id && target !== undefined && !isSuperseded(target) && s.lexical >= 0.5
+      return id !== node.id && target !== undefined && !isSuperseded(target) && s.score >= 0.55
     })
     .sort((a, b) => b[1].score - a[1].score)
   let woven = 0
@@ -943,10 +956,81 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     },
   })))
 
+  // ---- engram_weave：织网清洗（存量孤立节点批量补边） ----
+  // 背景（v0.6 用户提问"为什么那么多无边节点"）：早期记忆（自动织网
+  // 上线前）全靠 AI 自觉织边，42% 孤立——本工具对孤立节点做语义推荐 +
+  // 高置信（lexical ≥ 0.5，与写入织网同阈值）自动织双向链接。
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_weave',
+    description: '织网清洗：扫描**无任何边（孤立）**的记忆节点，用语义打分（词汇+共现）找高置信邻居自动织双向链接——把存量孤立节点织进图谱（用户实测 42% 孤立）。可重复跑（已织过的自动跳过）；阈值与写入织网一致（lexical ≥ 0.5）。',
+    parameters: {
+      limit: {
+        type: 'number',
+        description: '可选：最多处理多少个孤立节点（缺省全部）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args, exec) => {
+      const isIsolated = (e: EngramNode): boolean =>
+        !isSuperseded(e) && e.status !== 'pending'
+        && (e.causes?.length ?? 0) === 0 && (e.effects?.length ?? 0) === 0 && (e.links?.length ?? 0) === 0
+      const isolated = relay.store.all().filter(isIsolated)
+      if (isolated.length === 0) return '（没有孤立节点——图谱已全织）'
+      const limit = Math.max(0, Math.min(Number(args.limit ?? isolated.length) || isolated.length, isolated.length))
+      let woven = 0
+      const report: string[] = []
+      for (const node of isolated.slice(0, limit)) {
+        const text = `${node.title}：${node.summary}`
+        // 候选 = 哈希/token 倒排 + 共现扩展词倒排（粗筛语义对齐）
+        const candMap = new Map<string, EngramNode>()
+        for (const c of relay.store.lookup(text, 64)) candMap.set(c.id, c)
+        try {
+          const expanded = relay.model.scorer.expandQuery(text.slice(0, 300), 3)
+          if (expanded.length > 0) {
+            for (const c of relay.store.lookupTokens(expanded, 64)) candMap.set(c.id, c)
+          }
+        } catch { /* 忽略 */ }
+        const cands = [...candMap.values()].filter((c) => c.id !== node.id)
+        if (cands.length === 0) continue
+        const detailed = relay.model.semanticScores(text.slice(0, 300), cands)
+        const ranked = [...detailed.entries()]
+          .filter(([id, s]) => {
+            const t = relay.store.get(id)
+            // ⚠️ 织网阈值用**融合分**（v0.6：同主题不同表述的词汇重叠低
+            // （lexical 0.05-0.09），lexical ≥ 0.5 永远织不上；融合分含
+            // 共现语义（候选内相对归一化后）能抓住同主题）
+            return s.score >= 0.55 && t !== undefined && !isSuperseded(t)
+          })
+          .sort((a, b) => b[1].score - a[1].score)
+        let added = 0
+        for (const [id] of ranked.slice(0, 2)) {
+          const target = relay.store.get(id)
+          if (!target || target.id === node.id) continue
+          if (target.links.includes(node.title)) continue
+          relay.store.update(target.id, { links: [...target.links, node.title] })
+          if (!node.links.includes(target.title)) {
+            relay.store.update(node.id, { links: [...node.links, target.title] })
+          }
+          added++
+        }
+        if (added > 0) {
+          woven += added
+          report.push(`  [[${node.title}]] ⇄ ${ranked.slice(0, 2).map(([id]) => `[[${relay.store.get(id)?.title}]]`).join('、')}`)
+        }
+      }
+      const remain = relay.store.all().filter(isIsolated).length
+      const head = woven > 0
+        ? `织网清洗完成：检查 ${Math.min(limit, isolated.length)} 个孤立节点，织入 ${woven} 条双向链接`
+        : `织网清洗：检查 ${Math.min(limit, isolated.length)} 个孤立节点，无高置信邻居（可放宽阈值或写入更多相关记忆）`
+      return `${head}。剩余孤立节点：${remain}\n${report.slice(0, 40).join('\n')}${report.length > 40 ? `\n  …（共 ${report.length} 条织入）` : ''}`
+    },
+  })))
+
   // ---- engram_status：服务状态 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_status',
-    description: '查看 engram 记忆服务状态：分层统计（global/project）、巩固状态（episodic/semantic/dormant）、归档数/硬上限、哈希槽位、因果图边数、语义引擎状态、注入预算。',
+    description: '查看 engram 记忆服务状态：分层统计（global/project）、巩固状态（episodic/semantic/dormant）、归档数/硬上限、哈希槽位、因果图边数、语义引擎状态、注入预算、孤立节点数。',
     parameters: {},
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
