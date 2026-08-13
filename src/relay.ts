@@ -398,7 +398,8 @@ export class EngramRelay {
         + `episodic=新写 ${states.episodic} / semantic=已固化 ${states.semantic} / dormant=沉睡 ${states.dormant}）；`
         + `pendingCount=${this.store.pending().length}（待确认节点数）；`
         + `graphEdges=${this.graph.edgeCount()}（因果/链接边总数）；`
-        + `currentCwd=当前工作目录；compactCoexist=与官方压缩共存检测（布尔）。`,
+        + `currentCwd=当前工作目录（可能为 null=无 cwd 上下文）；`
+        + `compactCoexist=与官方上下文压缩（compact）共存检测（布尔）。`,
       storeDir: this.store.dir,
       engramCount: count,
       pendingCount: this.store.pending().length,

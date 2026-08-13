@@ -146,9 +146,12 @@ function entryLine(e: EngramNode, store: EngramStore): string {
 }
 
 /** 邻接摘要：↑因/↓果/关联（id 解析标题 + 按重要度排序 + 截断——入口
- *  层只给导航线索，别让因果链淹没摘要；展开留给 engram_open）。 */
+ *  层只给导航线索，别让因果链淹没摘要；展开留给 engram_open）。
+ *  ⚠️ 废止标注紧跟各自链接（第六轮新 agent 实测：行尾统一标注无法判断
+ *  属于哪个链接）。 */
 function neighborsOf(e: EngramNode, store: EngramStore): string {
   const parts: string[] = []
+  const nodeOf = (id: string): EngramNode | undefined => store.get(id)
   const titlesOf = (ids: string[], max: number): string[] => {
     const withImp = ids
       .map((id) => store.get(id))
@@ -157,14 +160,20 @@ function neighborsOf(e: EngramNode, store: EngramStore): string {
       .map((n) => n.title)
     return withImp.slice(0, max)
   }
+  // 渲染链接时对废止目标紧跟标注（不是行尾）
+  const render = (titles: string[]): string => titles
+    .map((t) => {
+      const target = store.byTitle(t)
+      return `[[${t}]]${target && isSuperseded(target) ? '（已废止）' : ''}`
+    })
+    .join(' ')
   const causes = titlesOf(e.causes ?? [], 4)
   const effects = titlesOf(e.effects ?? [], 4)
   const links = (e.links ?? []).slice(0, 3)
     .map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim())
-  const wrap = (ts: string[]): string => ts.map((t) => `[[${t}]]`).join(' ')
-  if (causes.length > 0) parts.push(`↑因:${wrap(causes)}${(e.causes?.length ?? 0) > 4 ? '…' : ''}`)
-  if (effects.length > 0) parts.push(`↓果:${wrap(effects)}${(e.effects?.length ?? 0) > 4 ? '…' : ''}`)
-  if (links.length > 0) parts.push(`→:${wrap(links)}`)
+  if (causes.length > 0) parts.push(`↑因:${render(causes)}${(e.causes?.length ?? 0) > 4 ? '…' : ''}`)
+  if (effects.length > 0) parts.push(`↓果:${render(effects)}${(e.effects?.length ?? 0) > 4 ? '…' : ''}`)
+  if (links.length > 0) parts.push(`→:${render(links)}`)
   return parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
 }
 
@@ -636,12 +645,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const viewer = viewerOf(exec)
       const layer = String(args.layer ?? '')
       const kind = String(args.kind ?? '')
-      // ⚠️ 第五轮新 agent 实测：layer=global 过滤失效——projectId 默认取
-      // viewer.cwd 会把 global 节点（projectId=null）全滤掉。仅当 layer
-      // 未指定且用户未传 projectId 时才用 cwd 兜底
+      // ⚠️ 第六轮新 agent 实测：带 query 时 global 层被静默排除——projectId
+      // 默认取 cwd 会滤掉 global 节点（projectId=null）。修正：**仅显式传
+      // projectId 才过滤项目**——缺省全层全项目（与描述"缺省=全部"一致）
       const projectId = args.projectId !== undefined && String(args.projectId) !== ''
         ? String(args.projectId)
-        : (layer === '' ? (viewer.cwd ?? undefined) : undefined)
+        : undefined
       // ⚠️ P0 修复（第三轮新 agent 实测）：先过滤后截断——先 query 会截掉
       // 匹配目标再子串过滤 → 精确子串搜不到（上轮误判为"盘点/检索不一致"，
       // 实为 limit 顺序 bug）
