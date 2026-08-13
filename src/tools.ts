@@ -172,7 +172,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_recall：按需唤醒检索（跨会话分层准入） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（跨会话全可见，项目即标签）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + **因果/链接邻接**：↑因/↓果/→）。看到 [[标题]] 后由你判断：需要详情就 engram_open 展开，顺着邻接可继续探究（递归导航），不需要就直接用摘要作答。',
+    description: '主动唤醒记忆图谱入口（跨会话全可见，项目即标签）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + **因果/链接邻接**：↑因=前因/↓果=后果/→=双向链接）。**入口图例**：[[标题]][层]（[语义]=已固化知识）摘要。看到 [[标题]] 后由你判断：需要详情就 engram_open 展开，顺着邻接可继续探究（递归导航），不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',
@@ -192,7 +192,13 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     isConcurrencySafe: () => true,
     execute: async (args, exec) => {
       const hit = await relay.recall(String(args.query), Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
-      if (hit.engrams.length === 0) return `（无命中，reason=${hit.reason}）`
+      if (hit.engrams.length === 0) {
+        // 新 agent 实测：无命中时需区分"没有这条记忆" vs "检索没召回到"
+        const hint = hit.reason === 'no-hash-hit' || hit.reason === 'short-query'
+          ? '（图谱中没有与查询重叠的记忆——可能确实没记过，或用 engram_store 写入后重试）'
+          : `（未召回相关记忆，reason=${hit.reason}）`
+        return hint
+      }
       return hit.engrams.map((e) => entryLine(e, relay.store)).join('\n')
     },
   })))
@@ -358,13 +364,13 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       // ⚠️ 条件只查 causes/effects：links 已带但漏因果（常见偷懒）也必须推荐。
       if (causes.length === 0 && effects.length === 0) {
         const rec = await recommendLinks(relay, `${title}：${summary}`, e.id)
-        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已入索引 ${e.slots.length} 个检索锚点，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
+        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已进入检索索引，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
         if (rec) {
           return `${base}\n\n📎 推荐因果候选（纯算法语义 × 时序加权，未自动建边——可作 causes/effects）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可。`
         }
         return base + '\n（当前无显著因果候选）'
       }
-      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已入索引 ${e.slots.length} 个检索锚点，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
+      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已进入检索索引，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
     },
   })))
 
@@ -466,7 +472,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         importance: 1,
         status: 'pending',
       })
-      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，已入索引 ${e.slots.length} 个检索锚点）——用户确认（engram_confirm）后才会参与检索/唤醒`
+      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，已进入检索索引）——用户确认（engram_confirm）后才会参与检索/唤醒`
     },
   })))
 
@@ -571,7 +577,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_search：检索图谱（分层/项目/类型/关键词） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_search',
-    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤（跨会话全可见）。返回入口列表（[[标题]] + 摘要 + 邻接）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
+    description: '盘点记忆图谱（回顾/维护）：**先按关键词/层/项目/类型过滤全库，再排序截断**（关键词子串匹配标题/摘要，大小写不敏感）。返回入口列表（[[标题]] + 摘要 + 邻接；同名多版本折叠为 ×N，废止标「已废止」）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
     parameters: {
       query: {
         type: 'string',
@@ -606,17 +612,25 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const kind = String(args.kind ?? '')
       const projectId = args.projectId !== undefined && String(args.projectId) !== ''
         ? String(args.projectId) : (viewer.cwd ?? undefined)
+      // ⚠️ P0 修复（第三轮新 agent 实测）：先过滤后截断——先 query 会截掉
+      // 匹配目标再子串过滤 → 精确子串搜不到（上轮误判为"盘点/检索不一致"，
+      // 实为 limit 顺序 bug）
       let nodes = relay.store.query({
         layer: layer && ENGRAM_LAYERS.includes(layer as EngramLayer) ? layer as EngramLayer : undefined,
         projectId: projectId !== undefined ? projectId : undefined,
         kind: kind && KINDS.includes(kind as EngramKind) ? kind as EngramKind : undefined,
-        limit: Number(args.limit ?? 20),
+        // 不过滤先取全量（过滤在下方子串/可见性后，limit 最后截断）
+        limit: 0,
         recent: args.recent === true,
       })
-      // 可见性：只返回当前会话可见的
+      // 可见性 + 关键词过滤（全库）
       nodes = nodes.filter((e) => isVisible(e, viewer))
       const q = String(args.query ?? '').trim().toLowerCase()
       if (q) nodes = nodes.filter((e) => e.title.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
+      const limit = Number(args.limit ?? 20)
+      // 排序（重要度优先，除非 recent）
+      nodes = [...nodes].sort((a, b) => (args.recent === true ? b.createdAt - a.createdAt : b.importance - a.importance))
+      nodes = nodes.slice(0, limit)
       if (nodes.length === 0) return '（无匹配记忆）'
       // v0.5 盘点去重（新 agent 实测：同名多版本重复显示观感杂乱）：
       // 同标题只显示当前版（未废止、重要度最高），重复折叠为 ×N 标注；
@@ -708,7 +722,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_update：修正节点 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_update',
-    description: '修正一个记忆节点（摘要/正文/链接/因果/重要度/标题）。用于记忆过时或写错后订正。',
+    description: '修正一个记忆节点（摘要/正文/链接/因果/重要度/标题）。**就地修改，不走版本链**（旧版不保留）；如需保留历史版本，用 engram_store 写同主题（自动修订=旧版废止可追溯）。用于记忆过时或写错后订正。',
     parameters: {
       ref: {
         type: 'string',
@@ -750,7 +764,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (args.links !== undefined) patch.links = (args.links as string[]).map(String)
       if (args.importance !== undefined) patch.importance = Number(args.importance)
       const updated = relay.store.update(node.id, patch)
-      return updated ? `已修正 [[${updated.title}]]` : '修正失败（节点不存在）'
+      if (!updated) return '修正失败（节点不存在）'
+      const changed = Object.keys(patch).join('、')
+      return `已修正 [[${updated.title}]]（就地修改，不走版本链）：更新了 ${changed}`
     },
   })))
 

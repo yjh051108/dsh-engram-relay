@@ -381,32 +381,36 @@ export class EngramRelay {
   }
 
   async status(): Promise<Record<string, unknown>> {
-    const engine = await this.model.describe().catch(() => null)
     const count = this.store.count()
     const archived = this.store.archivedCount()
     const maxNodes = this.config.maxNodes ?? 10000
+    const slots = this.store.slotCount()
+    const budget = this.config.injectBudgetTokens
+    const states = this.store.stateCounts()
     return {
       enabled: this.config.enabled,
-      // 人话摘要（新 agent 实测：数字字段无解释是最大困惑点）
+      // 人话摘要（新 agent 实测驱动）：字段含义一行讲清
       brief: `记忆图谱共 ${count} 条（已归档 ${archived}，硬上限 ${maxNodes}），`
         + '跨会话全可见；语义引擎为纯算法（词汇/图/PCA，零外部模型）；'
-        + '写入自动查重修订+织网，检索用 engram_recall，展开用 engram_open。',
+        + '写入自动查重修订+织网，检索用 engram_recall，展开用 engram_open。'
+        + ` 其余字段：slotCount=${slots}（哈希检索槽位总数，内部指标）；`
+        + `budgetTokens=${budget}（单次注入预算）；stateCounts（巩固状态：`
+        + `episodic=新写 ${states.episodic} / semantic=已固化 ${states.semantic} / dormant=沉睡 ${states.dormant}）；`
+        + `currentCwd=当前工作目录；compactCoexist=与官方压缩共存检测（布尔）。`,
       storeDir: this.store.dir,
       engramCount: count,
       pendingCount: this.store.pending().length,
       layerCounts: this.store.layerCounts(),
-      stateCounts: this.store.stateCounts(),
+      stateCounts: states,
       archivedCount: archived,
       maxNodes,
-      slotCount: this.store.slotCount(),
+      slotCount: slots,
       graphEdges: this.graph.edgeCount(),
       // v0.5 语义引擎：纯算法三通道（词汇/图/PCA），零外部模型——无需 python
       semanticEngine: 'pure-algorithm (lexical + graph + PCA), no external model',
-      budgetTokens: this.config.injectBudgetTokens,
+      budgetTokens: budget,
       currentCwd: this.currentCwd,
       compactCoexist: this.ctx.get('compaction') !== undefined,
-      // 遗留字段保留兼容（describe 含 python 状态），但顶层不再暴露误导
-      legacy: engine,
     }
   }
 }
