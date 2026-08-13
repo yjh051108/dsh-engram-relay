@@ -269,39 +269,107 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return { nodeIds, edgeKeys }
   }, [selectedId, edges])
 
-  // 自动适配视口（v0.6 用户要求：切过滤后初始画面刚好显示全部可见节点）
-  // 自动适配视口（v0.6 修复：**动画开始前就 fit**——用最终布局的包围盒
-  // 设 viewBox，初始化/切换过滤即刻显示全；动画（节点从中心飞向最终位置）
-  // 全程在适配视口里进行。之前 fit 等动画完成（1.8s 后）才执行，初始画面
-  // 一直是默认视口，图谱大时节点在视口外——用户指出的问题）。
-  const fitView = (layoutRef: ForceLayout): void => {
-    if (nodes.length === 0) return
+  // ---- 闭环运镜系统（v0.6 用户建议：不开环瞬移——感知画面内外 +
+  // 平滑摄像头移动）----
+  // 目标视口：可见节点包围盒 ∪ 动画起点（中心）——生成阶段**绝对显示全**
+  const targetView = useMemo(() => {
+    if (nodes.length === 0 || finalLayout.size === 0) return null
     const pts = nodes
-      .map((n) => layoutRef.get(n.id))
+      .map((n) => finalLayout.get(n.id))
       .filter((p): p is ForcePoint => p !== undefined)
-    if (pts.length === 0) return
-    const pad = 80 / zc // 世界坐标 padding（簇圆标签留白）
-    // ⚠️ reduce 代替 spread（节点上千时 Math.min(...array) 栈溢出）
+    if (pts.length === 0) return null
+    // ⚠️ 闭环关键：动画起点 (W/2, H/2) 必须也在视口内——否则生成阶段
+    // 节点从画面外飞进来（"画面内画面外可感知"的闭环要求）
+    pts.push({ x: VIEW_W / 2, y: VIEW_H / 2 })
+    const pad = 80
     const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
     const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
     const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
     const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
-    setView({
+    return {
       vx: minX,
       vy: minY,
       vw: Math.max(200, maxX - minX),
       vh: Math.max(150, maxY - minY),
-    })
-  }
+    }
+  }, [nodes, finalLayout])
+  const [target, setTarget] = useState<{ vx: number; vy: number; vw: number; vh: number } | null>(null)
+  const targetRef = useRef(target)
+  targetRef.current = target
+  // 用户手动缩放/拖动 → 停止自动运镜（避免打架）；0.6s 无操作后恢复跟随
+  const lastUserOpRef = useRef(0)
+  const isUserControlled = (): boolean => Date.now() - lastUserOpRef.current < 600
+  // 闭环：目标视口变化（fit/越界）→ PID 式指数平滑运镜（时间常数 0.25s，
+  // 等效 PD：平滑逼近无振荡，不瞬移）
+  useEffect(() => {
+    if (target === null) return
+    let raf = 0
+    let last = performance.now()
+    const tick = (now: number): void => {
+      const dt = Math.min(0.1, (now - last) / 1000)
+      last = now
+      // 用户正在操作 → 暂停跟随（等用户停手）
+      if (isUserControlled()) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
+      setView((v) => {
+        const k = 1 - Math.exp(-dt / 0.25) // 指数平滑（PD 等效）
+        const nv = {
+          vx: v.vx + (target.vx - v.vx) * k,
+          vy: v.vy + (target.vy - v.vy) * k,
+          vw: v.vw + (target.vw - v.vw) * k,
+          vh: v.vh + (target.vh - v.vh) * k,
+        }
+        const dv = Math.abs(nv.vx - target.vx) + Math.abs(nv.vy - target.vy)
+          + Math.abs(nv.vw - target.vw) + Math.abs(nv.vh - target.vh)
+        if (dv < 1) {
+          // 已到位：直接设为目标并停（避免无限逼近）
+          return target
+        }
+        return nv
+      })
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [target])
+  // 触发：filter 变化 / 最终布局就绪 → 设目标（运镜）
   const lastFitRef = useRef<string>('')
   useEffect(() => {
-    // ⚠️ 不依赖 animT：最终布局就绪 + filter 变化即 fit（动画开始前）
     if (lastFitRef.current === filter) return
-    if (nodes.length === 0 || finalLayout.size === 0) return
+    if (targetView === null) return
     lastFitRef.current = filter
-    fitView(finalLayout)
+    setTarget(targetView)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter, nodes, finalLayout])
+  }, [filter, nodes, targetView])
+  // 闭环越界检测（生成阶段绝对显示全）：动画期间每帧检查插值位置，
+  // 越界则更新目标视口（视口平滑跟随生长中的网络）
+  useEffect(() => {
+    if (animT >= 1) return
+    if (isUserControlled()) return
+    const pts = nodes
+      .map((n) => layout.get(n.id))
+      .filter((p): p is ForcePoint => p !== undefined)
+    if (pts.length === 0) return
+    const pad = 40
+    const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
+    const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
+    const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
+    const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
+    const cur = viewRef.current
+    // 闭环判定：当前画面（含 padding 余量）是否完整包含所有节点
+    const inside = cur.vx <= minX && cur.vx + cur.vw >= maxX && cur.vy <= minY && cur.vy + cur.vh >= maxY
+    if (!inside) {
+      setTarget({
+        vx: minX,
+        vy: minY,
+        vw: Math.max(200, maxX - minX),
+        vh: Math.max(150, maxY - minY),
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layout, animT, nodes])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
@@ -348,6 +416,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
       e.preventDefault()
+      lastUserOpRef.current = Date.now() // 用户操作 → 暂停自动运镜
       const rect = svg.getBoundingClientRect()
       const mx = (e.clientX - rect.left) / rect.width // 鼠标归一化位置 [0,1]
       const my = (e.clientY - rect.top) / rect.height
@@ -378,6 +447,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       const target = e.target as Element
       if (target !== svg && target.tagName !== 'svg') return // 空白处才拖拽
       setSelectedId(null) // 点空白取消高亮（回到总图）
+      lastUserOpRef.current = Date.now() // 用户操作 → 暂停自动运镜
       const rect = svg.getBoundingClientRect()
       dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect }
       e.preventDefault()
@@ -431,7 +501,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => { lastFitRef.current = ''; fitView(finalLayout) }}>{t('graph.reset')}</button>
+          <button className={styles.refresh} onClick={() => { lastFitRef.current = ''; if (targetView !== null) setTarget(targetView) }}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
