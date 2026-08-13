@@ -56,6 +56,9 @@ export interface Config {
   semanticMinScore: number
   recencyWeight: number
   wakeSampleLog: boolean
+  tauSem: number
+  tauTime: number
+  tauCause: number
 }
 
 export const Config: z<Config> = z.object({
@@ -89,6 +92,12 @@ export const Config: z<Config> = z.object({
     .description('时序 recency 加权强度（1+w·e^(-Δturn/20)；仿真标定显示方向需数据驱动：0=关闭，负=旧记忆优先，默认 0.25 保守）'),
   wakeSampleLog: z.boolean().default(true)
     .description('唤醒采样日志（storeDir/wake-samples.jsonl）：记录查询/候选分数/注入选择，供融合权重离线拟合'),
+  tauSem: z.number().min(0).max(10).default(1)
+    .description('τ 融合：语义通道权重（z-score 语义分）'),
+  tauTime: z.number().min(-5).max(5).default(0)
+    .description('τ 融合：时序通道权重（z-score 激活；默认 0=纯语义，fit-tau 拟合后更新）'),
+  tauCause: z.number().min(0).max(5).default(0)
+    .description('τ 融合：因果通道权重（因果 1 跳可达 0/1）'),
 })
 
 /** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；旧 engram-trial 路径存在则沿用。 */
@@ -125,6 +134,9 @@ export function apply(ctx: Context, config: Config): void {
     semanticMinScore: config.semanticMinScore,
     recencyWeight: config.recencyWeight,
     wakeSampleLog: config.wakeSampleLog,
+    tauSem: config.tauSem,
+    tauTime: config.tauTime,
+    tauCause: config.tauCause,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入

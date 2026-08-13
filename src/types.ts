@@ -31,4 +31,10 @@ export interface EngramRelayConfig {
   /** 唤醒采样日志：记录查询/候选分数/注入选择到 storeDir/wake-samples.jsonl
    *  （实战样本积累，供融合权重离线拟合；默认开）。 */
   wakeSampleLog: boolean
+  /** τ 加法融合权重（建模 §3.1/§3.5）：排序分数 = τ_sem·z(语义) +
+   *  τ_time·z(激活) + τ_cause·因果可达。默认 [1,0,0] = 纯语义（与旧行为
+   *  等价）；fit-tau.mjs 拟合后更新生效（样本驱动调参闭环）。 */
+  tauSem: number
+  tauTime: number
+  tauCause: number
 }

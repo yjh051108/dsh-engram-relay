@@ -153,11 +153,18 @@ export class EngramWakeEngine {
     const hitIds = new Set(candidates.map((e) => e.id))
     const causalSlots = Math.max(1, Math.ceil(limit / 2))
 
-    // 时序衰减权重：近期记忆加分（w·e^(-Δturn/20) 指数衰减；w = recencyWeight
-    // 配置可调——仿真标定显示方向需数据驱动（默认 0.25 保守，0 关闭，负=旧优先）。
-    // 无 turn 信息时退化为 1（不调制）。
-    const curTurn = viewer.turn
+    // ── τ 加法融合（v0.3，建模 §3.1/§3.5 落地）──
+    // 排序分数 = τ_sem·z(语义) + τ_time·z(激活) + τ_cause·cause —— 按精度
+    // 加权证据融合（logistic 近似）；z-score 用当前候选集在线估计（μ/σ 滑动）。
+    // τ 从配置读取（默认 τ_sem=1/τ_time=0/τ_cause=0 = 纯语义，与旧行为等价；
+    // fit-tau.mjs 拟合后更新配置生效——样本驱动调参闭环）。
+    const tauSem = this.config.tauSem ?? 1
+    const tauTime = this.config.tauTime ?? 0
+    const tauCause = this.config.tauCause ?? 0
     const nodeById = new Map(candidates.map((e) => [e.id, e]))
+    // 回合维时序调制（recencyWeight 配置；0 关闭，负=旧优先——仿真标定
+    // 显示方向需数据驱动）。无 turn 信息时退化为 1（不调制）。
+    const curTurn = viewer.turn
     const recency = (id: string): number => {
       const e = nodeById.get(id)
       if (!e || typeof curTurn !== 'number' || typeof e.turn !== 'number') return 1
@@ -166,22 +173,30 @@ export class EngramWakeEngine {
       const d = Math.max(0, curTurn - e.turn)
       return 1 + w * Math.exp(-d / 20)
     }
-
-    // 类脑激活加权（阶段 3）：排序分数 = 语义激活 × sigmoid(基础激活 - 基准)，
-    // 强化历史（命中/展开/链接）驱动——使用即巩固、闲置即遗忘。
-    // 无激活缓存时退化为纯语义排序。
-    const actBias = (id: string): number => {
-      if (!this.activation) return 1
-      const b = this.activation.get(id)
-      // sigmoid 温和提升：B 高（近期多强化）加权，B 低（久未强化）不压死
-      return 1 + 0.6 / (1 + Math.exp(-(b + 1.5))) // B≈0 时 ~1.09，B 大趋 1.6
+    const baseOf = (id: string): number => activated.get(id) ?? 0
+    const actOf = (id: string): number => this.activation ? this.activation.get(id) : 0
+    const causeOf = (id: string): number => {
+      const n = nodeById.get(id)
+      if (!n) return 0
+      const nb = [...(n.causes ?? []), ...(n.effects ?? [])]
+      return nb.some((x) => nodeById.has(x)) ? 1 : 0
+    }
+    // 在线 z-score：对当前候选集（激活分值）估计 μ/σ
+    const hitIdsArr = [...hitIds]
+    const actVals = hitIdsArr.map(actOf)
+    const actMean = actVals.reduce((s, x) => s + x, 0) / Math.max(1, actVals.length)
+    const actStd = Math.sqrt(actVals.reduce((s, x) => s + (x - actMean) ** 2, 0) / Math.max(1, actVals.length)) || 1
+    const zTime = (id: string): number => (actOf(id) - actMean) / actStd
+    const fusionScore = (id: string, base: number): number => {
+      const sem = base * recency(id) // recency 作为语义乘数保留（回合维调制）
+      return tauSem * sem + tauTime * zTime(id) + tauCause * causeOf(id)
     }
 
     const ranked: Array<[string, number]> = []
-    // 主席位：全部哈希候选按「语义激活 × 激活加权 × 时序权重」排序
+    // 主席位：全部哈希候选按 τ 融合分数排序
     const hitRanked = [...activated.entries()]
       .filter(([id]) => hitIds.has(id) && relevantIds.has(id))
-      .sort((a, b) => b[1] * actBias(b[0]) * recency(b[0]) - a[1] * actBias(a[0]) * recency(a[0]))
+      .sort((a, b) => fusionScore(b[0], b[1]) - fusionScore(a[0], a[1]))
     const mainQuota = Math.max(1, limit - causalSlots)
     // MMR 多样性选择（建模命题 1 的已知缺口：纯 top-K 在同主题簇内发散——
     // 注入预算有限时 3 条应覆盖 3 个主题）。主题相似度代理 = 哈希槽位
@@ -218,7 +233,7 @@ export class EngramWakeEngine {
           const j = slotJaccard(slots, getSlotSet(pid))
           if (j > maxSim) maxSim = j
         }
-        const s = base * actBias(id) * recency(id) * (1 - mmrLambda * maxSim)
+        const s = fusionScore(id, base) * (1 - mmrLambda * maxSim)
         if (s > bestScore) { bestScore = s; bestIdx = i }
       }
       mainPicked.push(pool.splice(bestIdx, 1)[0]!)
@@ -254,7 +269,7 @@ export class EngramWakeEngine {
           const j = slotJaccard(slots, getSlotSet(pid))
           if (j > maxSim) maxSim = j
         }
-        const s = base * actBias(id) * recency(id) * (1 - mmrLambda * maxSim)
+        const s = fusionScore(id, base) * (1 - mmrLambda * maxSim)
         if (s > bestScore) { bestScore = s; bestIdx = i }
       }
       const pickedItem = restPool.splice(bestIdx, 1)[0]!
