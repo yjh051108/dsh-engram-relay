@@ -63,20 +63,31 @@ export class EngramRelay {
   /** 向量索引（int8 粗筛 + fp32 精筛双表；prefilter 候选来源）。 */
   readonly vectorIndex: import('./engram/vector-index.js').BruteForceIndex
 
+  /** τ 融合权重（v0.4：写入织网与检索召回共用同一加权——可逆可解释）。 */
+  get fusionTau(): { sem: number; time: number; cause: number } {
+    return {
+      sem: this.config.tauSem ?? 1,
+      time: this.config.tauTime ?? 0,
+      cause: this.config.tauCause ?? 0,
+    }
+  }
+
   private disposers: Array<() => void> = []
 
   constructor(private ctx: CordisContext, private config: EngramRelayConfig) {
     this.store = new EngramStore(config.storeDir ?? '')
     this.hasher = new NgramHashAddressing({ seed: 0 })
     this.graph = new CausalGraph(this.store)
-    this.model = new RelayModel(ctx, config)
+    this.model = new RelayModel(ctx, config, this.store)
     this.activation = new ActivationCache()
     this.activation.rebuild(this.store.all())
     this.vectorIndex = new BruteForceIndex(this.store.dir)
     this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, {
       embedder: (query, candidates) => this.model.embed(query, candidates),
       scorer: (query, candidates) => this.model.score(query, candidates),
-    }, (query) => this.vectorPrefilter(query), this.activation)
+    }, async () => null, this.activation)
+    // v0.5：纯算法语义（SemanticScorer 词汇+图通道）已替换 embedding 精排；
+    // 向量 prefilter 停用（哈希粗筛兜底）——BM25 倒排索引替代待 P5 实施。
   }
 
   /**

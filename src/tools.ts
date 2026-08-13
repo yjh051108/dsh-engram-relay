@@ -21,7 +21,7 @@ import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { EngramRelay } from './relay.js'
-import { ENGRAM_LAYERS, isVisible, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
+import { ENGRAM_LAYERS, isVisible, isSuperseded, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
 import type { CausalEdgeKind } from './engram/causal.js'
 
 type ToolsContext = CordisContext & { tools: ToolRegistry }
@@ -79,27 +79,58 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
 
 /**
  * 写前查重（P2 写入管线）：哈希候选（**跨项目**——同一真理不分项目，
- * 语义高置信同主题即修订，v0.4）→ bge 语义打分 → 最高分 ≥0.6 视为同主题
- * （返回旧节点，供自动修订）；embed 不可用时退化为标题精确匹配。高置信
+ * 语义高置信同主题即修订，v0.4）→ 语义打分 → 最高分 ≥0.6 视为同主题
+ * （返回旧节点，供自动修订）；打分器不可用时退化为标题精确匹配。高置信
  * 阈值防误判；版本链 superseded 可追溯 = 自动修订的天然回滚安全网。
+ * 返回 { dup, detailed }——detailed（通道分解）复用给自动织网。
  */
-async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<EngramNode | null> {
+async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<{ dup: EngramNode | null; detailed: Map<string, { score: number; lexical: number; graph: number; svd: number }> | null }> {
   const cands = relay.store.lookup(text, 64)
-  if (cands.length === 0) return null
-  const scores = await relay.model.embed(text.slice(0, 300), cands).catch(() => null)
-  if (scores && scores.size > 0) {
+  if (cands.length === 0) return { dup: null, detailed: null }
+  const detailed = relay.model.semanticScores(text.slice(0, 300), cands)
+  if (detailed && detailed.size > 0) {
     let best: EngramNode | null = null
     let bestScore = 0
     for (const e of cands) {
-      const s = scores.get(e.id) ?? 0
+      const s = detailed.get(e.id)?.score ?? 0
       if (s > bestScore) { bestScore = s; best = e }
     }
-    if (best && bestScore >= 0.6) return best
-    return null
+    if (best && bestScore >= 0.6) return { dup: best, detailed }
+    return { dup: null, detailed }
   }
-  // embed 不可用：精确标题匹配（保守，防误修订）
+  // 打分不可用：精确标题匹配（保守，防误修订）
   const exact = relay.store.byTitle(text.split('：')[0] ?? text)
-  return exact ?? null
+  return { dup: exact ?? null, detailed: null }
+}
+
+/**
+ * 自动织网（v0.4 核心原则：**怎么索引就怎么推荐，可逆才可解释**）：
+ * 写入即织网——**lexical 通道 ≥ 0.5 判同主题**（词汇重叠是织网的可靠
+ * 信号，比融合分阈值稳——融合分含图/PCA 分量会稀释词汇信号），排序
+ * 用融合分（三维度加权，与检索同款）。因果强关系仍由 AI/蒸馏提供
+ * （causes/effects），系统自动织的是弱关系（link）——写入织的边 =
+ * 未来检索召回的理由（可逆）。
+ */
+async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<string, { score: number; lexical: number; graph: number; svd: number }>): Promise<number> {
+  const ranked = [...detailed.entries()]
+    .filter(([id, s]) => {
+      const target = relay.store.get(id)
+      // ⚠️ 排除自身与废止节点（修订路径中旧版已被 supersede——给它织链接无意义）
+      return id !== node.id && target !== undefined && !isSuperseded(target) && s.lexical >= 0.5
+    })
+    .sort((a, b) => b[1].score - a[1].score)
+  let woven = 0
+  const newLinks: string[] = [...(node.links ?? [])]
+  for (const [id] of ranked.slice(0, 2)) {
+    const target = relay.store.get(id)
+    if (!target || target.id === node.id) continue
+    if (target.links.includes(node.title)) continue
+    relay.store.update(target.id, { links: [...target.links, node.title] })
+    if (!newLinks.includes(target.title)) newLinks.push(target.title)
+    woven++
+  }
+  if (woven > 0) relay.store.update(node.id, { links: newLinks })
+  return woven
 }
 
 /** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
@@ -224,7 +255,8 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       }
       // P2 写入管线统一：写前查重（语义高置信 ≥0.6 同主题）→ 自动修订
       // （新增当前版 + 旧版 superseded + 因果/链接迁移），不重复堆节点。
-      const dedupe = await findDuplicate(relay, `${title}：${summary}`, layer)
+      // detailed 复用于自动织网（不重复打分）。
+      const { dup: dedupe, detailed } = await findDuplicate(relay, `${title}：${summary}`, layer)
       const e = relay.store.add({
         kind: kind as EngramKind,
         layer,
@@ -277,28 +309,35 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         }
       }
       // 双向链接：为每个 [[标题]] 建关联（Obsidian 风格）
+      // ⚠️ 用 update 持久化（add 会重新生成 id → 制造重复节点——隐藏 bug）
       for (const t of links) {
         const target = relay.store.byTitle(t)
         if (target && target.id !== e.id && !target.links.includes(title)) {
-          target.links.push(title)
-          relay.store.add({ ...target, links: target.links }) // 持久化更新
+          relay.store.update(target.id, { links: [...target.links, title] })
         }
       }
-      if (revisedOld !== null) {
-        return `已修订记忆 [[${e.title}]]（${layer}·${kind}）：同主题旧版 [[${revisedOld}]] 已废止（版本链可追溯），因果/链接已继承——检索只命中当前版`
+      // 自动织网（v0.4：边是一开始就该有的——写入即织网，不依赖 AI 自觉）：
+      // 用检索同款三维度加权（τ_sem·cos + τ_time·z(激活) + τ_cause·因果可达）
+      // 选高置信邻居建双向链接——怎么索引就怎么推荐，可逆可解释。
+      let woven = 0
+      if (detailed && detailed.size > 0) {
+        woven = await weaveLinks(relay, e, detailed)
       }
-      // 织网推荐：因果边全空时触发一次「bge 语义 + 时序」推荐（不自动建边，
-      // 由 AI 决策——认识的直接选，不认识的展开正文再定或跳过）。
+      const linkNote = woven > 0 ? `，自动织网 ${woven} 条（三维度加权）` : ''
+      if (revisedOld !== null) {
+        return `已修订记忆 [[${e.title}]]（${layer}·${kind}）：同主题旧版 [[${revisedOld}]] 已废止（版本链可追溯），因果/链接已继承——检索只命中当前版${linkNote}`
+      }
+      // 织网推荐（因果边仍由 AI 决策：自动织网只做弱关系 link，因果是强语义）
       // ⚠️ 条件只查 causes/effects：links 已带但漏因果（常见偷懒）也必须推荐。
       if (causes.length === 0 && effects.length === 0) {
         const rec = await recommendLinks(relay, `${title}：${summary}`, e.id)
-        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条，因果 ↑${causes.length} ↓${effects.length}）`
+        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
         if (rec) {
-          return `${base}\n\n📎 推荐关联（bge 语义 × 时序加权，未自动建边——可作 causes/effects 候选）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果/引用边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可，不影响本条记忆。`
+          return `${base}\n\n📎 推荐因果候选（bge 语义 × 时序加权，未自动建边——可作 causes/effects）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可。`
         }
-        return base + '\n（当前无显著关联候选）'
+        return base + '\n（当前无显著因果候选）'
       }
-      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条，因果 ↑${causes.length} ↓${effects.length}）`
+      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
     },
   })))
 

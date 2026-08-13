@@ -91,9 +91,12 @@ test('version: 工具自动修订——同主题高置信写入 = 修订而非�
     const relay = {
       store, graph,
       currentSessionId: 's1', lastTurnAt: 1,
-      // embed stub：精确返回"同主题"高分（模拟真实 bge 高置信）
+      fusionTau: { sem: 1, time: 0, cause: 0 },
+      activation: { get: () => 0 },
+      // embed stub：精确返回"同主题"高分（模拟真实语义高置信）
       model: {
         embed: async (text, cands) => new Map(cands.map((e, i) => [e.id, i === 0 ? 0.72 : 0.3])),
+        semanticScores: (text, cands) => new Map(cands.map((e, i) => [e.id, { score: i === 0 ? 0.72 : 0.3, lexical: i === 0 ? 0.8 : 0.2, graph: 0, svd: 0 }])),
       },
       recall: async () => ({ engrams: [], reason: 'stub', injectedTokens: 0 }),
       status: async () => ({ engramCount: store.count() }),
@@ -115,6 +118,49 @@ test('version: 工具自动修订——同主题高置信写入 = 修订而非�
     const neu = store.byTitles('缓存修复').find((e) => !isSuperseded(e))
     assert.ok(old && neu, '存在废止版 + 当前版')
     assert.equal(store.get(old.id).supersededBy, neu.id, '版本链指针正确')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('version: 织网窗口——lexical 高但融合分 <0.6：织网触发但不修订', async () => {
+  const dir = tempDir()
+  try {
+    const store = makeStore(dir)
+    const graph = new CausalGraph(store)
+    const tools = []
+    const ctx = { tools: { register: (d) => { tools.push(d); return () => {} } } }
+    // stub：候选 0 的 lexical 高（0.8）但融合分 0.55（织网窗口）
+    const relay = {
+      store, graph,
+      currentSessionId: 's1', lastTurnAt: 1,
+      fusionTau: { sem: 1, time: 0, cause: 0 },
+      activation: { get: () => 0 },
+      model: {
+        embed: async () => new Map(),
+        semanticScores: () => new Map([['cand-0', { score: 0.55, lexical: 0.8, graph: 0, svd: 0 }]]),
+      },
+      recall: async () => ({ engrams: [], reason: 'stub', injectedTokens: 0 }),
+      status: async () => ({ engramCount: store.count() }),
+    }
+    installEngramTools(ctx, relay)
+    const storeTool = tools.find((d) => d.name === 'engram_store')
+    const exec = { agent: { session: { id: 's1', header: { cwd: '/w' } } } }
+
+    // 先造一个候选（cand-0 是 lookup 能返回的节点）
+    const seed = store.add({ kind: 'fact', layer: 'project', projectId: '/w', title: '主题甲', summary: '主题甲的内容', content: '', links: [], sessionId: null, turn: 1, causes: [], effects: [], importance: 0.5 })
+    // 修正 stub：dynamic 返回 seed 的分数（候选 id 运行时才知道）
+    relay.model.semanticScores = () => new Map([[seed.id, { score: 0.55, lexical: 0.8, graph: 0, svd: 0 }]])
+    const r = await storeTool.execute({ layer: 'project', kind: 'fact', title: '主题甲补充', summary: '主题甲的内容补充说明', causes: [] }, exec)
+    // 不修订（0.55 < 0.6）
+    assert.match(r, /已写入记忆节点/)
+    assert.ok(!/已修订/.test(r), '融合分 0.55 不触发修订')
+    // 织网（lexical 0.8 ≥ 0.5）→ 双向链接建立
+    assert.match(r, /自动织网/, '织网触发提示')
+    const neu = store.byTitle('主题甲补充')
+    assert.ok(neu.links.includes('主题甲'), '新节点链接到候选')
+    const seedReloaded = store.get(seed.id)
+    assert.ok(seedReloaded.links.includes('主题甲补充'), '候选反向链接')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

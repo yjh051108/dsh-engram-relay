@@ -15,20 +15,24 @@ import type { Context as CordisContext } from 'cordis'
 import type { EngramRelayConfig } from '../types.js'
 import { PythonEngramClient, type DistillEntry } from './python-client.js'
 import { embedWithOnnx } from './onnx-embedder.js'
+import { SemanticScorer } from '../engram/semantic-scorer.js'
 import type { EngramStore, EngramNode } from '../engram/store.js'
 import type { CausalGraph } from '../engram/causal.js'
 
 export class RelayModel {
   readonly python: PythonEngramClient
+  /** v0.5 纯算法语义打分器（词汇 + 图通道，零模型——替代 embedding 精排）。 */
+  readonly scorer: SemanticScorer
   private loadError: string | null = null
 
-  constructor(private ctx: CordisContext, private config: EngramRelayConfig) {
+  constructor(private ctx: CordisContext, private config: EngramRelayConfig, store: EngramStore) {
     this.python = new PythonEngramClient(
       config.pythonPath,
       config.modelId,
       config.checkpoint ?? '',
       config.embedModel,
     )
+    this.scorer = new SemanticScorer(store)
   }
 
   /** 预热：启动 Python 服务并加载模型（失败不抛出，记录后降级）。 */
@@ -82,16 +86,21 @@ export class RelayModel {
   }
 
   /**
-   * 语义精排（混合检索核心）：对 hash 粗筛候选做 bge 余弦重排。
-   * 返回「候选 id → 余弦相似度」；嵌入模型不可用时返回 null
-   * （上层降级为重要度/遗留门控）。降级链：TS ONNX（包内模型，免 Python）→ Python 服务。
+   * 语义打分（v0.5：纯算法 SemanticScorer——词汇 n-gram Jaccard + 词频
+   * + 图语义传播 + PCA 共现谱分解，零 embedding 模型；确定性、可解释）。
+   * 返回「候选 id → 融合分数 [0,1]」（0.6 阈值语义沿用；上层无需改动）。
    */
   async embed(query: string, candidates: EngramNode[]): Promise<Map<string, number> | null> {
     if (candidates.length === 0) return new Map()
-    const texts = candidates.map((e) => `${e.title}：${e.summary.slice(0, 200)}`)
-    const raw = await this.embedRaw(query, texts)
-    if (!raw) return null
-    return this.cosineScores(candidates, raw.query_vec, raw.vectors)
+    const scored = this.scorer.score(query, candidates)
+    const out = new Map<string, number>()
+    for (const [id, s] of scored) out.set(id, s.score)
+    return out
+  }
+
+  /** 详细语义分（通道分解——查重/织网用 lexical 阈值，比融合分更稳）。 */
+  semanticScores(query: string, candidates: EngramNode[]): Map<string, { score: number; lexical: number; graph: number; svd: number }> {
+    return this.scorer.score(query, candidates)
   }
 
   private cosineScores(candidates: EngramNode[], qv: number[], vectors: number[][]): Map<string, number> {
