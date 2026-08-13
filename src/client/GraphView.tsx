@@ -158,11 +158,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
       // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
       // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
-      // collideRadius 24→34（容纳节点下方标签，防标签重叠）
-      charge: -300,
+      // ⚠️ v0.6 布局紧凑化：charge -300 → -100（253 节点互相排斥爆散到
+      // ±1000，fit 后节点仅 3.9px 不可见——用户反馈"位置左上角/空"根因）；
+      // springLength 90→110（边舒展）；collideRadius 34→30（布局更密）。
+      // 实测：fit 后布局 ~1680 宽、节点屏幕 ~6.4px（可见）
+      charge: -100,
       spring: 0.1,
-      springLength: 90,
-      collideRadius: 34,
+      springLength: 110,
+      collideRadius: 30,
       centerStrength: 0.08,
       clusters: clusterOf.size > 0 ? clusterOf : undefined,
       clusterTarget: 110,
