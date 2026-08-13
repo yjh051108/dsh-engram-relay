@@ -307,8 +307,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     .filter((c): c is { cx: number; cy: number; radius: number; label: string; multi: boolean } => c !== null),
   [clusterList, layout])
 
-  /** 项目着色（v0.4）：projectId 哈希取色；null（通用知识）灰色。 */
-  const projectColor = (projectId: string | null): string => {
+  /** 项目着色（v0.4）：projectId 哈希取色；null（通用知识）灰色。
+   *  ⚠️ function 声明（提升）——projectCircles useMemo 在其定义前引用，
+   *  const 箭头函数会 TDZ 报错（Cannot access before initialization）。 */
+  function projectColor(projectId: string | null): string {
     if (projectId === null) return '#8a94a6'
     let h = 0
     for (const ch of projectId) h = (h * 31 + ch.charCodeAt(0)) >>> 0
@@ -317,7 +319,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
 
   /** 簇着色（v0.5 取经 Obsidian color groups：**同簇同色**——分类感知的
    *  核心。簇色相从簇 id 确定性哈希；孤立节点回退项目色）。 */
-  const clusterColor = (clusterId: string): string => {
+  function clusterColor(clusterId: string): string {
     let h = 0
     for (const ch of clusterId) h = (h * 131 + ch.charCodeAt(0)) >>> 0
     // 色相错开（黄金角）+ 高饱和亮色（暗色背景下醒目）
