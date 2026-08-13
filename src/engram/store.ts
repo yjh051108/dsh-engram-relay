@@ -469,10 +469,16 @@ export class EngramStore {
     const keys = this.hasher.slotKeys(result)
     const seen = new Set<string>()
     const hits: EngramNode[] = []
+    // ⚠️ 规模化（10 万级 benchmark）：高频词槽候选可爆炸到全库（max 10 万）——
+    // 必须提前截断（每槽内按插入序取），不能全量收集再排序（O(N) 遍历）。
+    // 截断损失可接受：粗筛只负责"别漏"，排序质量由后续语义精排保证。
+    const budget = Math.max(limit, 64) // 给精排留余量（粗筛宁可多给）
+    outer:
     for (const k of keys) {
       const ids = this.slotIndex.get(k)
       if (!ids) continue
       for (const id of ids) {
+        if (hits.length >= budget) break outer
         if (seen.has(id)) continue
         seen.add(id)
         const e = this.byId.get(id)
