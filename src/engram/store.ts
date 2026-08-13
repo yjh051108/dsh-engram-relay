@@ -107,13 +107,32 @@ export function isVisible(e: EngramNode, viewer: { sessionId?: string; cwd?: str
   }
 }
 
+/**
+ * 沉睡判定（派生状态，实时计算）：最后强化 > 30 天前 且 hits < 3。
+ * 被命中（touch）的节点刚强化，永不处于沉睡；沉默 >30 天的节点在
+ * 渲染时降级为仅标题（不占注入预算），图谱仍可检索、命中即复苏。
+ */
+export function dormantOf(e: EngramNode, now: number = Date.now()): boolean {
+  if (e.hits >= 3) return false
+  const last = e.reinforces && e.reinforces.length > 0 ? e.reinforces[e.reinforces.length - 1] : e.createdAt
+  return (now - last) / 86400000 >= 30
+}
+
 /** 渐进披露层级。 */
 export interface EngramNode {
   id: string
   kind: EngramKind
-  /** 分层归属（AI 自主决策）：global=全局持久 / project=项目持久 / session=会话临时。 */
+  /** 分层归属（AI 自主决策）：global=全局持久 / project=项目持久。 */
   layer: EngramLayer
-  /** project 层标识（会话工作目录；global/session 层为 null）。 */
+  /**
+   * 巩固状态（双维度：可见性×巩固度，v0.3 引入）：
+   *  - episodic：刚写入，事件性，细节丰富（情景记忆）
+   *  - semantic：强化 ≥3 次，被归纳，去情景化（语义记忆）
+   *  - dormant ：30 天无强化，低激活，退出注入入口层（沉睡）
+   * 惰性迁移（touch/reinforce 时评估，无定时扫描）。
+   */
+  state?: 'episodic' | 'semantic' | 'dormant'
+  /** project 层标识（会话工作目录；global 层为 null）。 */
   projectId: string | null
   /** 入口锚点（唤醒列表展示；如 Obsidian 的页面标题）。 */
   title: string
@@ -218,6 +237,8 @@ export class EngramStore {
           e.hits = typeof e.hits === 'number' ? e.hits : 0
           e.createdAt = typeof e.createdAt === 'number' ? e.createdAt : 0
           e.reinforces = Array.isArray(e.reinforces) ? e.reinforces : [e.createdAt || Date.now()]
+          // v0.3 巩固状态归一化：旧数据默认 episodic（不丢、可迁移）
+          e.state = (e.state === 'semantic' || e.state === 'dormant') ? e.state : 'episodic'
           this.byId.set(e.id, e)
           for (const s of e.slots) this.indexSlot(s, e.id)
           if (e.title) this.indexTitle(e.title, e.id)
@@ -337,6 +358,8 @@ export class EngramStore {
       slots,
       // 写入即第一次强化（类脑：刚记住时最容易被想起）
       reinforces: input.reinforces ?? [Date.now()],
+      // v0.3 巩固状态：写入即 episodic（刚记住，事件性最强）
+      state: 'episodic',
     }
     this.byId.set(node.id, node)
     for (const s of slots) this.indexSlot(s, node.id)
@@ -552,6 +575,15 @@ export class EngramStore {
     return counts
   }
 
+  /** 巩固状态统计（status 工具用；旧数据默认 episodic；dormant 派生）。 */
+  stateCounts(): Record<'episodic' | 'semantic' | 'dormant', number> {
+    const counts: Record<'episodic' | 'semantic' | 'dormant', number> = { episodic: 0, semantic: 0, dormant: 0 }
+    for (const e of this.byId.values()) {
+      counts[dormantOf(e) ? 'dormant' : (e.state === 'semantic' ? 'semantic' : 'episodic')] += 1
+    }
+    return counts
+  }
+
   /**
    * 提升/转层：改 layer 与 projectId（保留 id/因果/链接——引用不失效）。
    * project → global（跨项目共享真理）；global 不可降级。
@@ -598,6 +630,7 @@ export class EngramStore {
     e.hits += 1
     e.lastHitAt = Date.now()
     if (e.reinforces) e.reinforces.push(Date.now())
+    this.evolveState(e)
     this.persist()
   }
 
@@ -607,7 +640,19 @@ export class EngramStore {
     if (!e) return
     e.reinforces = e.reinforces ?? [e.createdAt || Date.now()]
     e.reinforces.push(Date.now())
+    this.evolveState(e)
     this.persist()
+  }
+
+  /**
+   * 惰性状态迁移（命中/强化时评估，无定时扫描）：
+   *  - hits ≥ 3 → semantic（强化历史充足，去情景化，持久固化）
+   *  - dormant 是**派生状态**（见 isDormant）：由强化历史实时计算——
+   *    被 touch 的节点刚强化，永不处于沉睡；沉默 >30 天的节点在
+   *    渲染/候选时降级为仅标题，不占注入预算。
+   */
+  private evolveState(e: EngramNode): void {
+    if (e.hits >= 3) e.state = 'semantic'
   }
 
   /** 全部待确认节点（用户确认制管理面）。 */

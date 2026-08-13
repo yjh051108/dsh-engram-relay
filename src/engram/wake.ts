@@ -20,7 +20,7 @@
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { NgramHashAddressing } from './hash.js'
 import { CausalGraph } from './causal.js'
-import { EngramStore, isVisible, type EngramLayer, type EngramNode } from './store.js'
+import { EngramStore, isVisible, dormantOf, type EngramLayer, type EngramNode } from './store.js'
 import type { EngramRelayConfig } from '../types.js'
 
 export interface WakeHit {
@@ -268,7 +268,7 @@ export class EngramWakeEngine {
     await appendFile(file, `${JSON.stringify(record)}\n`, 'utf8')
   }
 
-  /** 渲染记忆注入段（动态预算：按相关度分级——高分完整入口、中分标题+摘要、低分仅标题）。 */
+  /** 渲染记忆注入段（动态预算：按巩固状态分级——semantic 完整入口、episodic 标题+摘要、dormant 仅标题）。 */
   renderInjection(budgetTokens: number): string {
     const { engrams } = this.lastInjection
     if (engrams.length === 0) return ''
@@ -277,23 +277,23 @@ export class EngramWakeEngine {
     const HEADER = '（跨会话记忆：recall 检索 / open 展开 / store 写入 / link 织网。以下为相关记忆入口——摘要足够可直接用，需细节对 [[标题]] 用 engram_open 展开，需更多用 engram_recall）'
     const lines: string[] = []
     let tokens = estimateTokens(HEADER)
-    engrams.forEach((e, idx) => {
+    // 分级渲染（按巩固状态，v0.3；dormant 为派生状态——沉默 >30 天降级）：
+    //  - semantic：完整入口（标题+层+因果注+摘要）——去情景化真理，最值得看
+    //  - episodic：标题+摘要（事件性，新近，省因果注省 token）
+    //  - dormant ：仅 [[标题]]（沉睡记忆，入口可唤醒，不占预算）
+    engrams.forEach((e) => {
       if (tokens >= budgetTokens) return
-      // 分级渲染（engrams 已按激活分数降序）：
-      //  - 第 1 条（最高分）：完整入口（标题+层+因果+摘要）
-      //  - 第 2-3 条：标题+摘要（省因果注）
-      //  - 其余：仅 [[标题]]（最大化覆盖，预算内尽量多挂入口）
       let line: string
-      if (idx === 0) {
+      if (e.state === 'semantic') {
         const causes = this.graph.causesOf(e.id)
         const effects = this.graph.effectsOf(e.id)
         const causeNote = causes.length > 0 ? ` ↑因:${causes.map((c) => c.title).join(';').slice(0, 60)}` : ''
         const effectNote = effects.length > 0 ? ` ↓果:${effects.map((c) => c.title).join(';').slice(0, 60)}` : ''
         line = `- [[${e.title}]][${e.layer}]${causeNote}${effectNote}: ${e.summary.slice(0, 120)}`
-      } else if (idx <= 2) {
-        line = `- [[${e.title}]][${e.layer}]: ${e.summary.slice(0, 80)}`
-      } else {
+      } else if (e.state === 'dormant' || dormantOf(e)) {
         line = `- [[${e.title}]]`
+      } else {
+        line = `- [[${e.title}]][${e.layer}]: ${e.summary.slice(0, 80)}`
       }
       const cost = estimateTokens(line)
       if (tokens + cost > budgetTokens) return

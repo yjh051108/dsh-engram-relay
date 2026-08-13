@@ -420,7 +420,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         node.links.map((t) => relay.store.byTitle(t)?.id ?? '').filter(Boolean),
       )
       const parts: string[] = []
-      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''})`)
+      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''} · ${node.state ?? 'episodic'})`)
       parts.push(node.summary)
       if (node.content) parts.push(`\n${node.content}`)
       if (causes.length > 0) parts.push(`\n**前因**（因果 ↑）：${causes.map((c) => `[[${c.title}]]`).join('、')}`)

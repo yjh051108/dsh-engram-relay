@@ -361,6 +361,7 @@ export class EngramRelay {
       engramCount: this.store.count(),
       pendingCount: this.store.pending().length,
       layerCounts: this.store.layerCounts(),
+      stateCounts: this.store.stateCounts(),
       slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
       model: await this.model.describe(),
