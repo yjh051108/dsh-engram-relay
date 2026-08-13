@@ -44,6 +44,9 @@ export interface ForceLayoutOptions {
   springLength?: number
   /** 节点碰撞半径（防重叠的最小间距，缺省 24）。 */
   collideRadius?: number
+  /** 软向心强度（d3 forceX/forceY；0-1，把网络温和拉回中心防无限扩散，
+   *  缺省 0.05——远弱于斥力，只阻止撞边界，不压缩网络）。 */
+  centerStrength?: number
   /** 速度衰减（0-1；每轮速度保留比例，缺省 0.55）。 */
   velocityDecay?: number
   /** alpha 温度衰减率（缺省 0.02 → 约 300 轮衰减到 0.001）。 */
@@ -65,12 +68,13 @@ export function layoutForce(
   const {
     width, height,
     iterations = 500,
-    charge = -800,
+    charge = -300,
     spring = 0.1,
     springLength = 80,
     collideRadius = 24,
+    centerStrength = 0.08,
     velocityDecay = 0.55,
-    alphaDecay = 0.015,
+    alphaDecay = 0.02,
     maxMove = 40,
   } = opts
 
@@ -171,6 +175,13 @@ export function layoutForce(
           bj.vy += y * l
         }
       }
+    }
+
+    // ---- forceX/forceY 软向心：弱弹簧把网络拉回中心（防无限扩散撞边界；
+    //      强度远小于斥力，不会把网络压成团）----
+    for (const body of bodies.values()) {
+      body.vx += (cx - body.x) * centerStrength * a
+      body.vy += (cy - body.y) * centerStrength * a
     }
 
     // ---- 积分 + 速度衰减 + 限速 + 边界 ----

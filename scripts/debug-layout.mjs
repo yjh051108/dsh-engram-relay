@@ -38,14 +38,15 @@ const edges = [
 const VIEW_W = 900
 const VIEW_H = 620
 
-// 参数：charge spring springLength collideRadius iterations
-const [cA, cB, cC, cD, cE] = process.argv.slice(2)
+// 参数：charge spring springLength collideRadius iterations centerStrength
+const [cA, cB, cC, cD, cE, cF] = process.argv.slice(2)
 const P = {
-  charge: cA !== undefined ? Number(cA) : -400,
-  spring: cB !== undefined ? Number(cB) : 0.5,
+  charge: cA !== undefined ? Number(cA) : -300,
+  spring: cB !== undefined ? Number(cB) : 0.1,
   springLength: cC !== undefined ? Number(cC) : 80,
   collideRadius: cD !== undefined ? Number(cD) : 24,
-  iterations: cE !== undefined ? Number(cE) : 300,
+  iterations: cE !== undefined ? Number(cE) : 500,
+  centerStrength: cF !== undefined ? Number(cF) : 0.08,
 }
 
 const layout = layoutForce(
@@ -57,6 +58,7 @@ const layout = layoutForce(
     spring: P.spring,
     springLength: P.springLength,
     collideRadius: P.collideRadius,
+    centerStrength: P.centerStrength,
   },
 )
 
@@ -73,5 +75,7 @@ for (let i = 0; i < pts.length; i++) {
     if (d < minPair) minPair = d
   }
 }
-console.log(`[charge=${P.charge} spring=${P.spring} len=${P.springLength} col=${P.collideRadius} iter=${P.iterations}]`)
-console.log(`  到中心: min=${sorted[0].toFixed(0)} avg=${avg.toFixed(0)} max=${sorted.at(-1).toFixed(0)} | 最小节点间距=${minPair.toFixed(0)}`)
+// 贴边检测：距画布边缘 < 60px 算贴边
+const clamped = pts.filter((p) => p.x < 60 || p.x > VIEW_W - 60 || p.y < 60 || p.y > VIEW_H - 60).length
+console.log(`[charge=${P.charge} spring=${P.spring} len=${P.springLength} col=${P.collideRadius} center=${P.centerStrength} iter=${P.iterations}]`)
+console.log(`  到中心: min=${sorted[0].toFixed(0)} avg=${avg.toFixed(0)} max=${sorted.at(-1).toFixed(0)} | 最小节点间距=${minPair.toFixed(0)} | 贴边节点=${clamped}`)

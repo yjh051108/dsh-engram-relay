@@ -99,14 +99,16 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       visibleEdges.map((e) => ({ from: e.from, to: e.to })),
       {
         width: VIEW_W, height: VIEW_H, iterations: 500,
-        // d3-force 风格参数（force.ts 注释）：
-        // 负 charge = manyBody 斥力；spring 0-1 弱标定（0.1 ≈ 15 节点网络
-        // 边距 80-100px）；collide 硬防重叠；forceCenter 平移居中
-        // （不加向心力，网络不会聚核）。
-        charge: -800,
+        // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
+        // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
+        // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
+        // 标定依据（真实 15 节点）：avg 175px / max 268px / 最小间距 70px /
+        // 贴边 0——占画布约 60%×86%，边缘留白。
+        charge: -300,
         spring: 0.1,
         springLength: 80,
         collideRadius: 24,
+        centerStrength: 0.08,
       },
     )
     return { nodes: visible, edges: visibleEdges, layout }
