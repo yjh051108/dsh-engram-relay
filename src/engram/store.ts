@@ -15,7 +15,7 @@
  * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync, appendFileSync } from 'node:fs'
 import { basename } from 'node:path'
 /** 进程内写锁（同步标志位）：persist 是同步函数，JS 单线程下同步代码天然不交错；tmp 每实例唯一已防跨实例冲突。 */
 let fileLockHeld = false
@@ -785,6 +785,63 @@ export class EngramStore {
     }
     this.persist()
     return true
+  }
+
+  /** 归档文件（被淘汰节点保留可恢复，不删数据）。 */
+  private archiveFile(): string {
+    return join(this.dir, 'archived.jsonl')
+  }
+
+  /**
+   * 归档一个节点：JSON 追加到 archived.jsonl（带 archivedAt），然后从主库移除。
+   * 归档 = 完全退出检索/注入/图谱，但可手动恢复（读回 archived.jsonl）。
+   */
+  archiveNode(id: string): boolean {
+    const e = this.byId.get(id)
+    if (!e) return false
+    const record = { ...e, archivedAt: Date.now() }
+    try {
+      appendFileSync(this.archiveFile(), `${JSON.stringify(record)}\n`, 'utf8')
+    } catch { /* 归档写失败不阻塞主库操作 */ }
+    return this.remove(id)
+  }
+
+  /**
+   * 硬上限（v0.5）：count > maxNodes 时按「留着最没用」顺序淘汰归档：
+   *  ① superseded（已废止——真理已由当前版承载）
+   *  ② dormant（沉睡——长期未用，不占注入预算仍占存储）
+   *  ③ 低激活 episodic（强化少 + 创建久）
+   * 返回淘汰数。惰性触发（写入后调用），不阻塞。
+   */
+  enforceLimit(maxNodes: number): number {
+    if (maxNodes <= 0) return 0
+    const excess = this.count() - maxNodes
+    if (excess <= 0) return 0
+    const now = Date.now()
+    const valueKey = (e: EngramNode): number => {
+      if (isSuperseded(e)) return 0
+      if (dormantOf(e, now)) return 1
+      // 低激活：强化次数少 + 久未用
+      const last = e.reinforces && e.reinforces.length > 0 ? e.reinforces[e.reinforces.length - 1] : e.createdAt
+      return 2 + (e.reinforces?.length ?? 0) / 10 + (now - last) / 1e12
+    }
+    const doomed = this.all()
+      .sort((a, b) => valueKey(a) - valueKey(b))
+      .slice(0, excess)
+    let archived = 0
+    for (const e of doomed) {
+      if (this.archiveNode(e.id)) archived++
+    }
+    return archived
+  }
+
+  /** 归档节点数（status 显示）。 */
+  archivedCount(): number {
+    try {
+      return readFileSync(this.archiveFile(), 'utf8').split('\n').filter((l) => l.trim() !== '').length
+    } catch {
+      return 0
+    }
   }
 }
 

@@ -195,6 +195,13 @@ export class EngramRelay {
           this.ctx.logger?.warn?.('[engram-relay] snapshot failed: %s', String(error))
         }
       }
+      // 硬上限（v0.5）：每回合惰性触发归档淘汰（不阻塞）
+      try {
+        const archived = this.store.enforceLimit(this.config.maxNodes ?? 10000)
+        if (archived > 0) {
+          this.ctx.logger?.info?.('[engram-relay] archive: %d nodes (max=%d, count=%d)', archived, this.config.maxNodes, this.store.count())
+        }
+      } catch { /* 淘汰失败不阻塞 */ }
       void this.maybeDistill().catch((error) => {
         this.ctx.logger?.warn?.('[engram-relay] distill failed: %s', String(error))
       })
@@ -381,6 +388,8 @@ export class EngramRelay {
       pendingCount: this.store.pending().length,
       layerCounts: this.store.layerCounts(),
       stateCounts: this.store.stateCounts(),
+      archivedCount: this.store.archivedCount(),
+      maxNodes: this.config.maxNodes ?? 10000,
       slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
       model: await this.model.describe(),

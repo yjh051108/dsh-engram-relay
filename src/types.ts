@@ -37,4 +37,7 @@ export interface EngramRelayConfig {
   tauSem: number
   tauTime: number
   tauCause: number
+  /** 硬上限（v0.5）：主库节点数超过该值触发归档淘汰（superseded → dormant
+   *  → 低激活；归档到 archived.jsonl 可恢复）。0 = 无限（默认 10000）。 */
+  maxNodes: number
 }

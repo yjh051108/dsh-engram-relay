@@ -59,6 +59,7 @@ export interface Config {
   tauSem: number
   tauTime: number
   tauCause: number
+  maxNodes: number
 }
 
 export const Config: z<Config> = z.object({
@@ -98,6 +99,8 @@ export const Config: z<Config> = z.object({
     .description('τ 融合：时序通道权重（z-score 激活；默认 0=纯语义，fit-tau 拟合后更新）'),
   tauCause: z.number().min(0).max(5).default(0)
     .description('τ 融合：因果通道权重（因果 1 跳可达 0/1）'),
+  maxNodes: z.number().min(0).max(1000000).default(10000)
+    .description('主库硬上限：超过触发归档淘汰（superseded→dormant→低激活，归档可恢复）；0=无限'),
 })
 
 /** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；旧 engram-trial 路径存在则沿用。 */
@@ -137,6 +140,7 @@ export function apply(ctx: Context, config: Config): void {
     tauSem: config.tauSem,
     tauTime: config.tauTime,
     tauCause: config.tauCause,
+    maxNodes: config.maxNodes,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入
