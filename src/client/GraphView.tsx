@@ -78,8 +78,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**——屏幕大小 =
   // 世界值 × (svgWidth/vw)，要屏幕恒定 → 世界值 = 基准 × (vw/VIEW_W) =
   // 基准 ÷ zoomScale（⚠️ 曾误乘 zoomScale 越放大越大——已修正）。
-  // 无限画布的要点：缩放只改变"看得多密"，不改变"元素多大"。
+  // v0.6 折中（用户要求"缩得极小节点也得缩小"）：**放大恒定、缩小跟随**——
+  // 补偿系数 zc = max(zoomScale, 1)：放大（zoomScale>1）屏幕恒定；
+  // 缩小（zoomScale<1）世界尺寸不变 → 屏幕按比例变小，不挤成一坨。
   const zoomScale = VIEW_W / view.vw
+  const zc = Math.max(zoomScale, 1)
 
   const loadGraph = (): void => {
     setLoading(true)
@@ -263,6 +266,36 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return { nodeIds, edgeKeys }
   }, [selectedId, edges])
 
+  // 自动适配视口（v0.6 用户要求：切过滤后初始画面刚好显示全部可见节点）
+  // ——filter 变化 + 动画完成后，把 viewBox 设到可见节点包围盒（含簇圆
+  // 与 padding）；只自动 fit 一次/每 filter，用户手动缩放后不打扰。
+  const fitView = (): void => {
+    if (nodes.length === 0) return
+    const pts = nodes
+      .map((n) => layout.get(n.id))
+      .filter((p): p is ForcePoint => p !== undefined)
+    if (pts.length === 0) return
+    const pad = 80 / zc // 世界坐标 padding（簇圆标签留白）
+    const minX = Math.min(...pts.map((p) => p.x)) - pad
+    const maxX = Math.max(...pts.map((p) => p.x)) + pad
+    const minY = Math.min(...pts.map((p) => p.y)) - pad
+    const maxY = Math.max(...pts.map((p) => p.y)) + pad
+    setView({
+      vx: minX,
+      vy: minY,
+      vw: Math.max(200, maxX - minX),
+      vh: Math.max(150, maxY - minY),
+    })
+  }
+  const lastFitRef = useRef<string>('')
+  useEffect(() => {
+    if (animT < 1) return
+    if (lastFitRef.current === filter) return
+    lastFitRef.current = filter
+    fitView()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animT, filter, nodes, layout])
+
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
     .filter((c) => c.ids.length >= 2)
@@ -391,7 +424,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => setView(VIEW_DEFAULT)}>{t('graph.reset')}</button>
+          <button className={styles.refresh} onClick={() => { lastFitRef.current = ''; fitView() }}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
@@ -413,18 +446,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             className={styles.svg}
           >
             <defs>
-              {/* 因果边方向箭头（v0.5 视觉优化：因果方向一目了然） */}
-              <marker
-                id="arrow-causes"
-                viewBox="0 0 10 10"
-                refX="9"
-                refY="5"
-                markerWidth={7 / zoomScale}
-                markerHeight={7 / zoomScale}
-                orient="auto-start-reverse"
-              >
-                <path d="M 0 1 L 9 5 L 0 9 z" fill="#7a8599" />
-              </marker>
               {/* 背景点阵（无限画布尺度感） */}
               <pattern id="dot-grid" width="40" height="40" patternUnits="userSpaceOnUse">
                 <circle cx="1.5" cy="1.5" r="1.2" fill="rgba(255,255,255,0.06)" />
@@ -450,18 +471,18 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   cx={c.cx} cy={c.cy} r={c.radius}
                   fill={c.multi ? 'rgba(138,148,166,0.08)' : 'rgba(255,255,255,0.05)'}
                   stroke={c.multi ? 'rgba(138,148,166,0.5)' : 'rgba(255,255,255,0.16)'}
-                  strokeWidth={1.5 / zoomScale}
+                  strokeWidth={1.5 / zc}
                   strokeDasharray={c.multi ? '6 4' : undefined}
                 />
                 <text
-                  x={c.cx} y={c.cy - c.radius + 20 / zoomScale}
+                  x={c.cx} y={c.cy - c.radius + 20 / zc}
                   textAnchor="middle"
                   className={styles.clusterLabel}
                   style={{
-                    fontSize: 11 / zoomScale,
+                    fontSize: 11 / zc,
                     paintOrder: 'stroke',
                     stroke: 'rgba(10,14,22,0.85)',
-                    strokeWidth: 3 / zoomScale,
+                    strokeWidth: 3 / zc,
                   }}
                 >
                   {c.label}
@@ -492,8 +513,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                     stroke={isHighlighted ? '#ffd166' : color}
                     strokeOpacity={baseOpacity * edgeFade}
-                    strokeWidth={(isHighlighted ? 2.5 : 1.5) / zoomScale}
-                    markerEnd="url(#arrow-causes)"
+                    strokeWidth={(isHighlighted ? 2.5 : 1.5) / zc}
                     className={styles.edge}
                   />
                 )
@@ -504,7 +524,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                   stroke={isHighlighted ? '#ffd166' : '#aab2c0'}
                   strokeOpacity={baseOpacity * edgeFade}
-                  strokeWidth={(isHighlighted ? 2 : 1) / zoomScale}
+                  strokeWidth={(isHighlighted ? 2 : 1) / zc}
                   strokeDasharray="5 4"
                   className={styles.edge}
                 />
@@ -527,7 +547,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               // ⚠️ 缩放补偿：屏幕大小 = 世界值 × (svgWidth/vw) → 要屏幕
               // 恒定，世界坐标半径 = 屏幕基准 ÷ zoomScale（放大后节点/文字
               // 保持屏幕大小，看的是更稀疏更清楚，不是更大）
-              const r = rBase / zoomScale
+              const r = rBase / zc
               const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
               const dimmed = highlight !== null && !inHighlight
               // 入场淡入（动画期间节点依次出现）
@@ -545,7 +565,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   style={{ transition: 'opacity 0.2s' }}
                 >
                   {isSemantic && (
-                    <circle cx={p.x} cy={p.y} r={r + 9 / zoomScale} fill="url(#halo-grad)" pointerEvents="none" />
+                    <circle cx={p.x} cy={p.y} r={r + 9 / zc} fill="url(#halo-grad)" pointerEvents="none" />
                   )}
                   <circle
                     cx={p.x} cy={p.y}
@@ -553,17 +573,17 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     fill={color}
                     fillOpacity={selected ? 1 : isSemantic ? 0.95 : 0.82}
                     stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
-                    strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) / zoomScale}
+                    strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) / zc}
                   />
                   <text
-                    x={p.x} y={p.y + r + 12 / zoomScale}
+                    x={p.x} y={p.y + r + 12 / zc}
                     textAnchor="middle"
                     className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
                     style={{
-                      fontSize: (isSemantic ? 11 : 10) / zoomScale,
+                      fontSize: (isSemantic ? 11 : 10) / zc,
                       paintOrder: 'stroke',
                       stroke: 'rgba(10,14,22,0.9)',
-                      strokeWidth: 3 / zoomScale,
+                      strokeWidth: 3 / zc,
                     }}
                   >
                     {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
