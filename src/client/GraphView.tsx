@@ -73,6 +73,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   viewRef.current = view
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect; moved: boolean } | null>(null)
+  const lastWheelRef = useRef(0)
 
   // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**——屏幕大小 =
   // 世界值 × (svgWidth/vw)，要屏幕恒定 → 世界值 = 基准 × (vw/VIEW_W) =
@@ -144,14 +145,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterList = clusters.list
   const clusterOf = clusters.clusterOf
 
-  // ---- 静态布局（v0.6 用户要求：**不要动画，一开始就显示全、秒显示**）----
-  // 确定性力导向一次性收敛（useMemo 缓存）；无动画/无生长/无运镜——
-  // 渲染即全图。性能：253 节点 500 迭代 ≈ 数十 ms。
+  // ---- 静态布局（v0.6：一开始就显示全、秒显示）----
+  // 迭代 250（实测 292 节点 500 迭代 81ms / 250 迭代 45ms——布局质量
+  // 足够，减半提速；初始按簇散布收敛快）
   const layout = useMemo(() => layoutForce(
     nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
     edges.map((e) => ({ from: e.from, to: e.to })),
     {
-      width: VIEW_W, height: VIEW_H, iterations: 500,
+      width: VIEW_W, height: VIEW_H, iterations: 250,
       charge: -100,
       spring: 0.1,
       springLength: 110,
@@ -162,6 +163,17 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       clusterStrength: 0.04,
     },
   ), [nodes, edges, clusterOf])
+
+  // ---- 渲染性能（v0.6 用户反馈"加载很久很卡"：卡顿根源 = 缩放/平移时
+  // 每帧全量重渲染 1000+ SVG 元素）----
+  // ① 视口裁剪：只渲染当前 view 内（含余量）的节点与边——放大时可见
+  //    元素骤减，缩放流畅
+  const cull = (p: ForcePoint, margin = 150 / zc): boolean =>
+    p.x >= view.vx - margin && p.x <= view.vx + view.vw + margin
+    && p.y >= view.vy - margin && p.y <= view.vy + view.vh + margin
+  // ② 缩小隐藏标签：zoomScale < 0.35（标签屏幕 <4px 无意义）不渲染 text
+  //    ——缩小时少 ~1/3 元素
+  const showLabels = zoomScale >= 0.35
 
   // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
   const degreeOf = useMemo(() => {
@@ -270,6 +282,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
       e.preventDefault()
+      // ⚠️ 节流（v0.6 性能）：滚轮高频触发 → 每帧全量重渲染卡顿。
+      // 50ms 内只处理最后一次（丢中间帧，缩放仍平滑）
+      const now = performance.now()
+      if (now - lastWheelRef.current < 50) return
+      lastWheelRef.current = now
       const rect = svg.getBoundingClientRect()
       const mx = (e.clientX - rect.left) / rect.width // 鼠标归一化位置 [0,1]
       const my = (e.clientY - rect.top) / rect.height
@@ -426,6 +443,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const a = layout.get(e.from)
               const b = layout.get(e.to)
               if (a === undefined || b === undefined) return null
+              // 视口裁剪：两端都在视口外 → 跳过（v0.6 性能）
+              if (!cull(a) && !cull(b)) return null
               const key = `${e.from}|${e.to}|${e.kind}`
               const isHighlighted = highlight !== null && highlight.edgeKeys.has(key)
               const dimmed = highlight !== null && !isHighlighted
@@ -465,6 +484,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             {nodes.map((n) => {
               const p = layout.get(n.id)
               if (p === undefined) return null
+              // 视口裁剪（v0.6 性能：只渲染 view 内节点——放大时元素骤减）
+              if (!cull(p)) return null
               // 簇色优先（同簇同色）；孤立节点回退项目色（灰色）
               const cid = clusterOf.get(n.id)
               const color = cid !== undefined ? clusterColor(cid) : projectColor(n.projectId)
@@ -508,19 +529,21 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
                     strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) / zc}
                   />
-                  <text
-                    x={p.x} y={p.y + r + 12 / zc}
-                    textAnchor="middle"
-                    className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
-                    style={{
-                      fontSize: (isSemantic ? 11 : 10) / zc,
-                      paintOrder: 'stroke',
-                      stroke: 'rgba(10,14,22,0.9)',
-                      strokeWidth: 3 / zc,
-                    }}
-                  >
-                    {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
-                  </text>
+                  {showLabels && (
+                    <text
+                      x={p.x} y={p.y + r + 12 / zc}
+                      textAnchor="middle"
+                      className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
+                      style={{
+                        fontSize: (isSemantic ? 11 : 10) / zc,
+                        paintOrder: 'stroke',
+                        stroke: 'rgba(10,14,22,0.9)',
+                        strokeWidth: 3 / zc,
+                      }}
+                    >
+                      {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
+                    </text>
+                  )}
                 </g>
               )
             })}
