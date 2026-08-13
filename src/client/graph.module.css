@@ -136,6 +136,13 @@
 
 .node {
   cursor: pointer;
+  /* ⚠️ v0.6 用户反馈"外白内黑的框"：节点 g 带 tabIndex 点击后获得焦点，
+     浏览器画默认矩形 outline（白框包住圆+标签）——去掉 */
+  outline: none;
+}
+
+.node:focus {
+  outline: none;
 }
 
 .node circle {
