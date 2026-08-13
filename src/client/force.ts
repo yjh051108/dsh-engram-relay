@@ -13,6 +13,10 @@
  * 确定性：初始位置按索引均匀分布在圆环上（无随机，仅按索引确定性微扰
  * 打破完美对称），固定迭代次数与参数 → 相同输入永远得到相同布局
  * （用户偏好：不喜欢不可控的随机性；也便于测试断言）。
+ *
+ * v0.5 增量模拟器（createForceSimulator）：Obsidian 式**渐进生成**——
+ * 节点按批次 addNode（初始从画布中心弹出，被斥力推开 = "动力学球一点
+ * 一点生成、相互拥挤丰满"），每帧 step(n) 实时演化，alpha 续接不重置。
  */
 
 export interface ForceNodeInput {
@@ -71,14 +75,32 @@ export type ForceLayout = Map<string, ForcePoint>
 
 const EPS = 1e-6
 
-export function layoutForce(
+interface Body { x: number; y: number; vx: number; vy: number; weight: number }
+
+export interface ForceSimulator {
+  /** 迭代 n 轮（alpha 续接，不重置）。 */
+  step(iterations: number): void
+  /** 增量加入节点（初始位置 = 画布中心 + 确定性微扰——从中心弹出被
+   *  斥力推开，Obsidian 渐进生成观感；alpha 回升让网络重新活动）。 */
+  addNode(id: string, weight?: number): void
+  /** 当前布局快照。 */
+  layout(): ForceLayout
+  /** 当前温度 alpha（动画收尾判断）。 */
+  alpha(): number
+}
+
+/**
+ * 创建力导向模拟器（可持续迭代 + 增量加节点）。
+ * nodes/edges/clusters 为**全量**引用（边按 id 存，body 增量加入后自动生效）；
+ * 初始 nodes 非空时按簇散布摆位（全量一次算场景），否则空开始全走 addNode。
+ */
+export function createForceSimulator(
   nodes: ForceNodeInput[],
   edges: ForceEdgeInput[],
   opts: ForceLayoutOptions,
-): ForceLayout {
+): ForceSimulator {
   const {
     width, height,
-    iterations = 500,
     charge = -300,
     spring = 0.1,
     springLength = 80,
@@ -92,91 +114,80 @@ export function layoutForce(
     clusterStrength = 0.04,
   } = opts
 
-  if (nodes.length === 0) return new Map()
-
   const cx = width / 2
   const cy = height / 2
   const ringRadius = Math.max(40, Math.min(width, height) / 2 - 60)
-  const n = nodes.length
 
-  // 确定性初始（v0.5 取经 obsidian-graph-spawn：**先按簇散布再力导**——
-  // Obsidian 图谱聚类感差的头号原因是从同一点出发导致局部收敛差；
-  // 簇中心均匀分布圆环、簇内节点围绕簇中心散布 → 簇天然分离、收敛快）。
-  interface Body { x: number; y: number; vx: number; vy: number; weight: number }
   const bodies = new Map<string, Body>()
-  if (clusters !== undefined && clusters.size > 0) {
-    // 簇 → 簇内节点（保持输入序）
-    const byCluster = new Map<string, string[]>()
-    for (const node of nodes) {
-      const c = clusters.get(node.id) ?? '__solo__'
-      const arr = byCluster.get(c) ?? []
-      arr.push(node.id)
-      byCluster.set(c, arr)
-    }
-    const clusterIds = [...byCluster.keys()]
-    const clusterCount = clusterIds.length
-    clusterIds.forEach((cid, ci) => {
-      const angle = (2 * Math.PI * ci) / clusterCount
-      const ccx = cx + ringRadius * Math.cos(angle)
-      const ccy = cy + ringRadius * Math.sin(angle)
-      const members = byCluster.get(cid)!
-      members.forEach((id, mi) => {
-        const inner = clusterCount === 1 ? 0 : (2 * Math.PI * mi) / Math.max(1, members.length)
-        const rr = Math.min(70, 26 + (mi % 5) * 8)
-        const jig = ((mi * 2654435761) % 1000) / 1000 - 0.5
-        bodies.set(id, {
-          x: ccx + (rr + jig * 3) * Math.cos(inner) + jig * 3,
-          y: ccy + (rr + jig * 3) * Math.sin(inner) + jig * 3,
-          vx: 0,
-          vy: 0,
-          weight: Math.max(0.5, nodes.find((nd) => nd.id === id)?.weight ?? 1),
-        })
-      })
-    })
-  } else {
-    nodes.forEach((node, i) => {
-      const angle = (2 * Math.PI * i) / n
-      const jig = ((i * 2654435761) % 1000) / 1000 - 0.5 // 确定性伪随机 [-0.5, 0.5)
-      bodies.set(node.id, {
-        x: cx + (ringRadius + jig * 4) * Math.cos(angle) + jig * 4,
-        y: cy + (ringRadius + jig * 4) * Math.sin(angle) + jig * 4,
-        vx: 0,
-        vy: 0,
-        weight: Math.max(0.5, node.weight ?? 1),
-      })
-    })
-  }
+  // 边索引（存 id——body 增量加入后 step 时动态取，弹簧自动生效）
+  const edgePairs: Array<{ from: string; to: string }> = edges
+    .filter((e) => e.from !== e.to)
+    .map((e) => ({ from: e.from, to: e.to }))
 
-  // 边索引（弹簧只沿实际连接）。
-  const edgePairs = edges
-    .map((e) => ({ a: bodies.get(e.from), b: bodies.get(e.to) }))
-    .filter((e): e is { a: Body; b: Body } => e.a !== undefined && e.b !== undefined && e.a !== e.b)
-
-  // ---- alpha 温度：1 → alphaMin（alphaDecay 每轮衰减）----
+  // alpha 温度：1 → alphaMin（alphaDecay 每轮衰减）
   let alpha = 1
   const alphaMin = 0.001
-  const alphaTarget = 0
 
-  const list = [...bodies.entries()]
+  // 确定性伪随机 [-0.5, 0.5)
+  const jigOf = (i: number, salt = 0): number => ((i * 2654435761 + salt * 40503) % 1000) / 1000 - 0.5
 
-  for (let iter = 0; iter < iterations; iter += 1) {
-    // 温度衰减
-    alpha += (alphaTarget - alpha) * alphaDecay
-    const a = alpha
+  // 初始摆位：全量节点按簇散布（obsidian-graph-spawn——簇天然分离）
+  if (nodes.length > 0) {
+    if (clusters !== undefined && clusters.size > 0) {
+      const byCluster = new Map<string, string[]>()
+      for (const node of nodes) {
+        const c = clusters.get(node.id) ?? '__solo__'
+        const arr = byCluster.get(c) ?? []
+        arr.push(node.id)
+        byCluster.set(c, arr)
+      }
+      const clusterIds = [...byCluster.keys()]
+      const clusterCount = clusterIds.length
+      clusterIds.forEach((cid, ci) => {
+        const angle = (2 * Math.PI * ci) / clusterCount
+        const ccx = cx + ringRadius * Math.cos(angle)
+        const ccy = cy + ringRadius * Math.sin(angle)
+        const members = byCluster.get(cid)!
+        members.forEach((id, mi) => {
+          const inner = clusterCount === 1 ? 0 : (2 * Math.PI * mi) / Math.max(1, members.length)
+          const rr = Math.min(70, 26 + (mi % 5) * 8)
+          const jig = jigOf(mi)
+          const w = nodes.find((nd) => nd.id === id)?.weight ?? 1
+          bodies.set(id, {
+            x: ccx + (rr + jig * 3) * Math.cos(inner) + jig * 3,
+            y: ccy + (rr + jig * 3) * Math.sin(inner) + jig * 3,
+            vx: 0, vy: 0,
+            weight: Math.max(0.5, w),
+          })
+        })
+      })
+    } else {
+      const n = nodes.length
+      nodes.forEach((node, i) => {
+        const angle = (2 * Math.PI * i) / n
+        const jig = jigOf(i)
+        bodies.set(node.id, {
+          x: cx + (ringRadius + jig * 4) * Math.cos(angle) + jig * 4,
+          y: cy + (ringRadius + jig * 4) * Math.sin(angle) + jig * 4,
+          vx: 0, vy: 0,
+          weight: Math.max(0.5, node.weight ?? 1),
+        })
+      })
+    }
+  }
 
-    // ---- manyBody：库仑斥力（d3 公式：w = strength×α / d²，负 strength 排斥）----
+  /** 单轮迭代（所有力 + 积分）。 */
+  const iterate = (a: number): void => {
+    const list = [...bodies.entries()]
+    // ---- manyBody：库仑斥力 ----
     for (let i = 0; i < list.length; i += 1) {
       const [, bi] = list[i]!
       for (let j = i + 1; j < list.length; j += 1) {
         const [, bj] = list[j]!
-        // d3 方向约定：x = 对方 − 自身（bj − bi），负 w → vx += x·w 把节点沿
-        // 连线推开（⚠️ 曾写成 bi − bj，导致负 charge 变成引力，圆环上所有
-        // 邻居都在内侧 → 全部被吸向圆心坍缩）
         const x = bj.x - bi.x
         const y = bj.y - bi.y
         let l = x * x + y * y
-        if (l < EPS) l = EPS // 防除零（重叠节点仍有有限斥力，不会粘死）
-        // strength 负值 → w 负 → vx += x·w 把节点沿连线推开
+        if (l < EPS) l = EPS
         const w = (charge * bi.weight * bj.weight * a) / l
         bi.vx += x * w
         bi.vy += y * w
@@ -184,9 +195,11 @@ export function layoutForce(
         bj.vy -= y * w
       }
     }
-
-    // ---- link：弹簧沿边（d3 forceLink：strength 0-1 标定）----
-    for (const { a: s, b: t } of edgePairs) {
+    // ---- link：弹簧沿边 ----
+    for (const { from, to } of edgePairs) {
+      const s = bodies.get(from)
+      const t = bodies.get(to)
+      if (s === undefined || t === undefined) continue
       const x = t.x - s.x
       const y = t.y - s.y
       let l = Math.sqrt(x * x + y * y)
@@ -197,37 +210,30 @@ export function layoutForce(
       t.vx -= x * l
       t.vy -= y * l
     }
-
-    // ---- 同簇引力（v0.5：Obsidian 聚类感——同族节点柔和聚拢）----
-    if (clusters !== undefined && clusters.size > 1) {
-      const clusterPairs: Array<[Body, Body]> = []
+    // ---- 同簇引力 ----
+    if (clusters !== undefined && clusters.size > 1 && list.length > 1) {
       for (let i = 0; i < list.length; i += 1) {
         const [ida, bi] = list[i]!
         const ca = clusters.get(ida)
         if (ca === undefined) continue
         for (let j = i + 1; j < list.length; j += 1) {
           const [idb, bj] = list[j]!
-          if (clusters.get(idb) === ca) clusterPairs.push([bi, bj])
-        }
-      }
-      for (const [s, t] of clusterPairs) {
-        const x = t.x - s.x
-        const y = t.y - s.y
-        const dist = Math.sqrt(x * x + y * y)
-        const dx = dist - clusterTarget
-        if (dx > 0) {
-          // 柔和拉力：正比 (d−target)，弱强度——只聚团不压扁
-          const w = (dx / dist) * a * clusterStrength
-          s.vx += x * w
-          s.vy += y * w
-          t.vx -= x * w
-          t.vy -= y * w
+          if (clusters.get(idb) !== ca) continue
+          const x = bj.x - bi.x
+          const y = bj.y - bi.y
+          const dist = Math.sqrt(x * x + y * y)
+          const dx = dist - clusterTarget
+          if (dx > 0) {
+            const w = (dx / dist) * a * clusterStrength
+            bi.vx += x * w
+            bi.vy += y * w
+            bj.vx -= x * w
+            bj.vy -= y * w
+          }
         }
       }
     }
-
-    // ---- collide：硬防重叠（d3 forceCollide；不乘 alpha——硬约束必须在
-    //      温度衰减后仍有效，否则后期节点被 link 拽到一起后冻结在聚团态）----
+    // ---- collide：硬防重叠 ----
     for (let i = 0; i < list.length; i += 1) {
       const [, bi] = list[i]!
       for (let j = i + 1; j < list.length; j += 1) {
@@ -237,7 +243,7 @@ export function layoutForce(
         let l = Math.sqrt(x * x + y * y)
         const r = collideRadius + collideRadius
         if (l < r) {
-          if (l < EPS) { // 完全重叠：确定性方向微扰
+          if (l < EPS) {
             const ang = ((i * 2654435761 + j * 40503) % 628) / 100
             bj.x += Math.cos(ang) * 0.5
             bj.y += Math.sin(ang) * 0.5
@@ -251,15 +257,12 @@ export function layoutForce(
         }
       }
     }
-
-    // ---- forceX/forceY 软向心：弱弹簧把网络拉回中心（防无限扩散撞边界；
-    //      强度远小于斥力，不会把网络压成团）----
+    // ---- 软向心 ----
     for (const body of bodies.values()) {
       body.vx += (cx - body.x) * centerStrength * a
       body.vy += (cy - body.y) * centerStrength * a
     }
-
-    // ---- 积分 + 速度衰减 + 限速 + 边界 ----
+    // ---- 积分 + 速度衰减 + 限速 ----
     let sx = 0
     let sy = 0
     for (const body of bodies.values()) {
@@ -274,11 +277,8 @@ export function layoutForce(
       }
       body.x += body.vx
       body.y += body.vy
-      // 无限画布（v0.3）：无硬边界墙——节点位置完全由力平衡决定
-      // （软向心 forceX/forceY 拉回中心，不会飘走；视口由前端自由平移缩放）
     }
-
-    // ---- forceCenter：质心平移居中（不加力，不会吸成团）----
+    // ---- forceCenter：质心平移居中 ----
     if (bodies.size > 0) {
       const mx = sx / bodies.size
       const my = sy / bodies.size
@@ -289,7 +289,45 @@ export function layoutForce(
     }
   }
 
-  const out: ForceLayout = new Map()
-  for (const [id, body] of bodies) out.set(id, { x: body.x, y: body.y })
-  return out
+  return {
+    step(iterations: number): void {
+      for (let iter = 0; iter < iterations; iter += 1) {
+        alpha += (0 - alpha) * alphaDecay
+        iterate(alpha)
+      }
+    },
+    addNode(id: string, weight = 1): void {
+      if (bodies.has(id)) return
+      // 从画布中心附近弹出（确定性微扰）——被斥力推开 = Obsidian 观感
+      const jig = jigOf(bodies.size, 7)
+      bodies.set(id, {
+        x: cx + jig * 24,
+        y: cy + jigOf(bodies.size, 13) * 24,
+        vx: 0, vy: 0,
+        weight: Math.max(0.5, weight),
+      })
+      // 新节点加入 → 网络重新活动（alpha 回升）
+      alpha = Math.max(alpha, 0.6)
+    },
+    layout(): ForceLayout {
+      const out: ForceLayout = new Map()
+      for (const [id, body] of bodies) out.set(id, { x: body.x, y: body.y })
+      return out
+    },
+    alpha(): number {
+      return alpha
+    },
+  }
+}
+
+/** 一次性布局（兼容旧 API）：创建模拟器 + 全量迭代。 */
+export function layoutForce(
+  nodes: ForceNodeInput[],
+  edges: ForceEdgeInput[],
+  opts: ForceLayoutOptions,
+): ForceLayout {
+  if (nodes.length === 0) return new Map()
+  const sim = createForceSimulator(nodes, edges, opts)
+  sim.step(opts.iterations ?? 500)
+  return sim.layout()
 }

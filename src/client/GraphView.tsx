@@ -9,7 +9,7 @@
  *  - 层过滤 + 刷新
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { layoutForce, type ForcePoint } from './force.ts'
+import { createForceSimulator, type ForceLayout, type ForcePoint } from './force.ts'
 import styles from './graph.module.css'
 
 export interface GraphNodeData {
@@ -75,6 +75,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect } | null>(null)
 
+  // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**（世界坐标 × zoomScale）
+  // ——放大后节点在屏幕上保持近似恒定大小，文字更清晰（Obsidian 行为；
+  // 无限画布的要点：缩放只改变"看得多密"，不改变"元素多大"）。
+  const zoomScale = VIEW_W / view.vw
+
   const loadGraph = (): void => {
     setLoading(true)
     setError('')
@@ -137,18 +142,26 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterList = clusters.list
   const clusterOf = clusters.clusterOf
 
-  // 确定性力导向布局（簇感知：同簇引力 + 初始按簇散布——取经
-  // obsidian-graph-spawn：先散布簇再力导，簇天然分离聚团）。
-  const layout = useMemo(() => layoutForce(
-    nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
-    edges.map((e) => ({ from: e.from, to: e.to })),
-    {
-      width: VIEW_W, height: VIEW_H, iterations: 500,
+  // 渐进生成布局（v0.5 取经 Obsidian：**动力学球按时序一点点生成、
+  // 相互拥挤丰满**——节点按 createdAt 分批 addNode（从中心弹出被斥力
+  // 推开），每帧 step 实时演化；首帧立即显示最早一批，不转圈等全量）。
+  const [layout, setLayout] = useState<ForceLayout>(new Map())
+  const [animDone, setAnimDone] = useState(false)
+  useEffect(() => {
+    if (nodes.length === 0) {
+      setLayout(new Map())
+      setAnimDone(true)
+      return
+    }
+    setAnimDone(false)
+    setLayout(new Map())
+    const sorted = [...nodes].sort((a, b) => a.createdAt - b.createdAt)
+    const sim = createForceSimulator([], edges.map((e) => ({ from: e.from, to: e.to })), {
+      width: VIEW_W, height: VIEW_H,
       // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
       // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
       // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
-      // v0.5 视觉优化：collideRadius 24→34（容纳节点下方标签，防标签
-      // 重叠）；springLength 80→90（边舒展）
+      // collideRadius 24→34（容纳节点下方标签，防标签重叠）
       charge: -300,
       spring: 0.1,
       springLength: 90,
@@ -157,8 +170,40 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       clusters: clusterOf.size > 0 ? clusterOf : undefined,
       clusterTarget: 110,
       clusterStrength: 0.04,
-    },
-  ), [nodes, edges, clusterOf])
+    })
+    let idx = 0
+    let raf = 0
+    let settled = false
+    // 分批：约 36 批（每帧一批——几秒内"生长"完成，规模大时批更大）
+    const BATCH = Math.max(5, Math.ceil(sorted.length / 36))
+    const tick = (): void => {
+      const added = Math.min(BATCH, sorted.length - idx)
+      for (let i = 0; i < added; i += 1, idx += 1) {
+        const n = sorted[idx]!
+        sim.addNode(n.id, 0.6 + n.importance)
+      }
+      sim.step(24)
+      setLayout(sim.layout())
+      if (idx < sorted.length) {
+        raf = requestAnimationFrame(tick)
+      } else if (!settled) {
+        settled = true
+        // 收尾收敛（分帧 60 轮/帧，最多 8 帧——不阻塞主线程）
+        const settle = (left: number): void => {
+          sim.step(60)
+          setLayout(sim.layout())
+          if (left > 0 && sim.alpha() > 0.005) {
+            raf = requestAnimationFrame(() => settle(left - 1))
+          } else {
+            setAnimDone(true)
+          }
+        }
+        raf = requestAnimationFrame(() => settle(8))
+      }
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [nodes, edges, clusterOf])
 
   // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
   const degreeOf = useMemo(() => {
@@ -169,6 +214,23 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     }
     return deg
   }, [edges])
+
+  // 选中高亮（v0.5：点节点 → 它的所有邻居边/邻居节点高亮，其余淡出——
+  // Obsidian 图谱的核心交互，之前只弹详情框不高亮延展边）。
+  const highlight = useMemo(() => {
+    const sel = detail?.id ?? null
+    if (sel === null) return null
+    const nodeIds = new Set<string>([sel])
+    const edgeKeys = new Set<string>()
+    for (const e of edges) {
+      if (e.from === sel || e.to === sel) {
+        nodeIds.add(e.from)
+        nodeIds.add(e.to)
+        edgeKeys.add(`${e.from}|${e.to}|${e.kind}`)
+      }
+    }
+    return { nodeIds, edgeKeys }
+  }, [detail, edges])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
@@ -324,8 +386,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                 viewBox="0 0 10 10"
                 refX="9"
                 refY="5"
-                markerWidth="7"
-                markerHeight="7"
+                markerWidth={7 * zoomScale}
+                markerHeight={7 * zoomScale}
                 orient="auto-start-reverse"
               >
                 <path d="M 0 1 L 9 5 L 0 9 z" fill="#7a8599" />
@@ -355,24 +417,33 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   cx={c.cx} cy={c.cy} r={c.radius}
                   fill={c.multi ? 'rgba(138,148,166,0.08)' : 'rgba(255,255,255,0.05)'}
                   stroke={c.multi ? 'rgba(138,148,166,0.5)' : 'rgba(255,255,255,0.16)'}
-                  strokeWidth={1.5}
+                  strokeWidth={1.5 * zoomScale}
                   strokeDasharray={c.multi ? '6 4' : undefined}
                 />
                 <text
-                  x={c.cx} y={c.cy - c.radius + 20}
+                  x={c.cx} y={c.cy - c.radius + 20 * zoomScale}
                   textAnchor="middle"
                   className={styles.clusterLabel}
-                  style={{ paintOrder: 'stroke', stroke: 'rgba(10,14,22,0.85)', strokeWidth: 3 }}
+                  style={{
+                    fontSize: 11 * zoomScale,
+                    paintOrder: 'stroke',
+                    stroke: 'rgba(10,14,22,0.85)',
+                    strokeWidth: 3 * zoomScale,
+                  }}
                 >
                   {c.label}
                 </text>
               </g>
             ))}
-            {/* 边（v0.5：causes 带方向箭头 + 按源节点色淡化——视觉与节点协调） */}
+            {/* 边（v0.5：causes 带方向箭头 + 簇色；选中节点时其延展边
+                高亮（亮色加粗），其余边淡出） */}
             {edges.map((e) => {
               const a = layout.get(e.from)
               const b = layout.get(e.to)
               if (a === undefined || b === undefined) return null
+              const key = `${e.from}|${e.to}|${e.kind}`
+              const isHighlighted = highlight !== null && highlight.edgeKeys.has(key)
+              const dimmed = highlight !== null && !isHighlighted
               if (e.kind === 'causes') {
                 const src = nodes.find((n) => n.id === e.from)
                 const scid = src ? clusterOf.get(src.id) : undefined
@@ -381,11 +452,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   : (src ? projectColor(src.projectId) : '#8a94a6')
                 return (
                   <line
-                    key={`${e.from}|${e.to}|${e.kind}`}
+                    key={key}
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                    stroke={color}
-                    strokeOpacity={0.4}
-                    strokeWidth={1.5}
+                    stroke={isHighlighted ? '#ffd166' : color}
+                    strokeOpacity={dimmed ? 0.04 : isHighlighted ? 0.95 : 0.4}
+                    strokeWidth={(isHighlighted ? 2.5 : 1.5) * zoomScale}
                     markerEnd="url(#arrow-causes)"
                     className={styles.edge}
                   />
@@ -393,19 +464,19 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               }
               return (
                 <line
-                  key={`${e.from}|${e.to}|${e.kind}`}
+                  key={key}
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                  stroke="#aab2c0"
-                  strokeOpacity={0.3}
-                  strokeWidth={1}
+                  stroke={isHighlighted ? '#ffd166' : '#aab2c0'}
+                  strokeOpacity={dimmed ? 0.04 : isHighlighted ? 0.95 : 0.3}
+                  strokeWidth={(isHighlighted ? 2 : 1) * zoomScale}
                   strokeDasharray="5 4"
                   className={styles.edge}
                 />
               )
             })}
-            {/* 节点（v0.5 视觉分层：**同簇同色**（Obsidian color groups——
-                分类感知核心）+ **大小按度**（链接多=hub 骨架大）+
-                semantic 光环 + 标签 halo） */}
+            {/* 节点（v0.5：同簇同色 + 大小按度 + semantic 光环 + 标签 halo；
+                缩放补偿（尺寸/文字随 zoomScale 保持屏幕大小）；
+                选中时其邻居高亮，其余淡出） */}
             {nodes.map((n) => {
               const p = layout.get(n.id)
               if (p === undefined) return null
@@ -416,7 +487,12 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const isSemantic = n.state === 'semantic'
               // 半径：度中心性为主（hub 大），semantic 加成，重要度微调
               const deg = degreeOf.get(n.id) ?? 0
-              const r = 7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5 + (selected ? 2 : 0)
+              const rBase = 7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5 + (selected ? 2 : 0)
+              // ⚠️ 缩放补偿：世界坐标半径 = 屏幕基准 × zoomScale（放大后
+              // 节点/文字保持屏幕大小，不随视口缩小）
+              const r = rBase * zoomScale
+              const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
+              const dimmed = highlight !== null && !inHighlight
               return (
                 <g
                   key={n.id}
@@ -424,23 +500,30 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   onClick={() => openDetail(n)}
                   role="button"
                   tabIndex={0}
+                  opacity={dimmed ? 0.12 : 1}
+                  style={{ transition: 'opacity 0.2s' }}
                 >
                   {isSemantic && (
-                    <circle cx={p.x} cy={p.y} r={r + 9} fill="url(#halo-grad)" pointerEvents="none" />
+                    <circle cx={p.x} cy={p.y} r={r + 9 * zoomScale} fill="url(#halo-grad)" pointerEvents="none" />
                   )}
                   <circle
                     cx={p.x} cy={p.y}
                     r={r}
                     fill={color}
-                    fillOpacity={isSemantic ? 0.95 : 0.82}
+                    fillOpacity={selected ? 1 : isSemantic ? 0.95 : 0.82}
                     stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
-                    strokeWidth={selected ? 2 : isSemantic ? 1.5 : 1}
+                    strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) * zoomScale}
                   />
                   <text
-                    x={p.x} y={p.y + r + 12}
+                    x={p.x} y={p.y + r + 12 * zoomScale}
                     textAnchor="middle"
                     className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
-                    style={{ paintOrder: 'stroke', stroke: 'rgba(10,14,22,0.9)', strokeWidth: 3 }}
+                    style={{
+                      fontSize: (isSemantic ? 11 : 10) * zoomScale,
+                      paintOrder: 'stroke',
+                      stroke: 'rgba(10,14,22,0.9)',
+                      strokeWidth: 3 * zoomScale,
+                    }}
                   >
                     {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
                   </text>
