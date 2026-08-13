@@ -132,7 +132,9 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       const rect = svg.getBoundingClientRect()
       const mx = (e.clientX - rect.left) / rect.width // 鼠标归一化位置 [0,1]
       const my = (e.clientY - rect.top) / rect.height
-      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
+      // viewBox 语义：vw 变小 = 看到更少 = 放大。故上滚（deltaY<0）缩小 vw
+      // （放大），下滚（deltaY>0）增大 vw（缩小）——与 Obsidian 方向一致。
+      const factor = e.deltaY < 0 ? 1 / 1.15 : 1.15
       setView((v) => {
         const vw2 = Math.min(100000, Math.max(10, v.vw * factor))
         const vh2 = v.vh * factor
