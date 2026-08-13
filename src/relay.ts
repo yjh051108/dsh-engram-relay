@@ -382,15 +382,22 @@ export class EngramRelay {
 
   async status(): Promise<Record<string, unknown>> {
     const engine = await this.model.describe().catch(() => null)
+    const count = this.store.count()
+    const archived = this.store.archivedCount()
+    const maxNodes = this.config.maxNodes ?? 10000
     return {
       enabled: this.config.enabled,
+      // 人话摘要（新 agent 实测：数字字段无解释是最大困惑点）
+      brief: `记忆图谱共 ${count} 条（已归档 ${archived}，硬上限 ${maxNodes}），`
+        + '跨会话全可见；语义引擎为纯算法（词汇/图/PCA，零外部模型）；'
+        + '写入自动查重修订+织网，检索用 engram_recall，展开用 engram_open。',
       storeDir: this.store.dir,
-      engramCount: this.store.count(),
+      engramCount: count,
       pendingCount: this.store.pending().length,
       layerCounts: this.store.layerCounts(),
       stateCounts: this.store.stateCounts(),
-      archivedCount: this.store.archivedCount(),
-      maxNodes: this.config.maxNodes ?? 10000,
+      archivedCount: archived,
+      maxNodes,
       slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
       // v0.5 语义引擎：纯算法三通道（词汇/图/PCA），零外部模型——无需 python

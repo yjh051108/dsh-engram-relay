@@ -618,8 +618,28 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const q = String(args.query ?? '').trim().toLowerCase()
       if (q) nodes = nodes.filter((e) => e.title.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
       if (nodes.length === 0) return '（无匹配记忆）'
-      const lines = nodes.map((e) => entryLine(e, relay.store))
-      return `记忆图谱（${nodes.length} 条）：\n${lines.join('\n')}`
+      // v0.5 盘点去重（新 agent 实测：同名多版本重复显示观感杂乱）：
+      // 同标题只显示当前版（未废止、重要度最高），重复折叠为 ×N 标注；
+      // 废止旧版在盘点中显式标「已废止」（盘点=全状态视图，检索只当前版）
+      const byTitle = new Map<string, EngramNode[]>()
+      for (const e of nodes) {
+        const arr = byTitle.get(e.title) ?? []
+        arr.push(e)
+        byTitle.set(e.title, arr)
+      }
+      const lines: string[] = []
+      let shown = 0
+      for (const [title, group] of byTitle) {
+        if (shown >= Number(args.limit ?? 20)) break
+        const active = group.filter((e) => !isSuperseded(e))
+        const current = (active.length > 0 ? active : group).sort((a, b) => b.importance - a.importance)[0]
+        const dupMark = group.length > 1 ? ` ×${group.length}` : ''
+        const supersededMark = isSuperseded(current) ? '（已废止）' : ''
+        lines.push(`${entryLine(current, relay.store)}${dupMark}${supersededMark}`)
+        shown++
+      }
+      const total = nodes.length
+      return `记忆图谱（${byTitle.size} 个唯一标题 / 共 ${total} 节点）：\n${lines.join('\n')}`
     },
   })))
 
