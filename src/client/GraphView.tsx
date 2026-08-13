@@ -99,17 +99,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       visibleEdges.map((e) => ({ from: e.from, to: e.to })),
       {
         width: VIEW_W, height: VIEW_H, iterations: 500,
-        // Obsidian 式舒展网络的关键平衡（修复节点全部聚拢画布中心）：
-        // 向心力过大 + 斥力过弱会让平衡半径仅 ~39px（节点挤成团）。
-        // 调向心力到极弱、斥力增强、去 maxMove 钳制 → 长程迭代后网络
-        // 沿连接铺开，孤立节点也均匀散布而非聚核。
-        center: 0.002,
-        charge: -3200,
-        spring: 0.06,
-        springLength: 130,
-        damping: 0.82,
-        maxMove: 6,
-        radius: 20,
+        // d3-force 风格参数（force.ts 注释）：
+        // 负 charge = manyBody 斥力；spring 0-1 弱标定（0.1 ≈ 15 节点网络
+        // 边距 80-100px）；collide 硬防重叠；forceCenter 平移居中
+        // （不加向心力，网络不会聚核）。
+        charge: -800,
+        spring: 0.1,
+        springLength: 80,
+        collideRadius: 24,
       },
     )
     return { nodes: visible, edges: visibleEdges, layout }

@@ -54,10 +54,12 @@ test('force: 坐标不越出画布（硬边界）', () => {
 })
 
 test('force: 弹簧生效——springLength 越大相邻节点间距越大', () => {
-  // 弹簧的真实语义是"边距可调"：连边节点对在斥力/向心力/弹簧三方平衡下，
+  // 弹簧的真实语义是"边距可调"：连边节点对在斥力/弹簧三方平衡下，
   // 平衡间距随 springLength 单调增大。双节点对称布局可直接量间距验证。
-  // 注意：平衡点受斥力钳制与向心力压缩，不恰等于 springLength（L=60 实测
-  // ~34，L=140 实测 ~98），因此只断言单调性与显著差距，不依赖精确平衡位置。
+  // 注意（d3-force 物理）：2 节点时斥力完全由弹簧对抗，平衡间距恒
+  // > springLength（charge=-800/spring=0.1 时 L=60 实测 ~124、L=140 实测
+  // ~184，理论平衡 800/d = 0.1·(d−L) 完全吻合）——断言只锁语义：
+  // 单调性、显著差距、不塌不飞。
   const nodes = [{ id: 'a' }, { id: 'b' }]
   const edges = [{ from: 'a', to: 'b' }]
   const dist = (out) => {
@@ -65,15 +67,15 @@ test('force: 弹簧生效——springLength 越大相邻节点间距越大', () 
     const pb = out.get('b')
     return Math.hypot(pa.x - pb.x, pa.y - pb.y)
   }
-  const short = layoutForce(nodes, edges, { width: W, height: H, springLength: 60, iterations: 300 })
-  const long = layoutForce(nodes, edges, { width: W, height: H, springLength: 140, iterations: 300 })
+  const short = layoutForce(nodes, edges, { width: W, height: H, springLength: 60, iterations: 300, spring: 0.1 })
+  const long = layoutForce(nodes, edges, { width: W, height: H, springLength: 140, iterations: 300, spring: 0.1 })
   const shortD = dist(short)
   const longD = dist(long)
   // 1) 长弹簧 → 更大边距（单调性）
   assert.ok(shortD < longD, `短弹簧更紧凑 (${shortD} < ${longD})`)
   // 2) 差距显著（弹簧确实改变布局，而非噪声）
   assert.ok(longD - shortD > 30, `边距差距显著 (${longD} - ${shortD} > 30)`)
-  // 3) 边距在合理范围（未被斥力完全压塌 / 未被弹飞）
-  assert.ok(shortD > 20 && shortD < 120, `短弹簧边距合理 (${shortD})`)
-  assert.ok(longD > 40 && longD < 200, `长弹簧边距合理 (${longD})`)
+  // 3) 边距在合理范围（未被斥力完全压塌 / 未被弹飞；2 节点平衡 > springLength）
+  assert.ok(shortD > 60 && shortD < 180, `短弹簧边距合理 (${shortD})`)
+  assert.ok(longD > 80 && longD < 250, `长弹簧边距合理 (${longD})`)
 })
