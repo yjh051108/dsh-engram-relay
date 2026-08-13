@@ -95,6 +95,14 @@ export function isVisible(_e: EngramNode, _viewer: { sessionId?: string; cwd?: s
   return true
 }
 
+/** 默认标签（v0.4 迁移/兜底）：layer + projectId → 命名空间标签。 */
+export function defaultTags(layer: EngramLayer, projectId: string | null): string[] {
+  if (layer === 'global' || projectId === null || projectId === '') return ['全局']
+  const parts = String(projectId).split(/[\\/]/)
+  const name = parts[parts.length - 1] || '项目'
+  return [`项目:${name}`]
+}
+
 /**
  * 沉睡判定（派生状态，实时计算）：最后强化 > 30 天前 且 hits < 3。
  * 被命中（touch）的节点刚强化，永不处于沉睡；沉默 >30 天的节点在
@@ -117,6 +125,14 @@ export interface EngramNode {
   kind: EngramKind
   /** 分层归属（AI 自主决策）：global=全局持久 / project=项目持久。 */
   layer: EngramLayer
+  /**
+   * 自由标签（v0.4：一节点多标签，自由分类——不建枚举 schema）：
+   * 分类靠命名空间约定，如 '全局'（开发者喜好/全局要求）、
+   * '项目:xxx'（项目自由命名）、'教训:代码' / '教训:思想'（教训自由子分类）。
+   * layer/projectId 保留为系统内部字段（写入绑定/快照聚合），
+   * tags 是用户可见的分类维度。
+   */
+  tags?: string[]
   /**
    * 巩固状态（双维度：可见性×巩固度，v0.3 引入）：
    *  - episodic：刚写入，事件性，细节丰富（情景记忆）
@@ -240,6 +256,10 @@ export class EngramStore {
           e.reinforces = Array.isArray(e.reinforces) ? e.reinforces : [e.createdAt || Date.now()]
           // v0.3 巩固状态归一化：旧数据默认 episodic（不丢、可迁移）
           e.state = (e.state === 'semantic' || e.state === 'dormant') ? e.state : 'episodic'
+          // v0.4 标签迁移：旧数据无 tags → 从 layer/projectId 生成默认标签
+          if (!Array.isArray(e.tags) || e.tags.length === 0) {
+            e.tags = defaultTags(e.layer, e.projectId)
+          }
           this.byId.set(e.id, e)
           for (const s of e.slots) this.indexSlot(s, e.id)
           if (e.title) this.indexTitle(e.title, e.id)
@@ -341,17 +361,22 @@ export class EngramStore {
   /**
    * 写入/更新一个记忆节点：按 title+summary 哈希寻址，挂到命中槽位。
    * 渐进披露：title/summary 是入口层，content 是展开层。
-   * layer 缺省 'session'（向后兼容：旧调用语义 = 会话级即弃）。
+   * v0.4：支持 tags 多标签（缺省从 layer/projectId 生成默认标签）。
    */
   add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots' | 'layer' | 'projectId'>
-    & { layer?: EngramLayer; projectId?: string | null }): EngramNode {
+    & { layer?: EngramLayer; projectId?: string | null; tags?: string[] }): EngramNode {
     const keyText = `${input.title} ${input.summary}`
     const result = this.hasher.hash(keyText)
     const slots = this.hasher.slotKeys(result)
+    const layer = input.layer ?? 'project'
+    const projectId = input.projectId ?? null
     const node: EngramNode = {
       ...input,
-      layer: input.layer ?? 'project',
-      projectId: input.projectId ?? null,
+      layer,
+      projectId,
+      tags: Array.isArray(input.tags) && input.tags.length > 0
+        ? [...new Set(input.tags)]
+        : defaultTags(layer, projectId),
       id: createEngramId(),
       createdAt: Date.now(),
       hits: 0,
@@ -664,8 +689,8 @@ export class EngramStore {
     return true
   }
 
-  /** 修正节点字段（title 变更会同步标题索引；层变更用 promote）。 */
-  update(id: string, patch: Partial<Pick<EngramNode, 'title' | 'summary' | 'content' | 'links' | 'causes' | 'effects' | 'importance'>>): EngramNode | undefined {
+  /** 修正节点字段（title 变更会同步标题索引；层变更用 promote；tags 覆盖设置）。 */
+  update(id: string, patch: Partial<Pick<EngramNode, 'title' | 'summary' | 'content' | 'links' | 'causes' | 'effects' | 'importance' | 'tags'>>): EngramNode | undefined {
     const e = this.byId.get(id)
     if (!e) return undefined
     if (patch.title !== undefined && patch.title !== e.title) {
@@ -679,6 +704,7 @@ export class EngramStore {
     if (patch.causes !== undefined) e.causes = patch.causes
     if (patch.effects !== undefined) e.effects = patch.effects
     if (patch.importance !== undefined) e.importance = patch.importance
+    if (patch.tags !== undefined) e.tags = [...new Set(patch.tags)]
     this.persist()
     return e
   }

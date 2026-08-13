@@ -142,12 +142,17 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；**layer 决策（v0.4 项目即标签，融会贯通）**：默认 **project**（归属当前工作目录项目）；**通用知识写 global**（技术模式/平台坑/用户偏好——换个项目还有用的）；**跨项目关联用 causes/links 织桥**（如"本项目的 X 方案引用 Y 项目的做法"→ links 填 [[Y 项目记忆标题]]，两项目自动关联）。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；**layer 决策（v0.4 项目即标签，融会贯通）**：默认 **project**（归属当前工作目录项目）；**通用知识写 global**（开发者喜好/全局要求——换个项目还有用的）；**跨项目关联用 causes/links 织桥**（如"本项目的 X 方案引用 Y 项目的做法"→ links 填 [[Y 项目记忆标题]]，两项目自动关联）。**tags 自由分类（三类命名空间）**：`全局`（开发者喜好/全局要求）、`项目:xxx`（项目自由命名）、`教训:xxx`（教训自由子分类：代码/思想/流程…）——一节点可多标签（如 `["项目:dsh", "教训:代码"]`），自由创建不设枚举。',
     parameters: {
       layer: {
         type: 'string',
         required: true,
         description: `记忆分层（AI 自主决策）：${ENGRAM_LAYERS.join('/')}（见 description 决策准则）`,
+      },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：**自由多标签**（一节点多标签，自由分类，命名空间约定）——「全局」（开发者喜好/全局要求）、「项目:xxx」（项目自由命名，如 项目:engram）、「教训:xxx」（教训自由子分类，如 教训:代码 / 教训:思想）。缺省自动生成（project→项目:<当前目录名>，global→全局）。',
       },
       kind: {
         type: 'string',
@@ -200,6 +205,8 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const summary = String(args.summary)
       const content = String(args.content ?? '')
       const links = Array.isArray(args.links) ? args.links.map(String) : []
+      // v0.4 自由多标签（命名空间约定：全局/项目:xxx/教训:xxx）
+      const tags = Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : []
       // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
       const resolveRef = (ref: string): string | null => {
         const clean = ref.replace(/^\[\[|\]\]$/g, '').trim()
@@ -226,6 +233,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         summary,
         content,
         links,
+        tags,
         sessionId: viewer.sessionId ?? relay.currentSessionId,
         turn: relay.lastTurnAt,
         causes,
@@ -304,6 +312,11 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         required: true,
         description: `记忆分层（AI 自主决策）：${ENGRAM_LAYERS.join('/')}（见 engram_store 描述）`,
       },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '可选：自由多标签（见 engram_store 描述：全局/项目:xxx/教训:xxx 命名空间约定）',
+      },
       kind: {
         type: 'string',
         required: true,
@@ -355,6 +368,8 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const summary = String(args.summary)
       const content = String(args.content ?? '')
       const links = Array.isArray(args.links) ? args.links.map(String) : []
+      // v0.4 自由多标签（命名空间约定：全局/项目:xxx/教训:xxx）
+      const tags = Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : []
       // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
       const resolveRef = (ref: string): string | null => {
         const clean = ref.replace(/^\[\[|\]\]$/g, '').trim()
@@ -377,6 +392,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         summary,
         content,
         links,
+        tags: Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : [],
         sessionId: viewer.sessionId ?? relay.currentSessionId,
         turn: relay.lastTurnAt,
         causes,
