@@ -18,7 +18,7 @@ import { isVisible, type EngramNode } from './engram/store.js'
 import type { EngramRelay } from './relay.js'
 
 type HttpCtx = CordisContext & {
-  httpServer: {
+  webServer: {
     register(route: {
       kind: string
       path: string
@@ -75,7 +75,7 @@ function nodeView(n: EngramNode) {
 interface EdgeView { from: string; to: string; kind: 'causes' | 'link' }
 
 export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
-  return ctx.httpServer.register({
+  return ctx.webServer.register({
     kind: 'prefix',
     path: '/engram-relay/api',
     handler: async (req, res) => {

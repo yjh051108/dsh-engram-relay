@@ -23,7 +23,7 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
-import type CompactService from '@deepseek-ai/dsh-compact'
+import type CompactionEngine from '@deepseek-ai/dsh-compaction'
 
 import { EngramStore } from './engram/store.js'
 import { BruteForceIndex } from './engram/vector-index.js'
@@ -42,7 +42,7 @@ export interface EngramRelayDeps {
   llm: LlmService
   systemPrompt: SystemPrompt
   tools: ToolRegistry
-  compact?: CompactService
+  compaction?: CompactionEngine
 }
 
 /** 唤醒结果：本次请求注入的记忆痕迹（哈希命中 + 因果激活，超稀疏）。 */
@@ -191,7 +191,7 @@ export class EngramRelay {
     })
 
     // 5. 图谱 Web API（web-only）：记忆图谱 Tab 的数据面（分层准入）。
-    this.ctx.inject(['httpServer'], (webCtx) => {
+    this.ctx.inject(['webServer'], (webCtx) => {
       const disposeGraphApi = installGraphApi(webCtx as never, this)
       this.disposers.push(disposeGraphApi)
     })
@@ -376,7 +376,7 @@ export class EngramRelay {
       model: await this.model.describe(),
       budgetTokens: this.config.injectBudgetTokens,
       currentCwd: this.currentCwd,
-      compactCoexist: this.ctx.get('compact') !== undefined,
+      compactCoexist: this.ctx.get('compaction') !== undefined,
     }
   }
 }

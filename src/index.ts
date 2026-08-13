@@ -91,10 +91,10 @@ function resolveEmbedModel(configured: string): string {
   const legacy = 'F:/dsh/01-memory/engram-trial/bge-small-zh'
   try {
     const bundled = new URL('../model/bge-small-zh/', import.meta.url).pathname
-    // Windows 路径修复（file:// URL 的 /C:/ 前缀）
+    // Windows 路径修复（file:// URL 的 /C:/ 前缀 + 非 ASCII 目录百分号编码解码）
     const bundledPath = process.platform === 'win32'
-      ? bundled.replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\')
-      : bundled
+      ? decodeURIComponent(bundled).replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\')
+      : decodeURIComponent(bundled)
     if (bundledPath) return bundledPath
   } catch { /* 解析失败回退 */ }
   return legacy

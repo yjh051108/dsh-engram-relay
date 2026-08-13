@@ -55,7 +55,7 @@ link_pkg cosmokit vendor/cosmokit
 link_pkg schemastery vendor/schemastery
 link_pkg @deepseek-ai/dsh-brand packages/util/brand
 link_pkg @deepseek-ai/dsh-llm packages/llm/llm
-link_pkg @deepseek-ai/dsh-compact packages/compact/compact
+link_pkg @deepseek-ai/dsh-compaction packages/compaction/compaction
 link_pkg @deepseek-ai/dsh-scope packages/core/scope
 link_pkg @deepseek-ai/dsh-session packages/core/session
 link_pkg @deepseek-ai/dsh-system-prompt packages/core/system-prompt
