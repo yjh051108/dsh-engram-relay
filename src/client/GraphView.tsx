@@ -22,6 +22,8 @@ export interface GraphNodeData {
   importance: number
   hits: number
   createdAt: number
+  /** 巩固状态（v0.5 视觉分层：semantic=固化知识突出显示）。 */
+  state: string
 }
 
 export interface GraphEdgeData {
@@ -47,12 +49,6 @@ interface NodeDetail extends GraphNodeData {
 export const LAYER_COLORS: Record<string, string> = {
   global: '#4a7dff',
   project: '#34c98a',
-}
-
-/** 边类型 → 渲染样式。 */
-export const EDGE_STYLE: Record<'causes' | 'link', { color: string; dash: string }> = {
-  causes: { color: '#8a94a6', dash: '' },
-  link: { color: '#aab2c0', dash: '5 4' },
 }
 
 const VIEW_W = 900
@@ -109,12 +105,12 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
         // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
         // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
         // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
-        // 标定依据（真实 15 节点）：avg 175px / max 268px / 最小间距 70px /
-        // 贴边 0——占画布约 60%×86%，边缘留白。
+        // v0.5 视觉优化：collideRadius 24→34（容纳节点下方标签，防标签
+        // 重叠——力导向图最扎眼的视觉问题）；springLength 80→90（边舒展）。
         charge: -300,
         spring: 0.1,
-        springLength: 80,
-        collideRadius: 24,
+        springLength: 90,
+        collideRadius: 34,
         centerStrength: 0.08,
       },
     )
@@ -290,65 +286,124 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             viewBox={`${view.vx} ${view.vy} ${view.vw} ${view.vh}`}
             className={styles.svg}
           >
+            <defs>
+              {/* 因果边方向箭头（v0.5 视觉优化：因果方向一目了然） */}
+              <marker
+                id="arrow-causes"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 1 L 9 5 L 0 9 z" fill="#7a8599" />
+              </marker>
+              {/* 背景点阵（无限画布尺度感） */}
+              <pattern id="dot-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+                <circle cx="1.5" cy="1.5" r="1.2" fill="rgba(255,255,255,0.06)" />
+              </pattern>
+              {/* semantic 节点光环（固化知识发光） */}
+              <radialGradient id="halo-grad">
+                <stop offset="0%" stopColor="#4a7dff" stopOpacity="0.28" />
+                <stop offset="100%" stopColor="#4a7dff" stopOpacity="0" />
+              </radialGradient>
+            </defs>
+            {/* 背景点阵层 */}
+            <rect
+              x={view.vx - 2000}
+              y={view.vy - 2000}
+              width={view.vw + 4000}
+              height={view.vh + 4000}
+              fill="url(#dot-grid)"
+            />
             {/* 自发簇大圆（连通分量；项目标签作簇名——簇跨项目即融合/套娃） */}
             {clusterCircles.map((c, i) => (
               <g key={`cluster-${i}`} className={styles.cluster}>
                 <circle
                   cx={c.cx} cy={c.cy} r={c.radius}
-                  fill={c.multi ? 'rgba(138,148,166,0.05)' : 'rgba(255,255,255,0.03)'}
-                  stroke={c.multi ? 'rgba(138,148,166,0.4)' : 'rgba(255,255,255,0.12)'}
+                  fill={c.multi ? 'rgba(138,148,166,0.08)' : 'rgba(255,255,255,0.05)'}
+                  stroke={c.multi ? 'rgba(138,148,166,0.5)' : 'rgba(255,255,255,0.16)'}
                   strokeWidth={1.5}
                   strokeDasharray={c.multi ? '6 4' : undefined}
                 />
-                <text x={c.cx} y={c.cy - c.radius + 16} textAnchor="middle" className={styles.clusterLabel}>
+                <text
+                  x={c.cx} y={c.cy - c.radius + 20}
+                  textAnchor="middle"
+                  className={styles.clusterLabel}
+                  style={{ paintOrder: 'stroke', stroke: 'rgba(10,14,22,0.85)', strokeWidth: 3 }}
+                >
                   {c.label}
                 </text>
               </g>
             ))}
-            {/* 边 */}
+            {/* 边（v0.5：causes 带方向箭头 + 按源节点色淡化——视觉与节点协调） */}
             {edges.map((e) => {
               const a = layout.get(e.from)
               const b = layout.get(e.to)
               if (a === undefined || b === undefined) return null
-              const style = EDGE_STYLE[e.kind] ?? EDGE_STYLE.link
+              if (e.kind === 'causes') {
+                const src = nodes.find((n) => n.id === e.from)
+                const color = src ? projectColor(src.projectId) : '#8a94a6'
+                return (
+                  <line
+                    key={`${e.from}|${e.to}|${e.kind}`}
+                    x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+                    stroke={color}
+                    strokeOpacity={0.45}
+                    strokeWidth={1.5}
+                    markerEnd="url(#arrow-causes)"
+                    className={styles.edge}
+                  />
+                )
+              }
               return (
                 <line
                   key={`${e.from}|${e.to}|${e.kind}`}
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                  stroke={style.color}
-                  strokeWidth={e.kind === 'causes' ? 1.5 : 1}
-                  strokeDasharray={style.dash}
+                  stroke="#aab2c0"
+                  strokeOpacity={0.3}
+                  strokeWidth={1}
+                  strokeDasharray="5 4"
                   className={styles.edge}
                 />
               )
             })}
-            {/* 节点 */}
+            {/* 节点（v0.5 视觉分层：semantic=固化知识 大+光环；episodic=新事件
+                常规；大小随重要度；标签 halo 保证任何背景下可读） */}
             {nodes.map((n) => {
               const p = layout.get(n.id)
               if (p === undefined) return null
               // v0.4：按项目着色（哈希色板；通用知识灰色）——项目即标签
               const color = projectColor(n.projectId)
               const selected = detail !== null && detail.id === n.id
+              const isSemantic = n.state === 'semantic'
+              // 半径：semantic 14-16，episodic 9-13（随重要度）
+              const r = (isSemantic ? 12 : 8) + n.importance * 4 + (selected ? 2 : 0)
               return (
                 <g
                   key={n.id}
-                  className={styles.node}
+                  className={`${styles.node} ${isSemantic ? styles.nodeSemantic : ''}`}
                   onClick={() => openDetail(n)}
                   role="button"
                   tabIndex={0}
                 >
+                  {isSemantic && (
+                    <circle cx={p.x} cy={p.y} r={r + 9} fill="url(#halo-grad)" pointerEvents="none" />
+                  )}
                   <circle
                     cx={p.x} cy={p.y}
-                    r={selected ? 15 : 12}
+                    r={r}
                     fill={color}
-                    fillOpacity={0.85}
-                    stroke={selected ? '#fff' : 'rgba(255,255,255,0.35)'}
-                    strokeWidth={selected ? 2 : 1}
+                    fillOpacity={isSemantic ? 0.95 : 0.8}
+                    stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
+                    strokeWidth={selected ? 2 : isSemantic ? 1.5 : 1}
                   />
                   <text
-                    x={p.x} y={p.y + 30}
+                    x={p.x} y={p.y + r + 12}
                     textAnchor="middle"
-                    className={styles.nodeLabel}
+                    className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
+                    style={{ paintOrder: 'stroke', stroke: 'rgba(10,14,22,0.9)', strokeWidth: 3 }}
                   >
                     {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
                   </text>

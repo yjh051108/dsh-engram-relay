@@ -124,12 +124,26 @@
 }
 
 .node circle {
-  transition: r 0.15s;
+  transition: r 0.15s, filter 0.15s;
+}
+
+/* semantic（固化知识）节点：悬浮时发光强化层次感 */
+.nodeSemantic circle {
+  filter: drop-shadow(0 0 6px rgba(74, 125, 255, 0.35));
 }
 
 .nodeLabel {
   fill: var(--ds-color-text-2, #aab2c0);
   font-size: 10px;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* semantic 节点标签：更亮更大（知识锚点） */
+.nodeLabelSemantic {
+  fill: var(--ds-color-text-1, #e8eaee);
+  font-size: 11px;
+  font-weight: 600;
   pointer-events: none;
   user-select: none;
 }

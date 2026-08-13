@@ -68,6 +68,7 @@ function nodeView(n: EngramNode) {
     importance: n.importance,
     hits: n.hits,
     createdAt: n.createdAt,
+    state: n.state ?? 'episodic',
   }
 }
 
@@ -132,7 +133,7 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
           effects: relay.store.getMany(node.effects).map((e) => nodeView(e)),
           links: node.links.map((t) => {
             const target = relay.store.byTitle(t)
-            return target ? nodeView(target) : { id: '', title: t, summary: '', kind: 'note', layer: 'global', projectId: null, importance: 0, hits: 0, createdAt: 0 }
+            return target ? nodeView(target) : { id: '', title: t, summary: '', kind: 'note', layer: 'global', projectId: null, importance: 0, hits: 0, createdAt: 0, state: 'episodic' }
           }),
         })
         return
