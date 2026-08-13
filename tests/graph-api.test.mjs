@@ -59,7 +59,7 @@ async function callRoute(route, method, url) {
   return { status: res.status, body: res.body === '' ? null : JSON.parse(res.body) }
 }
 
-test('graph: 分层准入——会话 A 见 global+本 project，会话 B 见 global 但无 A 的 project 层', async () => {
+test('graph: 全可见（v0.4 项目不隔离——任何视角看到全部记忆）', async () => {
   const dir = tempDir()
   const store = makeStore(dir)
   setupStore(store)
@@ -73,23 +73,23 @@ test('graph: 分层准入——会话 A 见 global+本 project，会话 B 见 gl
   installGraphApi({ ...ctx, webServer }, relay)
   const route = routes[0]
 
-  // 会话 A（cwd=/proj-a）：global + 本 project
+  // 会话 A（cwd=/proj-a）：全可见
   const a = await callRoute(route, 'GET', '/engram-relay/api/graph?sessionId=sess-a')
   assert.equal(a.status, 200)
   const aTitles = a.body.nodes.map((n) => n.title)
   assert.ok(aTitles.includes('全局偏好'))
   assert.ok(aTitles.includes('项目A决策'))
 
-  // 会话 B（cwd=/proj-b）：global 可见；A 的 project 不可见
+  // 会话 B（cwd=/proj-b）：同样全可见（融会贯通——不隔离）
   const b = await callRoute(route, 'GET', '/engram-relay/api/graph?sessionId=sess-b')
   const bTitles = b.body.nodes.map((n) => n.title)
   assert.ok(bTitles.includes('全局偏好'))
-  assert.ok(!bTitles.includes('项目A决策'), '他人项目 project 层不可见')
+  assert.ok(bTitles.includes('项目A决策'), 'v0.4：跨项目全可见（项目即标签，关联即桥）')
 
-  // 无 sessionId（无视角）：只看 global
+  // 无 sessionId：同样全可见
   const anon = await callRoute(route, 'GET', '/engram-relay/api/graph')
   const anonTitles = anon.body.nodes.map((n) => n.title)
-  assert.deepEqual(anonTitles, ['全局偏好'])
+  assert.ok(anonTitles.includes('项目A决策'), '无视角也全可见')
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -116,7 +116,7 @@ test('graph: 边聚合（因果边 + 双向链接边）', async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-test('node: 详情返回 + 可见性 403 + 不存在 404', async () => {
+test('node: 详情返回（全可见）+ 不存在 404', async () => {
   const dir = tempDir()
   const store = makeStore(dir)
   setupStore(store)
@@ -136,9 +136,9 @@ test('node: 详情返回 + 可见性 403 + 不存在 404', async () => {
   assert.equal(ok.body.content, 'A 项目正文')
   assert.equal(ok.body.layer, 'project')
 
-  // 会话 B 展开 A 的 project 节点：403 不可见
-  const forbidden = await callRoute(route, 'GET', `/engram-relay/api/node/${encodeURIComponent('项目A决策')}?sessionId=sess-b`)
-  assert.equal(forbidden.status, 403)
+  // 会话 B 展开 A 的 project 节点：v0.4 全可见 → 200
+  const cross = await callRoute(route, 'GET', `/engram-relay/api/node/${encodeURIComponent('项目A决策')}?sessionId=sess-b`)
+  assert.equal(cross.status, 200, '跨项目全可见（融会贯通）')
 
   // 不存在：404
   const missing = await callRoute(route, 'GET', `/engram-relay/api/node/${encodeURIComponent('不存在')}`)

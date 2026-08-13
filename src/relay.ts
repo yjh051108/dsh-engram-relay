@@ -439,7 +439,7 @@ const KINDS = new Set(['fact', 'decision', 'event', 'note'])
 const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供的「最近对话回合」中提取值得长期记住的信息（事实/决策/事件/约定/踩坑），最多 3 条。只提取可复用、有长期价值的；寒暄、过程性、一次性内容一律不提取（返回空数组 []）。
 每条输出 JSON 对象：
 - kind: fact(事实/约定) / decision(决策/方案) / event(事件/进展) / note(笔记/其它)
-- layer: global(跨项目通用，如环境/工具/偏好) / project(仅当前项目相关，如架构/踩坑/约定)
+- layer: project(默认——归属当前项目) / global(通用知识——换个项目还有用：技术模式/平台坑/偏好)
 - title: 简短入口标题（10 字内，如「部署端口决策」）
 - summary: 一句话摘要（30 字内）
 - content: 完整细节（关键参数、上下文，200 字内）

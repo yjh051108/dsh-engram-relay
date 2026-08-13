@@ -115,7 +115,7 @@ test('store: update 修正字段 + clearProject 清空项目层', () => {
 // wake：分层准入（跨会话可见性边界）
 // ---------------------------------------------------------------------------
 
-test('wake: 分层准入——project 同 cwd / global 全可见', async () => {
+test('wake: 全可见（v0.4 项目不隔离——任意 cwd 命中全部记忆）', async () => {
   const dir = tempDir()
   const store = makeStore(dir)
   addNode(store, { layer: 'global', title: '全局事实', summary: '团队用 pnpm 且部署端口 8080' })
@@ -123,17 +123,17 @@ test('wake: 分层准入——project 同 cwd / global 全可见', async () => {
   const graph = new CausalGraph(store)
   const wake = new EngramWakeEngine(store, graph, new NgramHashAddressing({ seed: 0 }), WAKE_CONFIG, null)
 
-  // 会话 A（cwd=/proj-a）：global + 本 project
+  // 会话 A（cwd=/proj-a）：全可见
   const a = await wake.query('部署端口 8080', 5, { cwd: '/proj-a' })
   const aTitles = a.engrams.map((e) => e.title)
-  assert.ok(aTitles.includes('全局事实'), 'global 所有会话可见')
-  assert.ok(aTitles.includes('项目A决策'), 'project 同 cwd 可见')
+  assert.ok(aTitles.includes('全局事实'), 'global 可见')
+  assert.ok(aTitles.includes('项目A决策'), '同项目可见')
 
-  // 会话 C（cwd=/proj-c）：看不到 A 项目的 project 层
+  // 会话 C（cwd=/proj-c）：同样全可见（融会贯通）
   const c = await wake.query('部署端口 8080', 5, { cwd: '/proj-c' })
   const cTitles = c.engrams.map((e) => e.title)
   assert.ok(cTitles.includes('全局事实'))
-  assert.ok(!cTitles.includes('项目A决策'), 'project 层仅同 cwd')
+  assert.ok(cTitles.includes('项目A决策'), 'v0.4：跨项目全可见（项目即标签）')
   rmSync(dir, { recursive: true, force: true })
 })
 

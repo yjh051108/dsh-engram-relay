@@ -78,13 +78,13 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
 }
 
 /**
- * 写前查重（P2 写入管线）：哈希候选（同层）→ bge 语义打分 → 最高分 ≥0.6
- * 视为同主题（返回旧节点，供自动修订）；embed 不可用时退化为标题精确
- * 匹配（同层同标题 → 同主题）。高置信阈值防误判：不同主题即使语义擦边
- * 也走新增（版本链 superseded 可追溯 = 自动修订的天然回滚安全网）。
+ * 写前查重（P2 写入管线）：哈希候选（**跨项目**——同一真理不分项目，
+ * 语义高置信同主题即修订，v0.4）→ bge 语义打分 → 最高分 ≥0.6 视为同主题
+ * （返回旧节点，供自动修订）；embed 不可用时退化为标题精确匹配。高置信
+ * 阈值防误判；版本链 superseded 可追溯 = 自动修订的天然回滚安全网。
  */
-async function findDuplicate(relay: EngramRelay, text: string, layer: EngramLayer): Promise<EngramNode | null> {
-  const cands = relay.store.lookup(text, 64).filter((e) => e.layer === layer)
+async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<EngramNode | null> {
+  const cands = relay.store.lookup(text, 64)
   if (cands.length === 0) return null
   const scores = await relay.model.embed(text.slice(0, 300), cands).catch(() => null)
   if (scores && scores.size > 0) {
@@ -97,9 +97,9 @@ async function findDuplicate(relay: EngramRelay, text: string, layer: EngramLaye
     if (best && bestScore >= 0.6) return best
     return null
   }
-  // embed 不可用：同层精确标题匹配（保守，防误修订）
+  // embed 不可用：精确标题匹配（保守，防误修订）
   const exact = relay.store.byTitle(text.split('：')[0] ?? text)
-  return exact && exact.layer === layer ? exact : null
+  return exact ?? null
 }
 
 /** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
@@ -142,7 +142,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；**layer 决策（v0.4 项目即标签，融会贯通）**：默认 **project**（归属当前工作目录项目）；**通用知识写 global**（技术模式/平台坑/用户偏好——换个项目还有用的）；**跨项目关联用 causes/links 织桥**（如"本项目的 X 方案引用 Y 项目的做法"→ links 填 [[Y 项目记忆标题]]，两项目自动关联）。',
     parameters: {
       layer: {
         type: 'string',

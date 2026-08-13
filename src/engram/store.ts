@@ -76,12 +76,11 @@ import { NgramHashAddressing, type HashResult } from './hash.js'
 export type EngramKind = 'fact' | 'decision' | 'event' | 'note' | 'snapshot'
 
 /**
- * 记忆分层（预设骨架，归属由 AI 自主决策）——分层的本质 = 生命周期 × 可见范围：
- *  - global：全局持久，所有会话可见（长期事实/用户偏好）
- *  - project：项目持久，仅同工作目录（cwd）会话可见（项目约定/决策）
- * 层是**节点属性**（大一统图谱，不分家），不是物理分库。
- * （v0.3：session 层已删除——会话内冗余且与"跨会话记忆"定位矛盾；
- *  会话临时状态由 DSH 上下文承担，记忆只有 global/project 两层。）
+ * 记忆归属（v0.4：不做分层分化——项目即标签，融会贯通）：
+ *  - global：通用知识项目（原"全局层"降为平级标签：技术模式/平台坑/偏好）
+ *  - project：具体项目（projectId = 工作目录）
+ * 可见性：**全可见**（单用户本地系统，无多租户隐私需求；项目间通过
+ * 记忆关联（link/causes 桥）自然融会贯通——"套娃"）。
  */
 export type EngramLayer = 'global' | 'project'
 
@@ -89,22 +88,11 @@ export type EngramLayer = 'global' | 'project'
 export const ENGRAM_LAYERS: EngramLayer[] = ['global', 'project']
 
 /**
- * 分层可见性判定（跨会话准入的单源逻辑，wake/tools/图谱 API 共用）。
- *  - global：所有会话可见；
- *  - project：仅 node.projectId === viewer.cwd 的会话。
- * 空 viewer（无 cwd）向后兼容全可见（生产路径总传 viewer，
- * 缺省仅测试/直接调用）。viewer.sessionId 已无分层作用（保留字段兼容）。
+ * 可见性判定（v0.4：全可见——项目不隔离，关联即桥）。
+ * 保留函数签名（wake/tools/图谱 API 调用点不动），恒返回 true。
  */
-export function isVisible(e: EngramNode, viewer: { sessionId?: string; cwd?: string }): boolean {
-  if (viewer.cwd === undefined) return true
-  switch (e.layer) {
-    case 'global':
-      return true
-    case 'project':
-      return e.projectId !== null && e.projectId === viewer.cwd
-    default:
-      return false
-  }
+export function isVisible(_e: EngramNode, _viewer: { sessionId?: string; cwd?: string }): boolean {
+  return true
 }
 
 /**

@@ -82,15 +82,9 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const viewer = resolveViewer(ctx, url, relay)
 
-      // GET /graph：可见节点 + 边（分层准入）
+      // GET /graph：全部可见节点 + 边（v0.4：项目不隔离，全可见融会贯通）
       if (req.method === 'GET' && url.pathname === '/engram-relay/api/graph') {
-        // 无会话视角（未传 sessionId）→ 只暴露 global 层——浏览器端是用户
-        // 可见界面，必须保守：不泄露他人项目记忆（isVisible 的空
-        // viewer 宽容分支只用于 wake/tools 的向后兼容）。
-        const visible = relay.store.all().filter((n) =>
-          viewer.cwd === undefined
-            ? n.layer === 'global'
-            : isVisible(n, viewer))
+        const visible = relay.store.all().filter((n) => isVisible(n, viewer))
         const ids = new Set(visible.map((n) => n.id))
         const edges: EdgeView[] = []
         const seen = new Set<string>()
@@ -129,14 +123,7 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
           sendJson(res, 404, { error: `node not found: ${title}` })
           return
         }
-        // 无会话视角 → 只看 global 层（隐私边界，同上）
-        const visible = viewer.cwd === undefined
-          ? node.layer === 'global'
-          : isVisible(node, viewer)
-        if (!visible) {
-          sendJson(res, 403, { error: `node ${title} is not visible to this session` })
-          return
-        }
+        // v0.4：全可见（项目不隔离）——无 403 分支
         relay.store.touch(node.id)
         sendJson(res, 200, {
           ...nodeView(node),
