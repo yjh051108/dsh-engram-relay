@@ -156,23 +156,30 @@ export function createForceSimulator(
         byProject.set(p, arr)
       }
       const projectIds = [...byProject.keys()]
-      const projectCount = projectIds.length
-      projectIds.forEach((pid, pi) => {
+      // ⚠️ 项目初始位置 = 区域中心（v0.6：初始在椭圆环 + 250 迭代收敛
+      // 不到位 → 项目圆偏离目标、行距被压缩重叠。初始即目标，收敛只
+      // 需局部调整）
+      const regionOf = new Map<string, { x: number; y: number }>()
+      const sizes2 = projectIds.map((pid) => byProject.get(pid)!.length)
+      const order2 = projectIds.map((_, i) => i).sort((a, b) => sizes2[b] - sizes2[a])
+      order2.forEach((oi, gi) => {
+        const pid = projectIds[oi]!
+        const big = gi === 0
+        regionOf.set(pid, big
+          ? { x: width / 2, y: height * 0.2 }
+          : { x: ((gi - 1 + 0.5) / (order2.length - 1)) * width, y: height * 0.8 })
+      })
+      projectIds.forEach((pid) => {
         const members = byProject.get(pid)!
-        const isSolo = pid === '__solo__'
-        // ⚠️ 通用/无项目节点（__solo__）初始放画布中心（小半径聚拢）——
-        // 否则它们散布全图把布局纵向撑开（自视实测：布局高 181% 远超画布，
-        // fit 后节点仍挤中间方块）
-        const ccx = isSolo ? cx : cx + Math.min(width, height) / 2 * 1.15 * Math.cos((2 * Math.PI * pi) / projectCount) * (width > height ? 1.35 : 1)
-        const ccy = isSolo ? cy : cy + Math.min(width, height) / 2 * 1.05 * Math.sin((2 * Math.PI * pi) / projectCount) * 0.9
+        const center = regionOf.get(pid) ?? { x: cx, y: cy }
         members.forEach((id, mi) => {
           const inner = (2 * Math.PI * mi) / Math.max(1, members.length)
-          const rr = isSolo ? Math.min(60, 20 + (mi % 5) * 8) : Math.min(90, 30 + (mi % 6) * 10)
-          const jig = jigOf(mi, pi)
+          const rr = Math.min(90, 30 + (mi % 6) * 10)
+          const jig = jigOf(mi, members.length)
           const w = nodes.find((nd) => nd.id === id)?.weight ?? 1
           bodies.set(id, {
-            x: ccx + (rr + jig * 4) * Math.cos(inner) + jig * 4,
-            y: ccy + (rr + jig * 4) * Math.sin(inner) + jig * 4,
+            x: center.x + (rr + jig * 4) * Math.cos(inner) + jig * 4,
+            y: center.y + (rr + jig * 4) * Math.sin(inner) + jig * 4,
             vx: 0, vy: 0,
             weight: Math.max(0.5, w),
           })
@@ -228,19 +235,29 @@ export function createForceSimulator(
   const projectRegion = new Map<string, { x: number; y: number }>()
   if (projectGroups !== undefined && projectGroups.size > 0) {
     const groupIds = [...new Set(projectGroups.values())]
-    // 组权重（节点数）
-    const weightOf = new Map<string, number>()
-    for (const gid of projectGroups.values()) weightOf.set(gid, (weightOf.get(gid) ?? 0) + 1)
-    const total = [...weightOf.values()].reduce((s, w) => s + w, 0) || 1
-    let acc = 0
-    for (const gid of groupIds) {
-      const w = weightOf.get(gid) ?? 1
-      const sliceStart = (acc / total) * width
-      acc += w
-      const sliceEnd = (acc / total) * width
-      // 组中心 x = 切片中点；y = 画布中心（横向排开）
-      projectRegion.set(gid, { x: (sliceStart + sliceEnd) / 2, y: height / 2 })
-    }
+    // ⚠️ 大组独行（v0.6 自视扫描定案）：组按节点数降序——最大组（如
+    // dsh 306 节点）独占一行（y=0.26h，聚成 ~356 直径圆），其余小组
+    // 第二行均分（y=0.76h）。行距 0.5h=377 > 大圆半径+小圆最大半径。
+    // 曾试：按节点数加权切片（小项目挤窄条重叠）/两行均分（大圆跨行）
+    // ——均不如独行方案。
+    const sizes = groupIds.map((gid) => [...projectGroups.values()].filter((v) => v === gid).length)
+    const order = groupIds.map((_, i) => i).sort((a, b) => sizes[b] - sizes[a])
+    order.forEach((oi, gi) => {
+      const gid = groupIds[oi]!
+      const big = gi === 0
+      if (gid === '__solo__') {
+        // ⚠️ 通用节点独立位（v0.6：曾占行 1 一格使间距 267 < 圆直径 252
+        // 必重叠）——放右侧中部
+        projectRegion.set(gid, { x: width * 0.85, y: height * 0.5 })
+      } else if (big) {
+        // ⚠️ 大组独行：y=0.2h（行距 0.6h=453 > dsh 半径+小圆最大半径）
+        projectRegion.set(gid, { x: width / 2, y: height * 0.2 })
+      } else {
+        // 行 1 均分（ps 0.8 小圆 ≤252 直径 < 均分 320 ✓）
+        const cw = width / (order.length - 2)
+        projectRegion.set(gid, { x: (gi - 1 + 0.5) * cw, y: height * 0.8 })
+      }
+    })
   }
 
   /** 单轮迭代（所有力 + 积分）。 */
@@ -316,7 +333,10 @@ export function createForceSimulator(
         if (gid === undefined) continue
         const c = projectRegion.get(gid)
         if (c === undefined) continue
-        bi.vx += (c.x - bi.x) * projectStrength * pa
+        // ⚠️ x 与 y 同强度（双倍）：曾只有 y 双倍——x 引力弱导致项目内
+        // 节点横向散开、项目圆横向巨大与邻圆重叠（自视实测数学建模
+        // r=617 与马里奥 r=604 圆心距 208 全叠）
+        bi.vx += (c.x - bi.x) * projectStrength * 2 * pa
         bi.vy += (c.y - bi.y) * projectStrength * 2 * pa
       }
     }
@@ -365,13 +385,13 @@ export function createForceSimulator(
       body.x += body.vx
       body.y += body.vy
     }
-    // ---- forceCenter：质心平移居中 ----
+    // ---- forceCenter：质心平移居中（⚠️ v0.6 只 x 居中——y 由区域引力
+    // 决定：项目行位置 0.2h/0.8h 对称分布，若 y 也平移到画布中心，大组
+    // （75% 权重）会把两行整体拉向中心、行 1 出画布——自视实测重叠根因）
     if (bodies.size > 0) {
       const mx = sx / bodies.size
-      const my = sy / bodies.size
       for (const body of bodies.values()) {
         body.x += cx - mx
-        body.y += cy - my
       }
     }
   }

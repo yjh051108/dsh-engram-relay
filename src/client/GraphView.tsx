@@ -1,4 +1,4 @@
-/**
+﻿/**
  * GraphView — 记忆图谱可视化（DSH 会话页「图谱」Tab）。
  *
  * 数据面：host 的 /engram-relay/api/graph（分层准入：global + 本目录
@@ -184,9 +184,9 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
         clusterTarget: 110,
         clusterStrength: 0.04,
         projectGroups: projectGroups.size > 0 ? projectGroups : undefined,
-        // ps=0.05（自视实测：宽 89% 高 67%——布局完整在画布内；0.03 时
-        // 项目圆偏散，0.08 时过度聚拢）
-        projectStrength: 0.05,
+        // ps=0.4（自视扫描：dsh 聚成 178 半径、重叠 3/15；0.24 时 dsh
+        // 286 半径跨行重叠 7 对）
+        projectStrength: 0.8,
       },
     )
   }, [nodes, edges, clusterOf, canvasSize])

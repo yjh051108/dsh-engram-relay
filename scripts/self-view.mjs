@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 自视脚本：用真实 store 数据 + 转译的 force.ts，复刻 GraphView 渲染链路，
  * 生成 SVG → sharp 转 PNG——让 agent 自己看到图谱效果（不再让用户当眼睛）。
  *
@@ -71,7 +71,7 @@ const layout = layoutForce(
     charge: -100, spring: 0.1, springLength: 110, collideRadius: 22, centerStrength: 0.08,
     clusters: clusterOf, clusterTarget: 110, clusterStrength: 0.04,
     projectGroups: projectGroups.size ? projectGroups : undefined,
-    projectStrength: 0.05,
+    projectStrength: 0.8,
   },
 )
 
@@ -98,6 +98,13 @@ for (const [pid, idsArr] of byProject) {
   const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length
   const radius = Math.max(70, ...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 50
   const label = String(pid).split(/[\\/]/).pop()
+  // ⚠️ 重叠检测（v0.6：只看圆心距会漏——半径大时圆重叠）
+  projectCircles.forEach((o) => {
+    const d = Math.hypot(o.cx - cx, o.cy - cy)
+    if (d < o.radius + radius) {
+      console.log(`  ⚠️ 重叠: [${o.label}]↔[${label}] 圆心距 ${d.toFixed(0)} < 半径和 ${(o.radius + radius).toFixed(0)}`)
+    }
+  })
   projectCircles.push({ cx, cy, radius, label, color: projectColor(pid) })
 }
 const clusterCircles = clusterList.filter((c) => c.length >= 5).map((idsArr) => {
