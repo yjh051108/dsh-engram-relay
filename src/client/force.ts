@@ -69,15 +69,13 @@ export interface ForceLayoutOptions {
   /** 簇引力强度（0-1；缺省 0.04——弱，只聚团不压扁）。 */
   clusterStrength?: number
   /**
-   * 项目引力（v0.6 用户诉求"每个项目一个大圆形"）——nodeId → projectId。
-   * 同项目节点在距离 > projectTarget 时柔和拉近（比连通分量引力弱、
-   * 距离远）——**项目级大簇**形成（内部连通分量子结构保持），不同项目
-   * 分离。
+   * 项目分组（v0.6 Force-in-a-Box 思路）——nodeId → projectId。
+   * **区域中心引力**：按组数把画布切成网格（宽画布横向多列），每组
+   * 节点被强约束到自己的格子中心——项目圆在画布上天然分布不重叠、
+   * 自动适配画布比例（不再垂直堆叠爆高）。组内连通分量子结构保持。
    */
   projectGroups?: Map<string, string>
-  /** 项目内目标间距（缺省 320——项目圆尺度）。 */
-  projectTarget?: number
-  /** 项目引力强度（缺省 0.025——弱，大尺度聚团不压扁子结构）。 */
+  /** 区域引力强度（缺省 0.12——强于斥力，节点归位到自己格子）。 */
   projectStrength?: number
 }
 
@@ -124,8 +122,7 @@ export function createForceSimulator(
     clusterTarget = 110,
     clusterStrength = 0.04,
     projectGroups,
-    projectTarget = 320,
-    projectStrength = 0.025,
+    projectStrength = 0.03,
   } = opts
 
   const cx = width / 2
@@ -145,9 +142,43 @@ export function createForceSimulator(
   // 确定性伪随机 [-0.5, 0.5)
   const jigOf = (i: number, salt = 0): number => ((i * 2654435761 + salt * 40503) % 1000) / 1000 - 0.5
 
-  // 初始摆位：全量节点按簇散布（obsidian-graph-spawn——簇天然分离）
+  // 初始摆位：**项目优先散布**（v0.6：项目间分离的关键——各项目中心
+  // 均匀分布画布，项目内节点围绕中心；否则项目引力只聚团不分离，项目
+  // 圆全叠在中心——用户实测"中间一个大圆"根因）。无项目分组时回退
+  // 簇散布（obsidian-graph-spawn）。
   if (nodes.length > 0) {
-    if (clusters !== undefined && clusters.size > 0) {
+    if (projectGroups !== undefined && projectGroups.size > 0) {
+      const byProject = new Map<string, string[]>()
+      for (const node of nodes) {
+        const p = projectGroups.get(node.id) ?? '__solo__'
+        const arr = byProject.get(p) ?? []
+        arr.push(node.id)
+        byProject.set(p, arr)
+      }
+      const projectIds = [...byProject.keys()]
+      const projectCount = projectIds.length
+      projectIds.forEach((pid, pi) => {
+        const members = byProject.get(pid)!
+        const isSolo = pid === '__solo__'
+        // ⚠️ 通用/无项目节点（__solo__）初始放画布中心（小半径聚拢）——
+        // 否则它们散布全图把布局纵向撑开（自视实测：布局高 181% 远超画布，
+        // fit 后节点仍挤中间方块）
+        const ccx = isSolo ? cx : cx + Math.min(width, height) / 2 * 1.15 * Math.cos((2 * Math.PI * pi) / projectCount) * (width > height ? 1.35 : 1)
+        const ccy = isSolo ? cy : cy + Math.min(width, height) / 2 * 1.05 * Math.sin((2 * Math.PI * pi) / projectCount) * 0.9
+        members.forEach((id, mi) => {
+          const inner = (2 * Math.PI * mi) / Math.max(1, members.length)
+          const rr = isSolo ? Math.min(60, 20 + (mi % 5) * 8) : Math.min(90, 30 + (mi % 6) * 10)
+          const jig = jigOf(mi, pi)
+          const w = nodes.find((nd) => nd.id === id)?.weight ?? 1
+          bodies.set(id, {
+            x: ccx + (rr + jig * 4) * Math.cos(inner) + jig * 4,
+            y: ccy + (rr + jig * 4) * Math.sin(inner) + jig * 4,
+            vx: 0, vy: 0,
+            weight: Math.max(0.5, w),
+          })
+        })
+      })
+    } else if (clusters !== undefined && clusters.size > 0) {
       const byCluster = new Map<string, string[]>()
       for (const node of nodes) {
         const c = clusters.get(node.id) ?? '__solo__'
@@ -187,6 +218,28 @@ export function createForceSimulator(
           weight: Math.max(0.5, node.weight ?? 1),
         })
       })
+    }
+  }
+
+  // 项目区域中心（v0.6 GroupInABox 加权切片）：宽画布横向排开——组按
+  // 节点数加权分配宽度（大组占宽、小组占窄），每组中心 x = 切片中点、
+  // y = 画布中心。项目圆横向铺满画布、互不重叠；垂直由向心力+斥力平衡
+  // （高度接近画布，fit 后占满）。
+  const projectRegion = new Map<string, { x: number; y: number }>()
+  if (projectGroups !== undefined && projectGroups.size > 0) {
+    const groupIds = [...new Set(projectGroups.values())]
+    // 组权重（节点数）
+    const weightOf = new Map<string, number>()
+    for (const gid of projectGroups.values()) weightOf.set(gid, (weightOf.get(gid) ?? 0) + 1)
+    const total = [...weightOf.values()].reduce((s, w) => s + w, 0) || 1
+    let acc = 0
+    for (const gid of groupIds) {
+      const w = weightOf.get(gid) ?? 1
+      const sliceStart = (acc / total) * width
+      acc += w
+      const sliceEnd = (acc / total) * width
+      // 组中心 x = 切片中点；y = 画布中心（横向排开）
+      projectRegion.set(gid, { x: (sliceStart + sliceEnd) / 2, y: height / 2 })
     }
   }
 
@@ -247,28 +300,24 @@ export function createForceSimulator(
         }
       }
     }
-    // ---- 项目引力（v0.6：同项目节点聚成项目级大簇——比连通分量引力
-    // 弱、距离远：大尺度聚团，内部子结构不被压扁）----
-    if (projectGroups !== undefined && projectGroups.size > 1 && list.length > 1) {
+    // ---- 项目区域中心引力（v0.6 GroupInABox：横向切片 + 垂直压回——
+    // x 归位到组切片中心（项目横向排开），y 分量加倍（垂直聚拢）。
+    // ⚠️ 强度乘 max(a, 0.3)：alpha 衰减后期（<0.3）斥力/引力都趋零，
+    // 节点冻结在初期散开位置（自视实测项目圆 r>1000）——区域约束
+    // 需保持最低强度（硬约束，像 collide）----
+    if (projectGroups !== undefined && projectGroups.size > 0) {
+      const pa = Math.max(a, 0.3)
       for (let i = 0; i < list.length; i += 1) {
         const [ida, bi] = list[i]!
-        const pa = projectGroups.get(ida)
-        if (pa === undefined) continue
-        for (let j = i + 1; j < list.length; j += 1) {
-          const [idb, bj] = list[j]!
-          if (projectGroups.get(idb) !== pa) continue
-          const x = bj.x - bi.x
-          const y = bj.y - bi.y
-          const dist = Math.sqrt(x * x + y * y)
-          const dx = dist - projectTarget
-          if (dx > 0) {
-            const w = (dx / dist) * a * projectStrength
-            bi.vx += x * w
-            bi.vy += y * w
-            bj.vx -= x * w
-            bj.vy -= y * w
-          }
-        }
+        // ⚠️ region key 是组 id（projectId）——必须经 projectGroups 转一层
+        // （曾直接 get(ida) 永远 undefined → 区域引力从未生效——自视实测
+        // 项目圆 r>1000 全因）
+        const gid = projectGroups.get(ida)
+        if (gid === undefined) continue
+        const c = projectRegion.get(gid)
+        if (c === undefined) continue
+        bi.vx += (c.x - bi.x) * projectStrength * pa
+        bi.vy += (c.y - bi.y) * projectStrength * 2 * pa
       }
     }
     // ---- collide：硬防重叠 ----

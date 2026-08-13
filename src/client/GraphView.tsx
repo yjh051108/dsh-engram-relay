@@ -161,10 +161,12 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   // 迭代 250（实测 292 节点 500 迭代 81ms / 250 迭代 45ms——布局质量
   // 足够，减半提速；初始按簇散布收敛快）
   const layout = useMemo(() => {
-    // ⚠️ 项目引力分组（nodeId → projectId；null 项目（通用）不参与——散点）
+    // ⚠️ 项目引力分组：**所有节点入组**（null 项目归 '__solo__' 组——
+    // 通用节点若不参与项目引力，会被斥力散布全图、把布局纵向撑爆
+    // （自视实测高 199% 远超画布）；归组后聚在画布中心）
     const projectGroups = new Map<string, string>()
     for (const n of nodes) {
-      if (n.projectId !== null) projectGroups.set(n.id, n.projectId)
+      projectGroups.set(n.id, n.projectId ?? '__solo__')
     }
     return layoutForce(
       nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
@@ -174,14 +176,17 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
         charge: -100,
         spring: 0.1,
         springLength: 110,
-        collideRadius: 30,
+        // ⚠️ collide 30→22（v0.6：大项目节点多，30 的防撞半径在窄切片里
+        // 垂直堆叠爆高——22 是节点可辨的最小安全间距）
+        collideRadius: 22,
         centerStrength: 0.08,
         clusters: clusterOf.size > 0 ? clusterOf : undefined,
         clusterTarget: 110,
         clusterStrength: 0.04,
         projectGroups: projectGroups.size > 0 ? projectGroups : undefined,
-        projectTarget: 320,
-        projectStrength: 0.025,
+        // ps=0.05（自视实测：宽 89% 高 67%——布局完整在画布内；0.03 时
+        // 项目圆偏散，0.08 时过度聚拢）
+        projectStrength: 0.05,
       },
     )
   }, [nodes, edges, clusterOf, canvasSize])
@@ -226,23 +231,34 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }, [selectedId, edges])
 
   // ---- 视口（v0.6：静态图——**一开始就显示全**，无运镜动画）----
-  // fitToCurrent：当前布局包围盒 ∪ 中心点（全图适配；中心 = 布局区域中心）
+  // fitToCurrent：**画布比例自适应**——横向铺满布局宽，纵向按画布比例
+  // 居中（布局高可能超画布——大项目圆是物理必然；超出部分靠缩放/平移
+  // 查看，无限画布的意义；v0.6 自视实测：布局高 234% 远超画布，旧 fit
+  // 全显导致节点挤中间方块）
   const fitToCurrent = (): { vx: number; vy: number; vw: number; vh: number } | null => {
     const pts = nodes
       .map((n) => layout.get(n.id))
       .filter((p): p is ForcePoint => p !== undefined)
     if (pts.length === 0) return null
-    pts.push({ x: canvasSize.w / 2, y: canvasSize.h / 2 }) // 中心始终在画面内
     const pad = 80
     const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
     const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
     const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
     const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
+    // 画布比例（svg 容器实际宽高比；缺省 2.12）
+    let aspect = 2.12
+    try {
+      const r = svgRef.current?.getBoundingClientRect()
+      if (r && r.width > 0 && r.height > 0) aspect = r.width / r.height
+    } catch { /* 容器未就绪用缺省 */ }
+    const fw = Math.max(200, maxX - minX)
+    const fh = Math.max(150, fw / aspect) // viewBox 比例 = 画布比例 → meet 占满
+    const cy = (minY + maxY) / 2 // 纵向居中
     return {
       vx: minX,
-      vy: minY,
-      vw: Math.max(200, maxX - minX),
-      vh: Math.max(150, maxY - minY),
+      vy: cy - fh / 2,
+      vw: fw,
+      vh: fh,
     }
   }
   // fitToCurrent 的最新引用（拖拽 effect 的 onUp 闭包需要）
@@ -274,14 +290,17 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     }
     const out: Array<{ cx: number; cy: number; radius: number; label: string; color: string; multi: boolean }> = []
     for (const [pid, ids] of byProject) {
+      // ⚠️ 通用（null 项目）不画项目圆（v0.6：global 层节点散布全图，
+      // 圆半径可达 967 罩住一切——用户实测"中间一个大圆"根因之一）
+      if (pid === null) continue
       if (ids.length < 3) continue // 项目节点太少不画圆（视觉噪音）
       const pts = ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
       if (pts.length < 3) continue
       const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length
       const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length
       const radius = Math.max(70, ...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 50
-      const label = pid === null ? '通用' : (String(pid).split(/[\\/]/).pop() || '项目')
-      out.push({ cx, cy, radius, label, color: projectColor(pid), multi: pid === null })
+      const label = String(pid).split(/[\\/]/).pop() || '项目'
+      out.push({ cx, cy, radius, label, color: projectColor(pid), multi: false })
     }
     return out
   }, [nodes, layout])
