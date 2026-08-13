@@ -89,7 +89,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_recall：按需唤醒检索（跨会话分层准入） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（跨会话分层）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + 因果邻接）。缺省召回 global（全局）+ 本目录 project + 本会话 session（可见层全部）；看到 [[标题]] 后由你判断——需要详情就再 engram_open 展开，不需要就直接用摘要作答。',
+    description: '主动唤醒记忆图谱入口（跨会话分层）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + 因果邻接）。缺省召回 global（全局）+ 本目录 project（可见层全部）；看到 [[标题]] 后由你判断——需要详情就再 engram_open 展开，不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',
@@ -117,7 +117,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）；仅本次会话相关（临时进度/过程）→ session（会话结束清理，重要事后 engram_promote 转长期）。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）。',
     parameters: {
       layer: {
         type: 'string',
@@ -186,12 +186,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         .map(resolveRef).filter((x): x is string => x !== null)
       const effects = (Array.isArray(args.effects) ? args.effects.map(String) : [])
         .map(resolveRef).filter((x): x is string => x !== null)
-      // 分层归属校验：project 层需要当前工作目录；session 层需要会话 id
+      // 分层归属校验：project 层需要当前工作目录
       if (layer === 'project' && !viewer.cwd) {
-        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
-      }
-      if (layer === 'session' && !viewer.sessionId) {
-        return `错误：session 层需要会话上下文（无会话视角——建议改用 global）`
+        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global）`
       }
       const e = relay.store.add({
         kind: kind as EngramKind,
@@ -318,10 +315,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const effects = (Array.isArray(args.effects) ? args.effects.map(String) : [])
         .map(resolveRef).filter((x): x is string => x !== null)
       if (layer === 'project' && !viewer.cwd) {
-        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
-      }
-      if (layer === 'session' && !viewer.sessionId) {
-        return `错误：session 层需要会话上下文（无会话视角——建议改用 global）`
+        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global）`
       }
       const e = relay.store.add({
         kind: kind as EngramKind,
@@ -360,7 +354,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.ref}]]`
       const viewer = viewerOf(exec)
       if (!isVisible(node, viewer)) {
-        return `错误：只能确认当前会话可见的节点（global + 本目录 project + 本会话 session）`
+        return `错误：只能确认当前会话可见的节点（global + 本目录 project）`
       }
       if (node.status !== 'pending') {
         return `[[${node.title}]] 不是待确认状态（当前 ${node.status ?? 'confirmed'}），无需确认`
@@ -388,7 +382,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.ref}]]`
       const viewer = viewerOf(exec)
       if (!isVisible(node, viewer)) {
-        return `错误：只能拒绝当前会话可见的节点（global + 本目录 project + 本会话 session）`
+        return `错误：只能拒绝当前会话可见的节点（global + 本目录 project）`
       }
       if (node.status !== 'pending') {
         return `[[${node.title}]] 不是待确认状态（当前 ${node.status ?? 'confirmed'}）——拒绝仅对 ⏳待确认 节点生效；已确认节点如需删除请用 engram_remove`
@@ -439,7 +433,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_search：检索图谱（分层/项目/类型/关键词） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_search',
-    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤，遵守跨会话可见性（global + 本目录 project + 本会话 session）。返回入口列表（[[标题]] + 摘要）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
+    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤，遵守跨会话可见性（global + 本目录 project）。返回入口列表（[[标题]] + 摘要）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
     parameters: {
       query: {
         type: 'string',
@@ -525,7 +519,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (from.id === to.id) return '错误：不能连接节点自身'
       const viewer = viewerOf(exec)
       if (!isVisible(from, viewer) || !isVisible(to, viewer)) {
-        return '错误：只能连接当前会话可见的节点（global + 本目录 project + 本会话 session）'
+        return '错误：只能连接当前会话可见的节点（global + 本目录 project）'
       }
       const kind = (String(args.kind ?? 'causes') as CausalEdgeKind)
       relay.graph.addEdge(from.id, to.id, kind, 1)
@@ -624,10 +618,10 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     },
   })))
 
-  // ---- engram_promote：提升层（session→project/global） ----
+  // ---- engram_promote：提升层（project→global） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_promote',
-    description: '提升记忆层：session→project/global（会话结束前把临时记忆转长期跨会话持久）或 project→global。层只能升不能降。',
+    description: '提升记忆层：project→global（项目记忆升级为跨项目共享真理）。层只能升不能降。',
     parameters: {
       ref: {
         type: 'string',
@@ -648,15 +642,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.ref}]]`
       if (!isVisible(node, viewer)) return `无权提升 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
       const target = String(args.layer) as EngramLayer
-      if (!ENGRAM_LAYERS.includes(target) || target === 'session') {
-        return '错误：目标层必须是 project 或 global（不能降级回 session）'
+      if (!ENGRAM_LAYERS.includes(target)) {
+        return '错误：目标层必须是 project 或 global'
       }
-      // 只能升不能降：global 已是最高
+      // 只能升不能降：global 已是最高；此处 node 必为 project、target 必为 global
       if (node.layer === 'global') return `[[${node.title}]] 已是 global 层（最高），无需提升`
       if (node.layer === target) return `[[${node.title}]] 已在 ${target} 层`
-      if (target === 'project' && !viewer.cwd) {
-        return `错误：提升到 project 层需要当前工作目录（无 cwd——只能提升到 global）`
-      }
       const promoted = relay.store.promote(node.id, target, viewer.cwd ?? null)
       return promoted
         ? `已提升 [[${promoted.title}]]：${node.layer} → ${target}${promoted.projectId ? `（项目 ${promoted.projectId}）` : ''}，跨会话持久`
@@ -667,7 +658,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_status：服务状态 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_status',
-    description: '查看 engram 记忆服务状态：分层统计（global/project/session 条数）、哈希槽位、因果图边数、模型状态、注入预算。',
+    description: '查看 engram 记忆服务状态：分层统计（global/project 条数）、哈希槽位、因果图边数、模型状态、注入预算。',
     parameters: {},
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,

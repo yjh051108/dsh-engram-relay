@@ -104,14 +104,14 @@ test('store: 旧数据加载归一化——缺 layer/slots/links 的持久化不
     const store = new EngramStore(dir)
     assert.equal(store.count(), 1, '旧节点应加载成功（不被 slots 缺失丢弃）')
     const n = store.get('e-old-1')
-    assert.equal(n?.layer, 'session', '缺 layer 按旧语义归 session')
+    assert.equal(n?.layer, 'project', '缺 layer 归一化为 project（v0.3 默认层）')
     assert.equal(n?.projectId, null)
     assert.deepEqual(n?.links, [])
     assert.deepEqual(n?.causes, [])
     assert.deepEqual(n?.effects, [])
     assert.deepEqual(n?.slots, [])
     // layerCounts 不再出现 undefined 键（曾 JSON 序列化为 "undefined":null）
-    assert.deepEqual(store.layerCounts(), { global: 0, project: 0, session: 1 })
+    assert.deepEqual(store.layerCounts(), { global: 0, project: 1 })
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

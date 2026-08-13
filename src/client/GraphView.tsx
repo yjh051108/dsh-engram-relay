@@ -17,7 +17,7 @@ export interface GraphNodeData {
   title: string
   summary: string
   kind: string
-  layer: 'global' | 'project' | 'session'
+  layer: 'global' | 'project'
   projectId: string | null
   importance: number
   hits: number
@@ -47,7 +47,6 @@ interface NodeDetail extends GraphNodeData {
 export const LAYER_COLORS: Record<string, string> = {
   global: '#4a7dff',
   project: '#34c98a',
-  session: '#ff9f43',
 }
 
 /** 边类型 → 渲染样式。 */
@@ -156,7 +155,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     <div className={styles.root}>
       <div className={styles.toolbar}>
         <div className={styles.filters}>
-          {['all', 'global', 'project', 'session'].map((f) => (
+          {['all', 'global', 'project'].map((f) => (
             <button
               key={f}
               className={`${styles.filterBtn} ${filter === f ? styles.filterActive : ''}`}
@@ -243,7 +242,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <div className={styles.legend}>
             <span><span className={styles.legendLineSolid} />{t('graph.legend.causes')}</span>
             <span><span className={styles.legendLineDash} />{t('graph.legend.link')}</span>
-            {(['global', 'project', 'session'] as const).map((layer) => (
+            {(['global', 'project'] as const).map((layer) => (
               <span key={layer}>
                 <span className={styles.legendDot} style={{ background: LAYER_COLORS[layer] }} />
                 {t(`graph.layer.${layer}`)}

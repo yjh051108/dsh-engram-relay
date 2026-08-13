@@ -181,17 +181,7 @@ export class EngramRelay {
       })
     })
 
-    // 4. 会话结束（分层生命周期）：只清该会话的 session 层临时记忆；
-    //    global/project 跨会话层持久保留——跨会话沉淀的核心转变。
-    this.ctx.on('agent/disposed', ({ agent }) => {
-      if (!this.config.enabled) return
-      const cleared = this.store.clearSession(agent.session.id)
-      if (cleared > 0) {
-        this.ctx.logger?.info?.('[engram-relay] session %s ended, cleared %d session-layer engrams (global/project kept)', agent.session.id, cleared)
-      }
-    })
-
-    // 5. 图谱 Web API（web-only）：记忆图谱 Tab 的数据面（分层准入）。
+    // 4. 图谱 Web API（web-only）：记忆图谱 Tab 的数据面（分层准入）。
     this.ctx.inject(['webServer'], (webCtx) => {
       const disposeGraphApi = installGraphApi(webCtx as never, this)
       this.disposers.push(disposeGraphApi)
@@ -287,7 +277,6 @@ export class EngramRelay {
       const layer = item.layer as EngramLayer
       if (!ENGRAM_LAYERS.includes(layer)) continue
       if (layer === 'project' && !cwd) continue
-      if (layer === 'session' && !sessionId) continue
       if (!item.title || !item.summary) continue
       // 自动因果：causesOf 引用的已有记忆标题 → 建因果边（前因 → 新节点）。
       const causeIds: string[] = []
@@ -303,7 +292,7 @@ export class EngramRelay {
         summary: item.summary,
         content: item.content ?? '',
         links: [],
-        sessionId: layer === 'session' ? sessionId : null,
+        sessionId,
         turn: this.lastTurnAt,
         causes: causeIds,
         effects: [],
@@ -441,7 +430,7 @@ const KINDS = new Set(['fact', 'decision', 'event', 'note'])
 const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供的「最近对话回合」中提取值得长期记住的信息（事实/决策/事件/约定/踩坑），最多 3 条。只提取可复用、有长期价值的；寒暄、过程性、一次性内容一律不提取（返回空数组 []）。
 每条输出 JSON 对象：
 - kind: fact(事实/约定) / decision(决策/方案) / event(事件/进展) / note(笔记/其它)
-- layer: global(跨项目通用，如环境/工具/偏好) / project(仅当前项目相关，如架构/踩坑/约定) / session(仅本次会话，如临时进度)
+- layer: global(跨项目通用，如环境/工具/偏好) / project(仅当前项目相关，如架构/踩坑/约定)
 - title: 简短入口标题（10 字内，如「部署端口决策」）
 - summary: 一句话摘要（30 字内）
 - content: 完整细节（关键参数、上下文，200 字内）

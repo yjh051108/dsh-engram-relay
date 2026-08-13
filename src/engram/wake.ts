@@ -32,9 +32,9 @@ export interface WakeHit {
 /**
  * 查看者视角（分层准入依据）：
  *  - global：所有会话可唤醒；
- *  - project：仅 node.projectId === viewer.cwd 的会话；
- *  - session：仅 node.sessionId === viewer.sessionId 的本会话。
- * 无 cwd/sessionId 的视角（subagent 等）只看 global 层。
+ *  - project：仅 node.projectId === viewer.cwd 的会话。
+ * 无 cwd 的视角（subagent 等）只看 global 层。
+ * （v0.3：session 层删除；sessionId 字段仅保留来源记录，不再参与准入。）
  */
 export interface WakeViewer {
   sessionId?: string

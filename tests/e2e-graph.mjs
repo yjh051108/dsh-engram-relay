@@ -82,10 +82,9 @@ async function main() {
     console.log(`✓ 因果追溯: 上线 ← ${fromEnd.join(' ← ')}（回溯）| 决策 → ${fromRoot.join(' → ')}（前瞻）`)
     if (!fromEnd.includes('部署实施') || !fromRoot.includes('部署实施')) throw new Error('因果追溯失败')
 
-    // 5. 会话结束即弃
-    const cleared = store.clearSession('sess-1')
-    console.log(`✓ 会话结束清理: 清除 ${cleared} 节点，剩余 ${store.count()}`)
-    if (store.count() !== 0) throw new Error('会话清理失败')
+    // 5. 跨会话持久（v0.3：session 层删除——记忆不再随会话结束清理）
+    console.log(`✓ 跨会话持久: 剩余 ${store.count()} 节点（无清理 API——跨会话沉淀）`)
+    if (store.count() !== 3) throw new Error('跨会话持久失败（应保留全部节点）')
 
     console.log('\n=== 端到端全链路 PASS ===')
   } finally {

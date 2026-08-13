@@ -35,7 +35,6 @@ function fakeRelay(dir) {
 function setupStore(store) {
   store.add({ kind: 'fact', layer: 'global', projectId: null, title: '全局偏好', summary: '喜欢简洁文档', content: '全局正文', links: [], sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8 })
   store.add({ kind: 'decision', layer: 'project', projectId: '/proj-a', title: '项目A决策', summary: 'A 用 pnpm', content: 'A 项目正文', links: ['全局偏好'], sessionId: null, turn: 2, causes: [], effects: [], importance: 0.9 })
-  store.add({ kind: 'event', layer: 'session', projectId: null, title: 'A临时', summary: '正在调试端口', content: '临时正文', links: [], sessionId: 'sess-a', turn: 3, causes: [], effects: [], importance: 0.6 })
 }
 
 /** 收集路由的 fake webServer（rc：httpServer 服务已改名 webServer）。 */
@@ -60,7 +59,7 @@ async function callRoute(route, method, url) {
   return { status: res.status, body: res.body === '' ? null : JSON.parse(res.body) }
 }
 
-test('graph: 分层准入——session A 见 global+本project+本session，session B 见 global+本project 但无 A 的 session 层', async () => {
+test('graph: 分层准入——会话 A 见 global+本 project，会话 B 见 global 但无 A 的 project 层', async () => {
   const dir = tempDir()
   const store = makeStore(dir)
   setupStore(store)
@@ -74,20 +73,18 @@ test('graph: 分层准入——session A 见 global+本project+本session，sess
   installGraphApi({ ...ctx, webServer }, relay)
   const route = routes[0]
 
-  // 会话 A（cwd=/proj-a）：全三层的节点可见
+  // 会话 A（cwd=/proj-a）：global + 本 project
   const a = await callRoute(route, 'GET', '/engram-relay/api/graph?sessionId=sess-a')
   assert.equal(a.status, 200)
   const aTitles = a.body.nodes.map((n) => n.title)
   assert.ok(aTitles.includes('全局偏好'))
   assert.ok(aTitles.includes('项目A决策'))
-  assert.ok(aTitles.includes('A临时'))
 
-  // 会话 B（cwd=/proj-b）：global 可见；A 的 project/session 不可见
+  // 会话 B（cwd=/proj-b）：global 可见；A 的 project 不可见
   const b = await callRoute(route, 'GET', '/engram-relay/api/graph?sessionId=sess-b')
   const bTitles = b.body.nodes.map((n) => n.title)
   assert.ok(bTitles.includes('全局偏好'))
   assert.ok(!bTitles.includes('项目A决策'), '他人项目 project 层不可见')
-  assert.ok(!bTitles.includes('A临时'), '他人会话 session 层不可见')
 
   // 无 sessionId（无视角）：只看 global
   const anon = await callRoute(route, 'GET', '/engram-relay/api/graph')

@@ -79,31 +79,29 @@ export type EngramKind = 'fact' | 'decision' | 'event' | 'note'
  * 记忆分层（预设骨架，归属由 AI 自主决策）——分层的本质 = 生命周期 × 可见范围：
  *  - global：全局持久，所有会话可见（长期事实/用户偏好）
  *  - project：项目持久，仅同工作目录（cwd）会话可见（项目约定/决策）
- *  - session：会话临时，仅本会话（会话结束清理）
  * 层是**节点属性**（大一统图谱，不分家），不是物理分库。
+ * （v0.3：session 层已删除——会话内冗余且与"跨会话记忆"定位矛盾；
+ *  会话临时状态由 DSH 上下文承担，记忆只有 global/project 两层。）
  */
-export type EngramLayer = 'global' | 'project' | 'session'
+export type EngramLayer = 'global' | 'project'
 
 /** 分层常量（工具 description 引用）。 */
-export const ENGRAM_LAYERS: EngramLayer[] = ['global', 'project', 'session']
+export const ENGRAM_LAYERS: EngramLayer[] = ['global', 'project']
 
 /**
  * 分层可见性判定（跨会话准入的单源逻辑，wake/tools/图谱 API 共用）。
  *  - global：所有会话可见；
- *  - project：仅 node.projectId === viewer.cwd 的会话；
- *  - session：仅 node.sessionId === viewer.sessionId 的本会话。
- * 空 viewer（无 sessionId 且无 cwd）向后兼容全可见（生产路径总传 viewer，
- * 缺省仅测试/直接调用）。
+ *  - project：仅 node.projectId === viewer.cwd 的会话。
+ * 空 viewer（无 cwd）向后兼容全可见（生产路径总传 viewer，
+ * 缺省仅测试/直接调用）。viewer.sessionId 已无分层作用（保留字段兼容）。
  */
 export function isVisible(e: EngramNode, viewer: { sessionId?: string; cwd?: string }): boolean {
-  if (viewer.sessionId === undefined && viewer.cwd === undefined) return true
+  if (viewer.cwd === undefined) return true
   switch (e.layer) {
     case 'global':
       return true
     case 'project':
       return e.projectId !== null && e.projectId === viewer.cwd
-    case 'session':
-      return e.sessionId !== null && e.sessionId === viewer.sessionId
     default:
       return false
   }
@@ -209,7 +207,8 @@ export class EngramStore {
         try {
           const e = JSON.parse(line) as EngramNode
           // —— 旧数据迁移兜底（v0.2.0 跨会话分层前持久化的节点缺字段）——
-          e.layer = e.layer ?? 'session'
+          // v0.3：session 层删除——旧 session 节点归一化为 project（保留不丢）
+          e.layer = (e as { layer: string }).layer === 'session' ? 'project' : (e.layer ?? 'project')
           e.projectId = e.projectId ?? null
           e.slots = Array.isArray(e.slots) ? e.slots : []
           e.links = Array.isArray(e.links) ? e.links : []
@@ -329,7 +328,7 @@ export class EngramStore {
     const slots = this.hasher.slotKeys(result)
     const node: EngramNode = {
       ...input,
-      layer: input.layer ?? 'session',
+      layer: input.layer ?? 'project',
       projectId: input.projectId ?? null,
       id: createEngramId(),
       createdAt: Date.now(),
@@ -527,7 +526,6 @@ export class EngramStore {
   query(filter: {
     layer?: EngramLayer
     projectId?: string | null
-    sessionId?: string
     kind?: EngramKind
     since?: number
     until?: number
@@ -537,7 +535,6 @@ export class EngramStore {
     let list = this.all()
     if (filter.layer !== undefined) list = list.filter((e) => e.layer === filter.layer)
     if (filter.projectId !== undefined) list = list.filter((e) => e.projectId === filter.projectId)
-    if (filter.sessionId !== undefined) list = list.filter((e) => e.sessionId === filter.sessionId)
     if (filter.kind !== undefined) list = list.filter((e) => e.kind === filter.kind)
     if (filter.since !== undefined) list = list.filter((e) => e.createdAt >= filter.since!)
     if (filter.until !== undefined) list = list.filter((e) => e.createdAt <= filter.until!)
@@ -550,14 +547,14 @@ export class EngramStore {
 
   /** 分层统计（status 工具用）。 */
   layerCounts(): Record<EngramLayer, number> {
-    const counts: Record<EngramLayer, number> = { global: 0, project: 0, session: 0 }
+    const counts: Record<EngramLayer, number> = { global: 0, project: 0 }
     for (const e of this.byId.values()) counts[e.layer] += 1
     return counts
   }
 
   /**
    * 提升/转层：改 layer 与 projectId（保留 id/因果/链接——引用不失效）。
-   * 会话结束前把 session 临时记忆提升为 project/global 跨会话持久。
+   * project → global（跨项目共享真理）；global 不可降级。
    */
   promote(id: string, layer: EngramLayer, projectId: string | null = null): EngramNode | undefined {
     const e = this.byId.get(id)
@@ -651,15 +648,5 @@ export class EngramStore {
     this.persist()
     return true
   }
-
-  /**
-   * 会话隔离（分层生命周期）：只清该会话的 **session 层** 临时记忆；
-   * global/project 跨会话层保留——跨会话沉淀的核心转变。
-   * 复用 remove() 统一清理索引（byId/titleIndex/slotIndex）。
-   */
-  clearSession(sessionId: string): number {
-    const doomed = this.all().filter((e) => e.sessionId === sessionId && e.layer === 'session')
-    for (const e of doomed) this.remove(e.id)
-    return doomed.length
-  }
 }
+
