@@ -8,6 +8,7 @@ export const zh = {
   'graph.loadFailed': '加载失败：{message}',
   'graph.empty': '（暂无记忆——模型经 engram_store 写入后，图谱会在这里生长）',
   'graph.refresh': '刷新',
+  'graph.reset': '重置视图',
   'graph.filter.all': '全部',
   'graph.filter.global': '全局',
   'graph.filter.project': '本项目',
@@ -30,7 +31,7 @@ export const zh = {
   'graph.detail.open': '展开详情',
   'graph.legend.causes': '—— 因果边',
   'graph.legend.link': '··· 双向链接',
-  'graph.hint': '节点=记忆（颜色分层），实线=因果，虚线=双向链接；点击节点看详情（渐进披露第二层）。',
+  'graph.hint': '节点=记忆（颜色分层），实线=因果，虚线=双向链接；点击节点看详情；按住 Ctrl + 滚轮缩放。',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -39,6 +40,7 @@ export const en: Record<keyof typeof zh, string> = {
   'graph.loadFailed': 'Failed to load: {message}',
   'graph.empty': '(No memories yet — once the model writes via engram_store, the graph grows here)',
   'graph.refresh': 'Refresh',
+  'graph.reset': 'Reset view',
   'graph.filter.all': 'All',
   'graph.filter.global': 'Global',
   'graph.filter.project': 'Project',
@@ -61,5 +63,5 @@ export const en: Record<keyof typeof zh, string> = {
   'graph.detail.open': 'Expand',
   'graph.legend.causes': '—— causal edge',
   'graph.legend.link': '··· bidirectional link',
-  'graph.hint': 'Nodes are memories (color = layer), solid = causal, dashed = link; click a node for details (progressive disclosure).',
+  'graph.hint': 'Nodes are memories (color = layer), solid = causal, dashed = link; click a node for details; Ctrl+wheel to zoom.',
 }
