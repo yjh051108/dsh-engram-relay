@@ -75,9 +75,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect } | null>(null)
 
-  // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**（世界坐标 × zoomScale）
-  // ——放大后节点在屏幕上保持近似恒定大小，文字更清晰（Obsidian 行为；
-  // 无限画布的要点：缩放只改变"看得多密"，不改变"元素多大"）。
+  // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**——屏幕大小 =
+  // 世界值 × (svgWidth/vw)，要屏幕恒定 → 世界值 = 基准 × (vw/VIEW_W) =
+  // 基准 ÷ zoomScale（⚠️ 曾误乘 zoomScale 越放大越大——已修正）。
+  // 无限画布的要点：缩放只改变"看得多密"，不改变"元素多大"。
   const zoomScale = VIEW_W / view.vw
 
   const loadGraph = (): void => {
@@ -386,8 +387,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                 viewBox="0 0 10 10"
                 refX="9"
                 refY="5"
-                markerWidth={7 * zoomScale}
-                markerHeight={7 * zoomScale}
+                markerWidth={7 / zoomScale}
+                markerHeight={7 / zoomScale}
                 orient="auto-start-reverse"
               >
                 <path d="M 0 1 L 9 5 L 0 9 z" fill="#7a8599" />
@@ -417,18 +418,18 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   cx={c.cx} cy={c.cy} r={c.radius}
                   fill={c.multi ? 'rgba(138,148,166,0.08)' : 'rgba(255,255,255,0.05)'}
                   stroke={c.multi ? 'rgba(138,148,166,0.5)' : 'rgba(255,255,255,0.16)'}
-                  strokeWidth={1.5 * zoomScale}
+                  strokeWidth={1.5 / zoomScale}
                   strokeDasharray={c.multi ? '6 4' : undefined}
                 />
                 <text
-                  x={c.cx} y={c.cy - c.radius + 20 * zoomScale}
+                  x={c.cx} y={c.cy - c.radius + 20 / zoomScale}
                   textAnchor="middle"
                   className={styles.clusterLabel}
                   style={{
-                    fontSize: 11 * zoomScale,
+                    fontSize: 11 / zoomScale,
                     paintOrder: 'stroke',
                     stroke: 'rgba(10,14,22,0.85)',
-                    strokeWidth: 3 * zoomScale,
+                    strokeWidth: 3 / zoomScale,
                   }}
                 >
                   {c.label}
@@ -456,7 +457,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                     stroke={isHighlighted ? '#ffd166' : color}
                     strokeOpacity={dimmed ? 0.04 : isHighlighted ? 0.95 : 0.4}
-                    strokeWidth={(isHighlighted ? 2.5 : 1.5) * zoomScale}
+                    strokeWidth={(isHighlighted ? 2.5 : 1.5) / zoomScale}
                     markerEnd="url(#arrow-causes)"
                     className={styles.edge}
                   />
@@ -468,7 +469,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                   stroke={isHighlighted ? '#ffd166' : '#aab2c0'}
                   strokeOpacity={dimmed ? 0.04 : isHighlighted ? 0.95 : 0.3}
-                  strokeWidth={(isHighlighted ? 2 : 1) * zoomScale}
+                  strokeWidth={(isHighlighted ? 2 : 1) / zoomScale}
                   strokeDasharray="5 4"
                   className={styles.edge}
                 />
@@ -488,9 +489,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               // 半径：度中心性为主（hub 大），semantic 加成，重要度微调
               const deg = degreeOf.get(n.id) ?? 0
               const rBase = 7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5 + (selected ? 2 : 0)
-              // ⚠️ 缩放补偿：世界坐标半径 = 屏幕基准 × zoomScale（放大后
-              // 节点/文字保持屏幕大小，不随视口缩小）
-              const r = rBase * zoomScale
+              // ⚠️ 缩放补偿：屏幕大小 = 世界值 × (svgWidth/vw) → 要屏幕
+              // 恒定，世界坐标半径 = 屏幕基准 ÷ zoomScale（放大后节点/文字
+              // 保持屏幕大小，看的是更稀疏更清楚，不是更大）
+              const r = rBase / zoomScale
               const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
               const dimmed = highlight !== null && !inHighlight
               return (
@@ -504,7 +506,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   style={{ transition: 'opacity 0.2s' }}
                 >
                   {isSemantic && (
-                    <circle cx={p.x} cy={p.y} r={r + 9 * zoomScale} fill="url(#halo-grad)" pointerEvents="none" />
+                    <circle cx={p.x} cy={p.y} r={r + 9 / zoomScale} fill="url(#halo-grad)" pointerEvents="none" />
                   )}
                   <circle
                     cx={p.x} cy={p.y}
@@ -512,17 +514,17 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     fill={color}
                     fillOpacity={selected ? 1 : isSemantic ? 0.95 : 0.82}
                     stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
-                    strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) * zoomScale}
+                    strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) / zoomScale}
                   />
                   <text
-                    x={p.x} y={p.y + r + 12 * zoomScale}
+                    x={p.x} y={p.y + r + 12 / zoomScale}
                     textAnchor="middle"
                     className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
                     style={{
-                      fontSize: (isSemantic ? 11 : 10) * zoomScale,
+                      fontSize: (isSemantic ? 11 : 10) / zoomScale,
                       paintOrder: 'stroke',
                       stroke: 'rgba(10,14,22,0.9)',
-                      strokeWidth: 3 * zoomScale,
+                      strokeWidth: 3 / zoomScale,
                     }}
                   >
                     {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
