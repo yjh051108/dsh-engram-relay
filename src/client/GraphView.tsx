@@ -9,7 +9,7 @@
  *  - 层过滤 + 刷新
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { createForceSimulator, type ForceLayout, type ForcePoint } from './force.ts'
+import { layoutForce, type ForceLayout, type ForcePoint } from './force.ts'
 import styles from './graph.module.css'
 
 export interface GraphNodeData {
@@ -143,22 +143,15 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterList = clusters.list
   const clusterOf = clusters.clusterOf
 
-  // 渐进生成布局（v0.5 取经 Obsidian：**动力学球按时序一点点生成、
-  // 相互拥挤丰满**——节点按 createdAt 分批 addNode（从中心弹出被斥力
-  // 推开），每帧 step 实时演化；首帧立即显示最早一批，不转圈等全量）。
-  const [layout, setLayout] = useState<ForceLayout>(new Map())
-  const [animDone, setAnimDone] = useState(false)
-  useEffect(() => {
-    if (nodes.length === 0) {
-      setLayout(new Map())
-      setAnimDone(true)
-      return
-    }
-    setAnimDone(false)
-    setLayout(new Map())
-    const sorted = [...nodes].sort((a, b) => a.createdAt - b.createdAt)
-    const sim = createForceSimulator([], edges.map((e) => ({ from: e.from, to: e.to })), {
-      width: VIEW_W, height: VIEW_H,
+  // 最终布局（确定性力导向，全量一次收敛——布局质量与"静态图"一致；
+  // v0.5 曾用增量模拟器实时演化，每帧迭代少 + alpha 回升导致旧节点被
+  // 新节点推得乱晃 → 改为**预计算 + 入场插值**：动画只做"节点从中心
+  // 飞向最终位置"，过程丝滑、终局不凌乱）。
+  const finalLayout = useMemo(() => layoutForce(
+    nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
+    edges.map((e) => ({ from: e.from, to: e.to })),
+    {
+      width: VIEW_W, height: VIEW_H, iterations: 500,
       // d3-force 风格参数（force.ts 注释）：负 charge = manyBody 斥力；
       // spring 0-1 弱标定；collide 硬防重叠；forceCenter 平移居中 +
       // forceX/forceY 软向心（弱弹簧拉回中心，网络铺开但不撞边界）。
@@ -171,40 +164,76 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       clusters: clusterOf.size > 0 ? clusterOf : undefined,
       clusterTarget: 110,
       clusterStrength: 0.04,
-    })
-    let idx = 0
+    },
+  ), [nodes, edges, clusterOf])
+
+  // 入场动画进度 0→1（约 1.8 秒）：节点按 createdAt 时序依次从中心
+  // 缓动飞向最终位置 + 淡入（Obsidian"动力学球一点点生成"的观感，
+  // 但每个节点平滑到位——不凌乱）。
+  const [animT, setAnimT] = useState(1)
+  const animTRef = useRef(1)
+  animTRef.current = animT
+  useEffect(() => {
+    if (nodes.length === 0) return
+    setAnimT(0)
     let raf = 0
-    let settled = false
-    // 分批：约 36 批（每帧一批——几秒内"生长"完成，规模大时批更大）
-    const BATCH = Math.max(5, Math.ceil(sorted.length / 36))
-    const tick = (): void => {
-      const added = Math.min(BATCH, sorted.length - idx)
-      for (let i = 0; i < added; i += 1, idx += 1) {
-        const n = sorted[idx]!
-        sim.addNode(n.id, 0.6 + n.importance)
+    let last = performance.now()
+    const tick = (now: number): void => {
+      const dt = (now - last) / 1000
+      last = now
+      const t = animTRef.current
+      if (t < 1) {
+        setAnimT(Math.min(1, t + dt * 0.55))
+      } else {
+        cancelAnimationFrame(raf)
+        return
       }
-      sim.step(24)
-      setLayout(sim.layout())
-      if (idx < sorted.length) {
-        raf = requestAnimationFrame(tick)
-      } else if (!settled) {
-        settled = true
-        // 收尾收敛（分帧 60 轮/帧，最多 8 帧——不阻塞主线程）
-        const settle = (left: number): void => {
-          sim.step(60)
-          setLayout(sim.layout())
-          if (left > 0 && sim.alpha() > 0.005) {
-            raf = requestAnimationFrame(() => settle(left - 1))
-          } else {
-            setAnimDone(true)
-          }
-        }
-        raf = requestAnimationFrame(() => settle(8))
-      }
+      raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
   }, [nodes, edges, clusterOf])
+
+  // 节点时序序号（入场顺序 = createdAt 升序）
+  const nodeOrder = useMemo(() => {
+    const m = new Map<string, number>()
+    nodes.slice()
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .forEach((n, i) => m.set(n.id, i))
+    return m
+  }, [nodes])
+
+  // 动画渲染用布局：位置 = 中心 → 最终位置（easeOutCubic 插值）
+  const layout = useMemo(() => {
+    const out: ForceLayout = new Map()
+    const count = Math.max(1, nodes.length)
+    const BATCH = 36
+    for (const n of nodes) {
+      const fp = finalLayout.get(n.id)
+      if (fp === undefined) continue
+      const idx = nodeOrder.get(n.id) ?? 0
+      // 该节点在批次轴上的进度：animT×BATCH 推进时，节点依次 t 0→1
+      const t = Math.max(0, Math.min(1, animT * BATCH - (idx / count) * BATCH))
+      if (t >= 1) {
+        out.set(n.id, { x: fp.x, y: fp.y })
+      } else {
+        const ease = 1 - (1 - t) ** 3 // easeOutCubic
+        out.set(n.id, {
+          x: VIEW_W / 2 + (fp.x - VIEW_W / 2) * ease,
+          y: VIEW_H / 2 + (fp.y - VIEW_H / 2) * ease,
+        })
+      }
+    }
+    return out
+  }, [finalLayout, animT, nodes, nodeOrder])
+
+  // 节点淡入进度（动画期间）
+  const fadeOf = (id: string): number => {
+    if (animT >= 1) return 1
+    const count = Math.max(1, nodes.length)
+    const idx = nodeOrder.get(id) ?? 0
+    return Math.max(0, Math.min(1, animT * 36 - (idx / count) * 36))
+  }
 
   // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
   const degreeOf = useMemo(() => {
@@ -216,10 +245,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return deg
   }, [edges])
 
-  // 选中高亮（v0.5：点节点 → 它的所有邻居边/邻居节点高亮，其余淡出——
-  // Obsidian 图谱的核心交互，之前只弹详情框不高亮延展边）。
+  // 选中高亮（v0.5：**单击节点只高亮延展边，不弹详情框**——详情改双击
+  // 打开；点空白取消高亮回到总图）。邻居边/邻居节点高亮，其余淡出。
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const highlight = useMemo(() => {
-    const sel = detail?.id ?? null
+    const sel = selectedId
     if (sel === null) return null
     const nodeIds = new Set<string>([sel])
     const edgeKeys = new Set<string>()
@@ -231,7 +261,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       }
     }
     return { nodeIds, edgeKeys }
-  }, [detail, edges])
+  }, [selectedId, edges])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
@@ -298,7 +328,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }, [loading, nodes.length])
 
   // 拖拽平移视口（无限画布：空白处按下拖动 = 世界跟随鼠标）。
-  // 节点/边上的按下不启动拖拽——保留点击开详情。
+  // 节点/边上的按下不启动拖拽——保留点击高亮；空白按下同时取消高亮
+  // （v0.5 用户要求：点空白回到总图，不卡在选中态）。
   useEffect(() => {
     const svg = svgRef.current
     if (svg === null) return
@@ -306,6 +337,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       if (e.button !== 0) return
       const target = e.target as Element
       if (target !== svg && target.tagName !== 'svg') return // 空白处才拖拽
+      setSelectedId(null) // 点空白取消高亮（回到总图）
       const rect = svg.getBoundingClientRect()
       dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect }
       e.preventDefault()
@@ -445,6 +477,9 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const key = `${e.from}|${e.to}|${e.kind}`
               const isHighlighted = highlight !== null && highlight.edgeKeys.has(key)
               const dimmed = highlight !== null && !isHighlighted
+              // 入场淡入：两端节点都出现后边才淡入（min 两端 fade）
+              const edgeFade = Math.min(fadeOf(e.from), fadeOf(e.to))
+              const baseOpacity = dimmed ? 0.04 : isHighlighted ? 0.95 : 0.35
               if (e.kind === 'causes') {
                 const src = nodes.find((n) => n.id === e.from)
                 const scid = src ? clusterOf.get(src.id) : undefined
@@ -456,7 +491,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     key={key}
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                     stroke={isHighlighted ? '#ffd166' : color}
-                    strokeOpacity={dimmed ? 0.04 : isHighlighted ? 0.95 : 0.4}
+                    strokeOpacity={baseOpacity * edgeFade}
                     strokeWidth={(isHighlighted ? 2.5 : 1.5) / zoomScale}
                     markerEnd="url(#arrow-causes)"
                     className={styles.edge}
@@ -468,7 +503,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   key={key}
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                   stroke={isHighlighted ? '#ffd166' : '#aab2c0'}
-                  strokeOpacity={dimmed ? 0.04 : isHighlighted ? 0.95 : 0.3}
+                  strokeOpacity={baseOpacity * edgeFade}
                   strokeWidth={(isHighlighted ? 2 : 1) / zoomScale}
                   strokeDasharray="5 4"
                   className={styles.edge}
@@ -484,7 +519,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               // 簇色优先（同簇同色）；孤立节点回退项目色（灰色）
               const cid = clusterOf.get(n.id)
               const color = cid !== undefined ? clusterColor(cid) : projectColor(n.projectId)
-              const selected = detail !== null && detail.id === n.id
+              const selected = selectedId === n.id
               const isSemantic = n.state === 'semantic'
               // 半径：度中心性为主（hub 大），semantic 加成，重要度微调
               const deg = degreeOf.get(n.id) ?? 0
@@ -495,14 +530,18 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const r = rBase / zoomScale
               const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
               const dimmed = highlight !== null && !inHighlight
+              // 入场淡入（动画期间节点依次出现）
+              const fade = fadeOf(n.id)
+              const opacity = (dimmed ? 0.12 : 1) * fade
               return (
                 <g
                   key={n.id}
                   className={`${styles.node} ${isSemantic ? styles.nodeSemantic : ''}`}
-                  onClick={() => openDetail(n)}
+                  onClick={() => setSelectedId(n.id)}
+                  onDoubleClick={() => openDetail(n)}
                   role="button"
                   tabIndex={0}
-                  opacity={dimmed ? 0.12 : 1}
+                  opacity={opacity}
                   style={{ transition: 'opacity 0.2s' }}
                 >
                   {isSemantic && (
