@@ -77,6 +77,31 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
     .join('\n')
 }
 
+/**
+ * 写前查重（P2 写入管线）：哈希候选（同层）→ bge 语义打分 → 最高分 ≥0.6
+ * 视为同主题（返回旧节点，供自动修订）；embed 不可用时退化为标题精确
+ * 匹配（同层同标题 → 同主题）。高置信阈值防误判：不同主题即使语义擦边
+ * 也走新增（版本链 superseded 可追溯 = 自动修订的天然回滚安全网）。
+ */
+async function findDuplicate(relay: EngramRelay, text: string, layer: EngramLayer): Promise<EngramNode | null> {
+  const cands = relay.store.lookup(text, 64).filter((e) => e.layer === layer)
+  if (cands.length === 0) return null
+  const scores = await relay.model.embed(text.slice(0, 300), cands).catch(() => null)
+  if (scores && scores.size > 0) {
+    let best: EngramNode | null = null
+    let bestScore = 0
+    for (const e of cands) {
+      const s = scores.get(e.id) ?? 0
+      if (s > bestScore) { bestScore = s; best = e }
+    }
+    if (best && bestScore >= 0.6) return best
+    return null
+  }
+  // embed 不可用：同层精确标题匹配（保守，防误修订）
+  const exact = relay.store.byTitle(text.split('：')[0] ?? text)
+  return exact && exact.layer === layer ? exact : null
+}
+
 /** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
 function entryLine(e: EngramNode): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
@@ -117,7 +142,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）。',
     parameters: {
       layer: {
         type: 'string',
@@ -190,6 +215,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (layer === 'project' && !viewer.cwd) {
         return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global）`
       }
+      // P2 写入管线统一：写前查重（语义高置信 ≥0.6 同主题）→ 自动修订
+      // （新增当前版 + 旧版 superseded + 因果/链接迁移），不重复堆节点。
+      const dedupe = await findDuplicate(relay, `${title}：${summary}`, layer)
       const e = relay.store.add({
         kind: kind as EngramKind,
         layer,
@@ -204,6 +232,27 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         effects,
         importance: 1,
       })
+      // 修订路径：旧版因果/链接继承 + 邻居指针迁移 + 版本链（旧版废止可追溯）
+      let revisedOld: string | null = null
+      if (dedupe && dedupe.id !== e.id) {
+        revisedOld = dedupe.title
+        const old = dedupe
+        relay.store.update(e.id, {
+          causes: [...new Set([...(e.causes ?? []), ...(old.causes ?? [])])],
+          effects: [...new Set([...(e.effects ?? []), ...(old.effects ?? [])])],
+          links: [...new Set([...(e.links ?? []), ...(old.links ?? [])])],
+        })
+        for (const c of old.causes ?? []) {
+          const n = relay.store.get(c)
+          if (n) relay.store.update(c, { effects: [...n.effects.filter((x) => x !== old.id), e.id] })
+        }
+        for (const ef of old.effects ?? []) {
+          const n = relay.store.get(ef)
+          if (n) relay.store.update(ef, { causes: [...n.causes.filter((x) => x !== old.id), e.id] })
+        }
+        relay.graph.rebuild()
+        relay.store.supersede(old.id, e.id)
+      }
       // 因果边：causes（前因 → 本节点）/ effects（本节点 → 后果）
       for (const causeId of causes) {
         const c = relay.store.get(causeId)
@@ -226,6 +275,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
           target.links.push(title)
           relay.store.add({ ...target, links: target.links }) // 持久化更新
         }
+      }
+      if (revisedOld !== null) {
+        return `已修订记忆 [[${e.title}]]（${layer}·${kind}）：同主题旧版 [[${revisedOld}]] 已废止（版本链可追溯），因果/链接已继承——检索只命中当前版`
       }
       // 织网推荐：因果边全空时触发一次「bge 语义 + 时序」推荐（不自动建边，
       // 由 AI 决策——认识的直接选，不认识的展开正文再定或跳过）。

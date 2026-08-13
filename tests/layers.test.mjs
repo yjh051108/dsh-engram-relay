@@ -180,6 +180,7 @@ function fakeRelay(dir) {
     currentSessionId: null,
     lastTurnAt: 0,
     recall: async () => ({ engrams: [], reason: 'stub', injectedTokens: 0 }),
+    model: { embed: async () => null }, // 无模型：查重退化为标题精确匹配
     status: async () => ({ engramCount: store.count(), layerCounts: store.layerCounts() }),
   }
 }

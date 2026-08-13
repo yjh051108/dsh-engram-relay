@@ -118,6 +118,11 @@ export function dormantOf(e: EngramNode, now: number = Date.now()): boolean {
   return (now - last) / 86400000 >= 30
 }
 
+/** 废止判定（版本链）：被新版本取代，退出检索/注入，可追溯。 */
+export function isSuperseded(e: EngramNode): boolean {
+  return e.supersededBy !== undefined && e.supersededBy !== ''
+}
+
 /** 渐进披露层级。 */
 export interface EngramNode {
   id: string
@@ -132,6 +137,14 @@ export interface EngramNode {
    * 惰性迁移（touch/reinforce 时评估，无定时扫描）。
    */
   state?: 'episodic' | 'semantic' | 'dormant'
+  /**
+   * 版本链（v0.3，治理缺口①真理维护）：被哪个节点取代（id）。
+   * 被取代 = 废止（superseded）：退出检索/注入（只注入"当前有效"），
+   * 但 engram_open/byTitle 仍可追溯旧版（版本链可回溯，不删数据）。
+   */
+  supersededBy?: string
+  /** 版本链：取代了哪些节点（id 列表，反向追溯）。 */
+  supersedes?: string[]
   /** project 层标识（会话工作目录；global 层为 null）。 */
   projectId: string | null
   /** 入口锚点（唤醒列表展示；如 Obsidian 的页面标题）。 */
@@ -402,7 +415,7 @@ export class EngramStore {
       .filter((e): e is EngramNode => !!e)
   }
 
-  /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序）。 */
+  /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序；不含废止节点）。 */
   lookup(text: string, limit = 8): EngramNode[] {
     const result = this.hasher.hash(text)
     return this.lookupHash(result, limit)
@@ -420,7 +433,8 @@ export class EngramStore {
         if (seen.has(id)) continue
         seen.add(id)
         const e = this.byId.get(id)
-        if (e && e.status !== 'pending') hits.push(e)
+        // ⚠️ 版本链：废止节点不参与检索（只注入"当前有效"；追溯走 byTitle/open）
+        if (e && e.status !== 'pending' && !isSuperseded(e)) hits.push(e)
       }
     }
     hits.sort((a, b) => b.importance - a.importance)
@@ -595,6 +609,22 @@ export class EngramStore {
     e.projectId = layer === 'project' ? projectId : null
     this.persist()
     return e
+  }
+
+  /**
+   * 版本链（真理维护核心）：newId 取代 oldId——
+   *  - old.supersededBy = newId（退出检索/注入，只注入"当前有效"）
+   *  - new.supersedes += oldId（反向追溯版本链）
+   * 数据不删（可追溯），因果/链接继承由调用方迁移。
+   */
+  supersede(oldId: string, newId: string): boolean {
+    const old = this.byId.get(oldId)
+    const neu = this.byId.get(newId)
+    if (!old || !neu) return false
+    old.supersededBy = newId
+    neu.supersedes = [...(neu.supersedes ?? []), oldId]
+    this.persist()
+    return true
   }
 
   /** 修正节点字段（title 变更会同步标题索引；层变更用 promote）。 */
