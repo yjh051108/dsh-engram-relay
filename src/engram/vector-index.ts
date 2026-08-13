@@ -40,10 +40,12 @@ export function quantizeI8(vec: Float32Array): Int8Array {
 export class BruteForceIndex implements VectorIndex {
   /** id → 行号（fp16 表行序；tombstone 用 -1）。 */
   private rowById = new Map<string, number>()
-  /** fp16 精筛表（行主序 [N][512]）。 */
+  /** fp32 精筛表（行主序 [N][512]；length = 容量元素，已用行数 = rows）。 */
   private f16 = new Float32Array(0)
   /** int8 粗筛表（行主序 [N][512]）。 */
   private i8 = new Int8Array(0)
+  /** 已用行数（容量 = f16.length / dim，翻倍增长）。 */
+  private rows = 0
   private dim: number
   private filePrefix: string
   private dirty = false
@@ -62,25 +64,27 @@ export class BruteForceIndex implements VectorIndex {
     return this.rowById.has(id)
   }
 
-  /** 追加一条（行序 = add 顺序；删除标记 tombstone 惰性压缩）。容量翻倍增长（摊还 O(1)/条）。 */
+  /** 追加一条（行序 = add 顺序；删除标记 tombstone 惰性压缩）。容量翻倍增长，摊还 O(1)/条。 */
   add(id: string, vec: Float32Array): void {
     if (vec.length !== this.dim || this.rowById.has(id)) return
-    const row = this.f16.length / this.dim
-    const need = this.f16.length + this.dim
-    const cap = Math.max(need, this.f16.length * 2 || 1024 * this.dim)
-    const nf16 = new Float32Array(cap)
-    nf16.set(this.f16)
-    const ni8 = new Int8Array(cap)
-    ni8.set(this.i8)
+    const row = this.rows
+    const need = (this.rows + 1) * this.dim
+    if (need > this.f16.length) {
+      const newCapRows = Math.max(this.rows + 1, Math.ceil(this.f16.length / this.dim) * 2 || 1024)
+      const nf16 = new Float32Array(newCapRows * this.dim)
+      nf16.set(this.f16.subarray(0, this.rows * this.dim))
+      const ni8 = new Int8Array(newCapRows * this.dim)
+      ni8.set(this.i8.subarray(0, this.rows * this.dim))
+      this.f16 = nf16
+      this.i8 = ni8
+    }
     const q = quantizeI8(vec)
     for (let i = 0; i < this.dim; i++) {
-      nf16[row * this.dim + i] = vec[i]
-      ni8[row * this.dim + i] = q[i]
+      this.f16[row * this.dim + i] = vec[i]
+      this.i8[row * this.dim + i] = q[i]
     }
-    // 截断到实际长度（length 字段语义：已用行数 × dim）
-    this.f16 = nf16.length === need ? nf16 : nf16.subarray(0, need)
-    this.i8 = ni8.length === need ? ni8 : ni8.subarray(0, need)
     this.rowById.set(id, row)
+    this.rows++
     this.dirty = true
   }
 
@@ -152,12 +156,13 @@ export class BruteForceIndex implements VectorIndex {
   persist(): void {
     if (!this.filePrefix) return
     mkdirSync(join(this.filePrefix, '..'), { recursive: true })
-    writeFileSync(`${this.filePrefix}.f32.bin`, Buffer.from(this.f16.buffer))
-    writeFileSync(`${this.filePrefix}.i8.bin`, Buffer.from(this.i8.buffer))
+    // 只写已用部分（capacity 空洞不落盘）
+    writeFileSync(`${this.filePrefix}.f32.bin`, Buffer.from(this.f16.buffer, 0, this.rows * this.dim * 4))
+    writeFileSync(`${this.filePrefix}.i8.bin`, Buffer.from(this.i8.buffer, 0, this.rows * this.dim))
     writeFileSync(`${this.filePrefix}.meta.json`, JSON.stringify({
       count: this.rowById.size,
       dim: this.dim,
-      rows: this.f16.length / this.dim,
+      rows: this.rows,
       ids: [...this.rowById.keys()],
     }))
     this.dirty = false
@@ -178,6 +183,7 @@ export class BruteForceIndex implements VectorIndex {
         const buf = readFileSync(`${this.filePrefix}.i8.bin`)
         this.i8 = new Int8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength))
       }
+      this.rows = rows
       const ids: string[] = meta.ids ?? []
       for (let r = 0; r < Math.min(rows, ids.length); r++) {
         if (ids[r] !== null) this.rowById.set(ids[r], r)

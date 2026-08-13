@@ -54,29 +54,30 @@ async function main() {
     const addMs = now() - t0
     console.log(`[1] 写入 ${N} 条: ${addMs.toFixed(0)}ms（${(N / addMs * 1000).toFixed(0)} 条/s）`)
 
-    // 2. 查询 embed（ONNX int8 包内模型）
+    // 2. 查询 embed（ONNX int8 包内模型）——先预热（模型加载不计时），再计时
+    await embedWithOnnx(['预热'], '预热', MODEL_DIR)
     t0 = now()
     const emb = await embedWithOnnx(['缓存命中率优化'], '缓存命中率的根因', MODEL_DIR)
     const embedMs = now() - t0
     if (!emb) { console.log('[2] ❌ embed 失败——总闭环无法验证'); return }
-    console.log(`[2] 查询 embed: ${embedMs.toFixed(0)}ms`)
+    console.log(`[2] 查询 embed（预热后）: ${embedMs.toFixed(0)}ms`)
 
-    // 3. int8 全量内积 top-50（10 次取中位）
+    // 3. int8 全量内积 top-50（10 次取中位；记录最后一次 hits 供细排）
     const qv = Float32Array.from(emb.query_vec)
     const searchTimes = []
+    let top = []
     for (let r = 0; r < 10; r++) {
       t0 = now()
-      const hits = index.search(qv, 50)
+      top = index.search(qv, 50)
       searchTimes.push(now() - t0)
-      if (r === 0) console.log(`    首次 top-50: ${hits.length} 条（top 分数 ${hits[0]?.score.toFixed(0)}）`)
+      if (r === 0) console.log(`    首次 top-50: ${top.length} 条（top 分数 ${top[0]?.score.toFixed(0)}）`)
     }
     searchTimes.sort((a, b) => a - b)
     const searchMs = searchTimes[5]
     console.log(`[3] int8 全量内积 top-50（中位）: ${searchMs.toFixed(1)}ms`)
 
-    // 4. fp32 细排（top-50 余弦——模拟）
+    // 4. fp32 细排（复用 [3] 的 top-50，仅测余弦——不重复全量检索）
     t0 = now()
-    const top = index.search(qv, 50)
     let cos = 0
     for (const h of top) cos += index.cosine(h.id, qv)
     const fineMs = now() - t0
