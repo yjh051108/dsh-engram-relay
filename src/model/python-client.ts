@@ -76,6 +76,14 @@ export class PythonEngramClient {
         }
       })
       this.proc.stderr.on('data', () => { /* 日志可接入 ctx.logger */ })
+      // ⚠️ 管道错误静默降级：python 进程退出/管道断开（EPIPE）时，stdin 的
+      // error 事件若不监听，Node 默认抛 unhandled error 直接崩掉宿主进程。
+      // 这里标记 failed（后续请求全部返回 null）并清空挂起请求，不阻塞主流程。
+      this.proc.stdin.on('error', () => {
+        this.failed = true
+        for (const cb of this.pending.values()) cb({ ok: false, error: 'stdin error' })
+        this.pending.clear()
+      })
       this.proc.on('exit', () => {
         this.proc = null
         // 所有挂起请求失败
@@ -96,7 +104,14 @@ export class PythonEngramClient {
         if (resp && (resp as { ok?: boolean }).ok) resolve((resp as { result: T }).result)
         else resolve(null)
       })
-      this.proc!.stdin.write(JSON.stringify({ id, op, ...payload }) + '\n')
+      // write 包 try/catch：管道已断（EPIPE）时 write 抛错——静默降级
+      // （resolve null + 摘除 pending，防悬挂），不向外抛。
+      try {
+        this.proc!.stdin.write(JSON.stringify({ id, op, ...payload }) + '\n')
+      } catch {
+        this.pending.delete(id)
+        resolve(null)
+      }
     })
   }
 
