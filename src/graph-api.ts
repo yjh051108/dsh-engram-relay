@@ -83,10 +83,11 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const viewer = resolveViewer(ctx, url, relay)
 
-      // GET /graph：当前有效节点 + 边（v0.6：**过滤废止旧版与待确认**——
-      // 版本链旧版/修订残留不再出现在图谱，兑现"过时记忆淘汰"）
+      // GET /graph：当前有效节点 + 边（v0.6：**过滤废止旧版、待确认与
+      // 工作快照**——快照是过程性工作状态（非知识），其 links 曾制造巨型
+      // 连通分量（89% 节点串成一个大圆）；知识图谱只显示知识节点）
       if (req.method === 'GET' && url.pathname === '/engram-relay/api/graph') {
-        const visible = relay.store.all().filter((n) => isVisible(n, viewer) && !isSuperseded(n) && n.status !== 'pending')
+        const visible = relay.store.all().filter((n) => isVisible(n, viewer) && !isSuperseded(n) && n.status !== 'pending' && n.kind !== 'snapshot')
         const ids = new Set(visible.map((n) => n.id))
         const edges: EdgeView[] = []
         const seen = new Set<string>()

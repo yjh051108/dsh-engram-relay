@@ -495,7 +495,11 @@ export class EngramStore {
         this.update(snap.id, {
           summary,
           content: body,
-          links: [...new Set([...(snap.links ?? []), ...latest.map((e) => e.title)])],
+          // ⚠️ 修复（2026-08 用户反馈"中间一个大圆形"）：links 曾**累积追加**
+          // （旧 links ∪ 最新 6 条）——快照每轮 +6 条涨到 172 条，把所有
+          // 近期节点串成巨型连通分量（89%）→ 改为**替换**为当前最近 6 条
+          // （快照 = 此刻工作状态，links = 此刻相关节点）
+          links: latest.map((e) => e.title),
         })
         this.reinforce(snap.id) // 每次更新 = 强化（快照不沉睡）
       }
