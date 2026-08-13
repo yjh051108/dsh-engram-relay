@@ -188,8 +188,9 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       const dt = (now - last) / 1000
       last = now
       const t = animTRef.current
-      if (t < 1) {
-        setAnimT(Math.min(1, t + dt * 0.55))
+      // ⚠️ 终点 1.05（不是 1）：最后批次节点进度 (1.05-0.99)×36 > 1 长完
+      if (t < 1.05) {
+        setAnimT(Math.min(1.05, t + dt * 0.55))
       } else {
         cancelAnimationFrame(raf)
         return
@@ -212,14 +213,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   // 动画渲染用布局：位置 = 中心 → 最终位置（easeOutCubic 插值）
   const layout = useMemo(() => {
     const out: ForceLayout = new Map()
-    const count = Math.max(1, nodes.length)
-    const BATCH = 36
     for (const n of nodes) {
       const fp = finalLayout.get(n.id)
       if (fp === undefined) continue
-      const idx = nodeOrder.get(n.id) ?? 0
-      // 该节点在批次轴上的进度：animT×BATCH 推进时，节点依次 t 0→1
-      const t = Math.max(0, Math.min(1, animT * BATCH - (idx / count) * BATCH))
+      const t = progressOf(n.id)
       if (t >= 1) {
         out.set(n.id, { x: fp.x, y: fp.y })
       } else {
@@ -233,12 +230,33 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return out
   }, [finalLayout, animT, nodes, nodeOrder])
 
-  // 节点淡入进度（动画期间）
-  const fadeOf = (id: string): number => {
-    if (animT >= 1) return 1
+  // 节点进度（0→1）：按 createdAt 时序 + **确定性抖动**（出现时机微随机
+  // ——v0.6 用户反馈"固定位置生成"：均匀排队太机械，抖动更自然）
+  // ⚠️ 动画终点 1.05：最后节点 pos≈0.99 时 t=(1.05-0.99)×36≈2>1 长完
+  const progressOf = (id: string): number => {
+    if (animT >= 1.05) return 1
     const count = Math.max(1, nodes.length)
     const idx = nodeOrder.get(id) ?? 0
-    return Math.max(0, Math.min(1, animT * 36 - (idx / count) * 36))
+    const jig = ((idx * 2654435761) % 1000) / 1000 // 确定性伪随机 [0,1)
+    // 出现时机 = 序号位置 ± 15% 抖动
+    const pos = (idx + (jig - 0.5) * 0.3) / count
+    return Math.max(0, Math.min(1, (animT - pos) * 36))
+  }
+
+  // 节点淡入/生长进度（动画期间；animT≥1 后恒定 1）
+  const fadeOf = (id: string): number => progressOf(id)
+
+  // 生长缩放（v0.6 用户反馈：要"自我繁殖壮大"感——节点出现时从
+  // 小点**弹性膨胀**到完整大小（easeOutBack 微过冲），不是固定位置
+  // 凭空出现）
+  const growScaleOf = (id: string): number => {
+    const t = progressOf(id)
+    if (t >= 1) return 1
+    // easeOutBack：过冲约 10%（1.08 → 1）——"砰"地长出来
+    const c1 = 1.70158
+    const c3 = c1 + 1
+    const u = t - 1
+    return Math.max(0.12, 1 + c3 * u ** 3 + c1 * u ** 2)
   }
 
   // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
@@ -635,6 +653,9 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const fade = fadeOf(n.id)
               const eventDim = isEvent ? 0.55 : 1
               const opacity = (dimmed ? 0.12 : 1) * fade * eventDim
+              // 弹性生长缩放（v0.6："自我繁殖壮大"感——从 0.12 小点
+              // 膨胀到 1.08 再回落 1，easeOutBack 微过冲）
+              const grow = growScaleOf(n.id)
               return (
                 <g
                   key={n.id}
@@ -644,6 +665,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   role="button"
                   tabIndex={0}
                   opacity={opacity}
+                  transform={`translate(${p.x}, ${p.y}) scale(${grow}) translate(${-p.x}, ${-p.y})`}
                   style={{ transition: 'opacity 0.2s' }}
                 >
                   {isSemantic && (
