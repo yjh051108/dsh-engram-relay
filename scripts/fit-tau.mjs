@@ -120,7 +120,7 @@ function fit(samples, nodes, label) {
   }
   console.log(`[${label}] 样本 ${feats.length} | 现配置 NDCG@3 = ${(cur / wcur).toFixed(4)}`)
   console.log(`[${label}] 最优 (τ_sem=${best.tau[0]}, τ_time=${best.tau[1]}, τ_cause=${best.tau[2]}) NDCG@3 = ${best.ndcg.toFixed(4)}（提升 ${(((best.ndcg - cur / wcur) / (cur / wcur)) * 100).toFixed(1)}%）`)
-  console.log(`[${label}] 建议配置：recencyWeight≈${(best.tau[1] * 0.25).toFixed(2)}（τ_time 映射）`)
+  console.log(`[${label}] 应用配置（profile patch）：tauSem=${best.tau[0]} tauTime=${best.tau[1]} tauCause=${best.tau[2]}`)
   return best
 }
 
