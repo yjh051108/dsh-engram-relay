@@ -209,6 +209,13 @@ export class EngramStore {
   private byId = new Map<string, EngramNode>()
   /** 槽位索引：slotKey -> Set<nodeId>（派生索引，写入/加载时构建）。 */
   private slotIndex = new Map<string, Set<string>>()
+  /**
+   * token 倒排索引（v0.5 纯算法语义关键修复）：token -> Set<nodeId>——
+   * **词袋召回**（与 PCA 语义对齐）。哈希 n-gram 要求词组连续匹配，查询
+   * 「pnpm 装包报错 EPERM」vs 记忆「pnpm EPERM 修复」词袋共享但窗口不
+   * 连续 → 槽位交集 0 → 粗筛漏掉（实测根因）。倒排补上词袋维度。
+   */
+  private tokenIndex = new Map<string, Set<string>>()
   /** 标题索引：title -> id[]（多值——跨项目同标题合法存在；解析时消歧）。 */
   private titleIndex = new Map<string, string[]>()
 
@@ -262,6 +269,7 @@ export class EngramStore {
           }
           this.byId.set(e.id, e)
           for (const s of e.slots) this.indexSlot(s, e.id)
+          this.indexTokens(this.textOfNode(e), e.id)
           if (e.title) this.indexTitle(e.title, e.id)
           loaded++
         } catch {
@@ -308,6 +316,33 @@ export class EngramStore {
       this.slotIndex.set(slot, set)
     }
     set.add(id)
+  }
+
+  /** token 倒排索引登记（词袋召回维度——与 PCA 语义对齐）。 */
+  private indexTokens(text: string, id: string): void {
+    for (const tok of this.hasher.normalize(text)) {
+      let set = this.tokenIndex.get(tok)
+      if (!set) {
+        set = new Set()
+        this.tokenIndex.set(tok, set)
+      }
+      set.add(id)
+    }
+  }
+
+  /** token 倒排移除。 */
+  private unindexTokens(text: string, id: string): void {
+    for (const tok of this.hasher.normalize(text)) {
+      const set = this.tokenIndex.get(tok)
+      if (!set) continue
+      set.delete(id)
+      if (set.size === 0) this.tokenIndex.delete(tok)
+    }
+  }
+
+  /** 节点检索文本（title + summary + content 的前部——token 倒排用）。 */
+  private textOfNode(e: EngramNode): string {
+    return `${e.title}：${e.summary} ${(e.content ?? '').slice(0, 100)}`
   }
 
   /**
@@ -389,6 +424,7 @@ export class EngramStore {
     }
     this.byId.set(node.id, node)
     for (const s of slots) this.indexSlot(s, node.id)
+    this.indexTokens(this.textOfNode(node), node.id)
     if (node.title) this.indexTitle(node.title, node.id)
     this.persist()
     return node
@@ -471,33 +507,59 @@ export class EngramStore {
     })
   }
 
-  /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序；不含废止节点）。 */
+  /** 按文本哈希寻址 + token 倒排词袋召回（去重，按关联度降序；不含废止节点）。 */
   lookup(text: string, limit = 8): EngramNode[] {
     const result = this.hasher.hash(text)
-    return this.lookupHash(result, limit)
+    return this.lookupHash(result, text, limit)
   }
 
-  /** 按已计算的哈希结果寻址（避免重复哈希）。 */
-  lookupHash(result: HashResult, limit = 8): EngramNode[] {
+  /** 按已计算的哈希结果寻址（避免重复哈希）；text 供 token 倒排词袋召回。 */
+  lookupHash(result: HashResult, text = '', limit = 8): EngramNode[] {
     const keys = this.hasher.slotKeys(result)
     const seen = new Set<string>()
     const hits: EngramNode[] = []
     // ⚠️ 规模化（10 万级 benchmark）：高频词槽候选可爆炸到全库（max 10 万）——
-    // 必须提前截断（每槽内按插入序取），不能全量收集再排序（O(N) 遍历）。
-    // 截断损失可接受：粗筛只负责"别漏"，排序质量由后续语义精排保证。
-    const budget = Math.max(limit, 64) // 给精排留余量（粗筛宁可多给）
-    outer:
+    // 必须提前截断，不能全量收集再排序（O(N) 遍历）。
+    // **双来源均衡采样**（v0.5 修复）：
+    //  ① 哈希槽位（精确短语——词组连续匹配）
+    //  ② token 倒排（词袋召回——与 PCA 语义对齐；查询「pnpm 装包报错
+    //     EPERM」vs 记忆「pnpm EPERM 修复」词袋共享但 n-gram 窗口不连续
+    //     → 哈希槽交集 0，靠倒排兜住——实测"查不到刚写的记忆"根因）
+    // 每来源每轮取 1 个轮转，防止高频来源独占预算。
+    const iters: Array<Iterator<string>> = []
     for (const k of keys) {
-      const ids = this.slotIndex.get(k)
-      if (!ids) continue
-      for (const id of ids) {
+      const s = this.slotIndex.get(k)
+      if (s) iters.push(s.values())
+    }
+    // token 倒排：查询 token 的并集迭代器（先收集 id 集合再取迭代器）
+    const tokenIds = new Set<string>()
+    for (const tok of this.hasher.normalize(text)) {
+      const s = this.tokenIndex.get(tok)
+      if (s) for (const id of s) tokenIds.add(id)
+    }
+    if (tokenIds.size > 0) iters.push(tokenIds.values())
+    const budget = Math.max(limit, 64)
+    let round = 0
+    outer:
+    while (hits.length < budget && round < 64) {
+      let allDone = true
+      for (const it of iters) {
         if (hits.length >= budget) break outer
+        const step = it.next()
+        if (step.done) continue
+        allDone = false
+        const id = step.value
         if (seen.has(id)) continue
         seen.add(id)
         const e = this.byId.get(id)
         // ⚠️ 版本链：废止节点不参与检索（只注入"当前有效"；追溯走 byTitle/open）
-        if (e && e.status !== 'pending' && !isSuperseded(e)) hits.push(e)
+        if (e && e.status !== 'pending' && !isSuperseded(e)) {
+          hits.push(e)
+        }
       }
+      round++
+      // ⚠️ 终止条件：所有迭代器耗尽才算完——不能按"本轮无新增"退出
+      if (allDone) break
     }
     hits.sort((a, b) => b.importance - a.importance)
     return hits.slice(0, limit)
@@ -776,6 +838,7 @@ export class EngramStore {
     if (!e) return false
     this.byId.delete(id)
     if (e.title) this.unindexTitle(e.title, e.id)
+    this.unindexTokens(this.textOfNode(e), e.id)
     for (const s of e.slots) {
       const set = this.slotIndex.get(s)
       if (set) {

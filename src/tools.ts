@@ -49,7 +49,7 @@ function resolveNode(relay: EngramRelay, ref: string): EngramNode | undefined {
 }
 
 /**
- * 织网推荐：bge 语义余弦 × 时序归一化加权，返回 top-3 关联候选（供 AI 决策）。
+ * 织网推荐：纯算法语义（词汇 × 时序）加权，返回 top-3 关联候选（供 AI 决策）。
  * 语义门槛 0.40（推荐可比自动唤醒略宽——决策权在 AI）；时序权重：近 20 回合
  * 内加权，远期收敛（1 / (1 + Δturn/20)）。
  */
@@ -138,7 +138,9 @@ async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<st
  *  决定顺着哪条边探究（engram_open 展开正文），不用盲目逐个 open。 */
 function entryLine(e: EngramNode, store: EngramStore): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
-  return `- [[${e.title}]][${e.layer}]${pendingMark} ${e.summary}${neighborsOf(e, store)}`
+  // 状态标注（新 agent 判断可信度：semantic=被反复巩固的知识，episodic=新写事件）
+  const stateMark = e.state === 'semantic' ? '[语义]' : ''
+  return `- [[${e.title}]][${e.layer}]${stateMark}${pendingMark} ${e.summary}${neighborsOf(e, store)}`
 }
 
 /** 邻接摘要：↑因/↓果/关联（id 解析标题 + 按重要度排序 + 截断——入口
@@ -356,13 +358,13 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       // ⚠️ 条件只查 causes/effects：links 已带但漏因果（常见偷懒）也必须推荐。
       if (causes.length === 0 && effects.length === 0) {
         const rec = await recommendLinks(relay, `${title}：${summary}`, e.id)
-        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
+        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已入索引 ${e.slots.length} 个检索锚点，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
         if (rec) {
-          return `${base}\n\n📎 推荐因果候选（bge 语义 × 时序加权，未自动建边——可作 causes/effects）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可。`
+          return `${base}\n\n📎 推荐因果候选（纯算法语义 × 时序加权，未自动建边——可作 causes/effects）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可。`
         }
         return base + '\n（当前无显著因果候选）'
       }
-      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
+      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已入索引 ${e.slots.length} 个检索锚点，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
     },
   })))
 
@@ -464,7 +466,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         importance: 1,
         status: 'pending',
       })
-      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，哈希槽位 ${e.slots.length} 个）——用户确认（engram_confirm）后才会参与检索/唤醒`
+      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，已入索引 ${e.slots.length} 个检索锚点）——用户确认（engram_confirm）后才会参与检索/唤醒`
     },
   })))
 
@@ -555,9 +557,13 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''} · ${node.state ?? 'episodic'})`)
       parts.push(node.summary)
       if (node.content) parts.push(`\n${node.content}`)
+      // ⚠️ 邻接契约：无因果/链接时显式占位（新 agent 实测：段落缺席被误判为 bug）
       if (causes.length > 0) parts.push(`\n**前因**（因果 ↑）：${causes.map((c) => `[[${c.title}]]`).join('、')}`)
+      else parts.push('\n**前因**（因果 ↑）：（无）')
       if (effects.length > 0) parts.push(`**后果**（因果 ↓）：${effects.map((c) => `[[${c.title}]]`).join('、')}`)
+      else parts.push('**后果**（因果 ↓）：（无）')
       if (linked.length > 0) parts.push(`**关联**（双向链接）：${linked.map((c) => `[[${c.title}]]`).join('、')}`)
+      else parts.push('**关联**（双向链接）：（无）')
       return parts.join('\n')
     },
   })))

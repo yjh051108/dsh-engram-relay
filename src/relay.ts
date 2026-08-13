@@ -381,6 +381,7 @@ export class EngramRelay {
   }
 
   async status(): Promise<Record<string, unknown>> {
+    const engine = await this.model.describe().catch(() => null)
     return {
       enabled: this.config.enabled,
       storeDir: this.store.dir,
@@ -392,10 +393,13 @@ export class EngramRelay {
       maxNodes: this.config.maxNodes ?? 10000,
       slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
-      model: await this.model.describe(),
+      // v0.5 语义引擎：纯算法三通道（词汇/图/PCA），零外部模型——无需 python
+      semanticEngine: 'pure-algorithm (lexical + graph + PCA), no external model',
       budgetTokens: this.config.injectBudgetTokens,
       currentCwd: this.currentCwd,
       compactCoexist: this.ctx.get('compaction') !== undefined,
+      // 遗留字段保留兼容（describe 含 python 状态），但顶层不再暴露误导
+      legacy: engine,
     }
   }
 }

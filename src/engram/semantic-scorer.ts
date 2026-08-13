@@ -88,10 +88,10 @@ class PcaSemantics {
     if (nodes.length < 2) return // 冷启动：单条记忆无共现可学（词汇/图通道兜底）
     // 稀疏共现矩阵 C：word → Map<word, count>（同记忆词对共现）
     const co = new Map<string, Map<string, number>>()
-    const bump = (a: string, b: string): void => {
+    const bump = (a: string, b: string, weight = 1): void => {
       let row = co.get(a)
       if (!row) { row = new Map(); co.set(a, row) }
-      row.set(b, (row.get(b) ?? 0) + 1)
+      row.set(b, (row.get(b) ?? 0) + weight)
     }
     const vocab = new Set<string>()
     for (const n of nodes) {
@@ -99,7 +99,7 @@ class PcaSemantics {
       if (words.length === 0) continue
       for (const w of words) {
         vocab.add(w)
-        bump(w, w) // 自共现（词频）
+        bump(w, w, 0.5) // 自共现（词频，降权——避免对角占优压过共现信号）
         for (const w2 of words) {
           if (w2 !== w) bump(w, w2)
         }
@@ -127,7 +127,10 @@ class PcaSemantics {
     }
     const DIM = PcaSemantics.DIM
     const vecs: Float64Array[] = []
-    for (let k = 0; k < DIM && k < V; k++) {
+    // ⚠️ k 从 1 开始：非负矩阵第一主分量全正（Perron-Frobenius），只编码
+    // 词频不编码语义——跳过它，用差异方向（第 2..17 主分量）做语义向量，
+    // 否则所有词同向、余弦全高（语义坍缩，实测 svd≈0.94 无区分度）。
+    for (let k = 1; k <= DIM && k < V; k++) {
       // 幂迭代：x ← C·x / |C·x|（初始随机确定性种子）
       let x = new Float64Array(V)
       for (let i = 0; i < V; i++) x[i] = Math.sin((i + 1) * (k + 1) * 12.9898) * 0.5 + 0.5
