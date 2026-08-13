@@ -41,15 +41,16 @@ test('force: 空输入返回空 Map', () => {
   assert.equal(out.size, 0)
 })
 
-test('force: 坐标不越出画布（硬边界）', () => {
+test('force: 无限画布——无边界墙，坐标有限且无 NaN（力平衡决定位置）', () => {
   const nodes = Array.from({ length: 24 }, (_, i) => ({ id: `n${i}` }))
   const edges = []
   for (let i = 1; i < 24; i += 1) edges.push({ from: `n${i - 1}`, to: `n${i}` })
   const out = layoutForce(nodes, edges, { width: W, height: H, iterations: 400 })
   assert.equal(out.size, 24)
   for (const [id, p] of out) {
-    assert.ok(p.x >= 0 && p.x <= W, `${id} x 在画布内 (${p.x})`)
-    assert.ok(p.y >= 0 && p.y <= H, `${id} y 在画布内 (${p.y})`)
+    assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), `${id} 坐标有限 (${p.x}, ${p.y})`)
+    // 无硬边界：允许超出画布（软向心约束下不会无限远）
+    assert.ok(Math.abs(p.x) < W * 4 && Math.abs(p.y) < H * 4, `${id} 未被弹飞 (${p.x}, ${p.y})`)
   }
 })
 

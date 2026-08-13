@@ -29,7 +29,7 @@ export const zh = {
   'graph.detail.open': '展开详情',
   'graph.legend.causes': '—— 因果边',
   'graph.legend.link': '··· 双向链接',
-  'graph.hint': '节点=记忆（颜色分层），实线=因果，虚线=双向链接；点击节点看详情；按住 Ctrl + 滚轮缩放。',
+  'graph.hint': '节点=记忆（颜色分层），实线=因果，虚线=双向链接；点击节点看详情；拖拽空白平移（无限画布）；按住 Ctrl + 滚轮缩放。',
 }
 
 export const en: Record<keyof typeof zh, string> = {
@@ -59,5 +59,5 @@ export const en: Record<keyof typeof zh, string> = {
   'graph.detail.open': 'Expand',
   'graph.legend.causes': '—— causal edge',
   'graph.legend.link': '··· bidirectional link',
-  'graph.hint': 'Nodes are memories (color = layer), solid = causal, dashed = link; click a node for details; Ctrl+wheel to zoom.',
+  'graph.hint': 'Nodes are memories (color = layer), solid = causal, dashed = link; click a node for details; drag empty space to pan (infinite canvas); Ctrl+wheel to zoom.',
 }

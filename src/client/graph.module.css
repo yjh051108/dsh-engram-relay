@@ -98,6 +98,8 @@
   width: 100%;
   height: 100%;
   display: block;
+  cursor: grab; /* 无限画布：空白处拖拽平移 */
+  touch-action: none;
 }
 
 .edge {

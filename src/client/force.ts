@@ -199,9 +199,8 @@ export function layoutForce(
       }
       body.x += body.vx
       body.y += body.vy
-      // 硬边界（不越出画布；保留弹簧/collide 的挤压余量）
-      body.x = Math.max(collideRadius, Math.min(width - collideRadius, body.x))
-      body.y = Math.max(collideRadius, Math.min(height - collideRadius, body.y))
+      // 无限画布（v0.3）：无硬边界墙——节点位置完全由力平衡决定
+      // （软向心 forceX/forceY 拉回中心，不会飘走；视口由前端自由平移缩放）
     }
 
     // ---- forceCenter：质心平移居中（不加力，不会吸成团）----

@@ -70,9 +70,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const [filter, setFilter] = useState<string>('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  // 视图变换：k = 缩放，tx/ty = 平移（SVG <g> transform，围绕鼠标点缩放）
-  const [view, setView] = useState({ k: 1, tx: 0, ty: 0 })
+  // 无限画布视口（viewBox 四元组）：世界坐标无限，视口自由缩放/平移。
+  //  vx/vy = 视口左上角世界坐标，vw/vh = 视口尺寸（世界单位）
+  const VIEW_DEFAULT = { vx: 0, vy: 0, vw: VIEW_W, vh: VIEW_H }
+  const [view, setView] = useState(VIEW_DEFAULT)
+  const viewRef = useRef(view)
+  viewRef.current = view
   const svgRef = useRef<SVGSVGElement>(null)
+  const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect } | null>(null)
 
   const loadGraph = (): void => {
     setLoading(true)
@@ -116,31 +121,64 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return { nodes: visible, edges: visibleEdges, layout }
   }, [data, filter])
 
-  // Ctrl+滚轮缩放（围绕鼠标位置）。必须用原生非 passive 监听：React 的
-  // onWheel 在根容器以 passive 注册，preventDefault 拦不住浏览器页面缩放。
+  // Ctrl+滚轮缩放（围绕鼠标位置，作用于视口）。必须用原生非 passive 监听：
+  // React 的 onWheel 在根容器以 passive 注册，preventDefault 拦不住页面缩放。
   useEffect(() => {
     const svg = svgRef.current
     if (svg === null) return
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
       e.preventDefault()
-      const ctm = svg.getScreenCTM()
-      if (ctm === null) return
-      const pt = svg.createSVGPoint()
-      pt.x = e.clientX
-      pt.y = e.clientY
-      const p = pt.matrixTransform(ctm.inverse()) // 屏幕点 → SVG 用户坐标
+      const rect = svg.getBoundingClientRect()
+      const mx = (e.clientX - rect.left) / rect.width // 鼠标归一化位置 [0,1]
+      const my = (e.clientY - rect.top) / rect.height
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
       setView((v) => {
-        const k2 = Math.min(5, Math.max(0.4, v.k * factor))
-        // 保持鼠标下的内容点在缩放前后不动：t2 = m − (m − t)·(k2/k)
-        const tx2 = p.x - (p.x - v.tx) * (k2 / v.k)
-        const ty2 = p.y - (p.y - v.ty) * (k2 / v.k)
-        return { k: k2, tx: tx2, ty: ty2 }
+        const vw2 = Math.min(100000, Math.max(10, v.vw * factor))
+        const vh2 = v.vh * factor
+        // 保持鼠标下的世界点在缩放前后不动：w = vx + mx·vw
+        const wx = v.vx + mx * v.vw
+        const wy = v.vy + my * v.vh
+        return { vx: wx - mx * vw2, vy: wy - my * vh2, vw: vw2, vh: vh2 }
       })
     }
     svg.addEventListener('wheel', onWheel, { passive: false })
     return () => svg.removeEventListener('wheel', onWheel)
+  }, [loading, nodes.length])
+
+  // 拖拽平移视口（无限画布：空白处按下拖动 = 世界跟随鼠标）。
+  // 节点/边上的按下不启动拖拽——保留点击开详情。
+  useEffect(() => {
+    const svg = svgRef.current
+    if (svg === null) return
+    const onDown = (e: MouseEvent): void => {
+      if (e.button !== 0) return
+      const target = e.target as Element
+      if (target !== svg && target.tagName !== 'svg') return // 空白处才拖拽
+      const rect = svg.getBoundingClientRect()
+      dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect }
+      e.preventDefault()
+    }
+    const onMove = (e: MouseEvent): void => {
+      const d = dragRef.current
+      if (d === null) return
+      const dx = (e.clientX - d.startX) / d.rect.width // 屏幕像素 → 视口比例
+      const dy = (e.clientY - d.startY) / d.rect.height
+      setView((v) => ({
+        ...v,
+        vx: d.startView.vx - dx * d.startView.vw,
+        vy: d.startView.vy - dy * d.startView.vh,
+      }))
+    }
+    const onUp = (): void => { dragRef.current = null }
+    svg.addEventListener('mousedown', onDown)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      svg.removeEventListener('mousedown', onDown)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
   }, [loading, nodes.length])
 
   const openDetail = (node: GraphNodeData): void => {
@@ -169,7 +207,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => setView({ k: 1, tx: 0, ty: 0 })}>{t('graph.reset')}</button>
+          <button className={styles.refresh} onClick={() => setView(VIEW_DEFAULT)}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
@@ -184,9 +222,12 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
 
       {!loading && nodes.length > 0 && (
         <div className={styles.canvas}>
-          <svg ref={svgRef} viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} className={styles.svg}>
-            {/* 视图变换：Ctrl+滚轮缩放（围绕鼠标点） */}
-            <g transform={`translate(${view.tx} ${view.ty}) scale(${view.k})`}>
+          {/* 无限画布：动态 viewBox 即视口（世界坐标无限，缩放/拖拽只动视口） */}
+          <svg
+            ref={svgRef}
+            viewBox={`${view.vx} ${view.vy} ${view.vw} ${view.vh}`}
+            className={styles.svg}
+          >
             {/* 边 */}
             {edges.map((e) => {
               const a = layout.get(e.from)
@@ -236,7 +277,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                 </g>
               )
             })}
-            </g>
           </svg>
 
           <div className={styles.legend}>
