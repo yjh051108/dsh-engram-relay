@@ -140,7 +140,9 @@ function entryLine(e: EngramNode, store: EngramStore): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
   // 状态标注（新 agent 判断可信度：semantic=被反复巩固的知识，episodic=新写事件）
   const stateMark = e.state === 'semantic' ? '[语义]' : ''
-  return `- [[${e.title}]][${e.layer}]${stateMark}${pendingMark} ${e.summary}${neighborsOf(e, store)}`
+  // 废止标注（防御性：wake 已过滤，但传播路径可能带入）
+  const supersededMark = isSuperseded(e) ? '（已废止）' : ''
+  return `- [[${e.title}]][${e.layer}]${stateMark}${pendingMark}${supersededMark} ${e.summary}${neighborsOf(e, store)}`
 }
 
 /** 邻接摘要：↑因/↓果/关联（id 解析标题 + 按重要度排序 + 截断——入口
@@ -547,7 +549,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_open：展开入口（渐进披露第二层） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_open',
-    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + 双向链接 + 因果前因/后果。当你看到 [[标题]] 入口需要详情时调用；展开后可顺着 ↑因/↓果/→ 的 [[标题]] 继续递归探究（记忆图谱导航）。',
+    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + **前因/后果（因果）/关联（双向链接）/依赖引用（depends-on 与 references 边）**，空邻接显式（无）。当你看到 [[标题]] 入口需要详情时调用；展开后可顺着邻接的 [[标题]] 继续递归探究（记忆图谱导航）。',
     parameters: {
       title: {
         type: 'string',
@@ -558,8 +560,16 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
     execute: async (args, exec) => {
-      const node = resolveNode(relay, String(args.title))
-      if (!node) return `未找到节点 [[${args.title}]]（可 engram_search 检索）`
+      const titleRef = String(args.title)
+      const node = resolveNode(relay, titleRef)
+      if (!node) return `未找到节点 [[${titleRef}]]（可 engram_search 检索）`
+      // 同名多版本提示（第五轮新 agent 实测：同名双节点 byTitle 取最近，
+      // open 与 recall 可能解析到不同实例 → 因果展示矛盾）
+      const allVersions = relay.store.byTitles(node.title)
+      const dupNote = allVersions.length > 1
+        ? `\n（⚠️ 标题「${node.title}」有 ${allVersions.length} 个节点——当前展开最近写入的（id ${node.id.slice(-6)}）；`
+        + '用 engram_search 可盘点全部，同主题可经 engram_store 写入触发自动修订合并）'
+        : ''
       // 可见性：只能展开自己可见层的节点
       if (!isVisible(node, viewerOf(exec))) return `无权展开 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
       // 展开 = 深度使用 → 强化（激活模型 B 增量）
@@ -586,7 +596,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (linked.length > 0) parts.push(`**关联**（双向链接）：${linked.map((c) => `[[${c.title}]]`).join('、')}`)
       else parts.push('**关联**（双向链接）：（无）')
       if (deps.length > 0) parts.push(`**依赖/引用**：${deps.map((c) => `[[${c.title}]]`).join('、')}`)
-      return parts.join('\n')
+      return parts.join('\n') + dupNote
     },
   })))
 
@@ -626,8 +636,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const viewer = viewerOf(exec)
       const layer = String(args.layer ?? '')
       const kind = String(args.kind ?? '')
+      // ⚠️ 第五轮新 agent 实测：layer=global 过滤失效——projectId 默认取
+      // viewer.cwd 会把 global 节点（projectId=null）全滤掉。仅当 layer
+      // 未指定且用户未传 projectId 时才用 cwd 兜底
       const projectId = args.projectId !== undefined && String(args.projectId) !== ''
-        ? String(args.projectId) : (viewer.cwd ?? undefined)
+        ? String(args.projectId)
+        : (layer === '' ? (viewer.cwd ?? undefined) : undefined)
       // ⚠️ P0 修复（第三轮新 agent 实测）：先过滤后截断——先 query 会截掉
       // 匹配目标再子串过滤 → 精确子串搜不到（上轮误判为"盘点/检索不一致"，
       // 实为 limit 顺序 bug）
@@ -838,9 +852,10 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       // 只能升不能降：global 已是最高；此处 node 必为 project、target 必为 global
       if (node.layer === 'global') return `[[${node.title}]] 已是 global 层（最高），无需提升`
       if (node.layer === target) return `[[${node.title}]] 已在 ${target} 层`
+      const fromLayer = node.layer // ⚠️ promote 原地修改，先存旧层（否则显示 "global → global"）
       const promoted = relay.store.promote(node.id, target, viewer.cwd ?? null)
       return promoted
-        ? `已提升 [[${promoted.title}]]：${node.layer} → ${target}${promoted.projectId ? `（项目 ${promoted.projectId}）` : ''}，跨会话持久`
+        ? `已提升 [[${promoted.title}]]：${fromLayer} → ${target}${promoted.projectId ? `（项目 ${promoted.projectId}）` : ''}，跨会话持久`
         : '提升失败'
     },
   })))
