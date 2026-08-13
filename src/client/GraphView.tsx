@@ -267,19 +267,22 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }, [selectedId, edges])
 
   // 自动适配视口（v0.6 用户要求：切过滤后初始画面刚好显示全部可见节点）
-  // ——filter 变化 + 动画完成后，把 viewBox 设到可见节点包围盒（含簇圆
-  // 与 padding）；只自动 fit 一次/每 filter，用户手动缩放后不打扰。
-  const fitView = (): void => {
+  // 自动适配视口（v0.6 修复：**动画开始前就 fit**——用最终布局的包围盒
+  // 设 viewBox，初始化/切换过滤即刻显示全；动画（节点从中心飞向最终位置）
+  // 全程在适配视口里进行。之前 fit 等动画完成（1.8s 后）才执行，初始画面
+  // 一直是默认视口，图谱大时节点在视口外——用户指出的问题）。
+  const fitView = (layoutRef: ForceLayout): void => {
     if (nodes.length === 0) return
     const pts = nodes
-      .map((n) => layout.get(n.id))
+      .map((n) => layoutRef.get(n.id))
       .filter((p): p is ForcePoint => p !== undefined)
     if (pts.length === 0) return
     const pad = 80 / zc // 世界坐标 padding（簇圆标签留白）
-    const minX = Math.min(...pts.map((p) => p.x)) - pad
-    const maxX = Math.max(...pts.map((p) => p.x)) + pad
-    const minY = Math.min(...pts.map((p) => p.y)) - pad
-    const maxY = Math.max(...pts.map((p) => p.y)) + pad
+    // ⚠️ reduce 代替 spread（节点上千时 Math.min(...array) 栈溢出）
+    const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
+    const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
+    const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
+    const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
     setView({
       vx: minX,
       vy: minY,
@@ -289,12 +292,13 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }
   const lastFitRef = useRef<string>('')
   useEffect(() => {
-    if (animT < 1) return
+    // ⚠️ 不依赖 animT：最终布局就绪 + filter 变化即 fit（动画开始前）
     if (lastFitRef.current === filter) return
+    if (nodes.length === 0 || finalLayout.size === 0) return
     lastFitRef.current = filter
-    fitView()
+    fitView(finalLayout)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [animT, filter, nodes, layout])
+  }, [filter, nodes, finalLayout])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
@@ -424,7 +428,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => { lastFitRef.current = ''; fitView() }}>{t('graph.reset')}</button>
+          <button className={styles.refresh} onClick={() => { lastFitRef.current = ''; fitView(finalLayout) }}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
