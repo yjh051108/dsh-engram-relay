@@ -99,7 +99,7 @@ export class RelayModel {
   }
 
   /** 详细语义分（通道分解——查重/织网用 lexical 阈值，比融合分更稳）。 */
-  semanticScores(query: string, candidates: EngramNode[]): Map<string, { score: number; lexical: number; graph: number; svd: number }> {
+  semanticScores(query: string, candidates: EngramNode[]): Map<string, { score: number; lexical: number; graph: number; cooc: number }> {
     return this.scorer.score(query, candidates)
   }
 

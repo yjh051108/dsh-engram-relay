@@ -119,6 +119,17 @@ export class CausalGraph {
     return this.store.getMany(ids)
   }
 
+  /** 取某节点的依赖/引用邻居（depends-on 与 references 边——open 邻接展示）。 */
+  depsOf(id: string): EngramNode[] {
+    const ids = new Set<string>()
+    for (const e of [...(this.inEdges.get(id) ?? []), ...(this.out.get(id) ?? [])]) {
+      if (e.kind === 'depends-on' || e.kind === 'references') {
+        ids.add(e.from === id ? e.to : e.from)
+      }
+    }
+    return this.store.getMany([...ids])
+  }
+
   edgeCount(): number {
     let n = 0
     for (const list of this.out.values()) n += list.length

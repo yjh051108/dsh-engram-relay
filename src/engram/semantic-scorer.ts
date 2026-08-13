@@ -9,12 +9,15 @@
  *     重叠度高"（保底精确，可解释）；
  *  ② 图语义通道（graph）：候选的因果/链接邻居是否命中查询哈希节点——
  *     "因为沿着边相连"（可解释，怎么索引就怎么推荐）；
- *  ③ PCA 语义通道（svd，核心收敛通道）：词-词共现矩阵的谱分解（幂迭代
- *     top-k 特征向量，线性代数零模型）——词向量余弦。能学到语义桥
- *     （「缓存」与「cache」在同一记忆共现 → 词向量相近 → 查询命中），
- *     随记忆增多收敛（共现矩阵依概率收敛，谱子空间随之收敛）。
+ *  ③ 统计语义通道（cooc，核心收敛通道）：**词-词共现相似**（PMI 风格，
+ *     零矩阵分解）——查询词与记忆词的共现强度。能学语义桥（「缓存」
+ *     与「cache」在同一记忆共现 → 共现计数建桥 → 查询命中），随记忆
+ *     增多收敛（共现计数依概率收敛）。
  *     诚实声明：学的是"用户的语义空间"（库内统计），通用性上限低于
  *     预训练模型，但在单用户记忆库场景自举、可解释、无外部依赖。
+ *     （v0.5 迭代：曾用谱分解（幂迭代 PCA），实测词向量坍缩——无关词
+ *     余弦 0.8+，deflate 残留致全词同向；改为直接共现相似，零分解
+ *     零坍缩风险，且更可解释。）
  *
  * 纯 CPU：比 ONNX 快几个数量级，永不失败（无模型依赖）。
  */
@@ -33,14 +36,20 @@ function charNgrams(text: string, n = 2): Set<string> {
   return out
 }
 
-/** 词频表（用于 BM25 风格 IDF 加权）。 */
+/** 词频表（token 化：CJK 重叠 bigram + ASCII 整词——单字粒度共现噪音大，
+ *  「计」「量」等常用字与大量词共现导致无关记忆 cooc 全高，第五轮实测）。 */
 function wordsOf(text: string): Map<string, number> {
   const out = new Map<string, number>()
-  // CJK 逐字 + ASCII 词（简单切分，零依赖）
-  const tokens = text.match(/[a-z0-9]+|[^\u0000-\u007f]/gi) ?? []
-  for (const w of tokens) {
-    const k = w.toLowerCase()
-    out.set(k, (out.get(k) ?? 0) + 1)
+  const tokens = text.match(/[a-z0-9]+|[^\u0000-\u007f]+/gi) ?? []
+  const bump = (k: string): void => { out.set(k, (out.get(k) ?? 0) + 1) }
+  for (const tok of tokens) {
+    if (/[a-z0-9]/i.test(tok)) {
+      bump(tok.toLowerCase())
+    } else if (tok.length === 1) {
+      bump(tok)
+    } else {
+      for (let i = 0; i < tok.length - 1; i++) bump(tok.slice(i, i + 2))
+    }
   }
   return out
 }
@@ -59,14 +68,19 @@ export interface SemanticScore {
   /** 通道分解（可解释：为什么是这个分）。 */
   lexical: number
   graph: number
-  svd: number
+  cooc: number
 }
 
-/** PCA 语义通道（词-词共现谱分解，幂迭代零模型）。 */
-class PcaSemantics {
-  static readonly DIM = 16
-  /** 词向量表：word → Float64Array(DIM)（幂迭代谱分解结果）。 */
-  private wordVec = new Map<string, Float64Array>()
+/**
+ * 统计语义通道（词-词共现相似，PMI 风格，零矩阵分解）。
+ *
+ * 语义桥机制：词 a、b 在同一记忆出现 → co(a,b) 计数 +1。查询词 q 对
+ * 记忆 m 的统计语义分 = Σ_{w∈m} co(q,w)（查询词与记忆词的共现强度），
+ * 归一化到 [0,1]。IDF 降权高频词（记忆/系统等通用词不主导）。
+ */
+class CoocSemantics {
+  /** 词-词共现计数：word → Map<word, count>（同记忆词对共现，IDF 加权）。 */
+  private co = new Map<string, Map<string, number>>()
   private built = false
 
   constructor(private store: EngramStore) {}
@@ -81,138 +95,103 @@ class PcaSemantics {
     this.built = false
   }
 
-  /** 重建：词-词共现矩阵 → 幂迭代 top-k 特征向量 → 词向量。 */
+  /** 重建：全库词对共现统计（IDF 加权）。 */
   private rebuild(): void {
     this.built = true
+    this.co = new Map()
     const nodes = this.store.all().filter((e) => e.status !== 'pending' && !e.supersededBy)
-    if (nodes.length < 2) return // 冷启动：单条记忆无共现可学（词汇/图通道兜底）
-    // 稀疏共现矩阵 C：word → Map<word, count>（同记忆词对共现）
-    const co = new Map<string, Map<string, number>>()
-    const bump = (a: string, b: string, weight = 1): void => {
-      let row = co.get(a)
-      if (!row) { row = new Map(); co.set(a, row) }
-      row.set(b, (row.get(b) ?? 0) + weight)
-    }
-    const vocab = new Set<string>()
+    if (nodes.length < 2) return
+    const df = new Map<string, number>()
+    const nodeWords: string[][] = []
     for (const n of nodes) {
       const words = [...wordsOf(`${n.title}：${n.summary}`).keys()]
       if (words.length === 0) continue
-      for (const w of words) {
-        vocab.add(w)
-        bump(w, w, 0.5) // 自共现（词频，降权——避免对角占优压过共现信号）
-        for (const w2 of words) {
-          if (w2 !== w) bump(w, w2)
-        }
+      nodeWords.push(words)
+      for (const w of new Set(words)) df.set(w, (df.get(w) ?? 0) + 1)
+    }
+    const N = nodeWords.length
+    const idf = (w: string): number => Math.log((N + 1) / ((df.get(w) ?? 1) + 1)) + 1
+    // ⚠️ 高频字停用（第五轮新 agent 实测：单字 token 下「计」「量」等常用字
+    // 与大量词共现 → 无关记忆 cooc 全 1.0 坍缩）：df > 20% 节点的字不建
+    // 共现（不携带语义，纯噪音）。**加绝对下限**：小库（<25 条）时比例
+    // 虚高会误杀真语义词（「缓存」在 3 条库里 df=67%）
+    const stopSet = new Set<string>()
+    for (const [w, d] of df) {
+      if (d > Math.max(5, N * 0.2)) stopSet.add(w)
+    }
+    const bump = (a: string, b: string, w: number): void => {
+      // ⚠️ 双向：查询可能从任意一侧发起（queryStrength 只查 co.get(查询词)）——
+      // 只建上三角会导致 co(cache,缓) 缺失、co(缓,cache) 存在 → 查询查不到
+      for (const [x, y] of [[a, b], [b, a]] as const) {
+        let row = this.co.get(x)
+        if (!row) { row = new Map(); this.co.set(x, row) }
+        row.set(y, (row.get(y) ?? 0) + w)
       }
     }
-    const words = [...vocab]
-    const idx = new Map<string, number>()
-    words.forEach((w, i) => idx.set(w, i))
-    const V = words.length
-    if (V < 3) return
-    // 幂迭代：对 C（对称）求 top-k 特征向量（λ·x = C·x），每次 deflate
-    const matVec = (x: Float64Array): Float64Array => {
-      const y = new Float64Array(V)
-      for (const [a, row] of co) {
-        const ia = idx.get(a)
-        if (ia === undefined) continue
-        let sum = 0
-        for (const [b, c] of row) {
-          const ib = idx.get(b)
-          if (ib !== undefined) sum += c * x[ib]
-        }
-        y[ia] = sum
-      }
-      return y
-    }
-    const DIM = PcaSemantics.DIM
-    const vecs: Float64Array[] = []
-    // ⚠️ k 从 1 开始：非负矩阵第一主分量全正（Perron-Frobenius），只编码
-    // 词频不编码语义——跳过它，用差异方向（第 2..17 主分量）做语义向量，
-    // 否则所有词同向、余弦全高（语义坍缩，实测 svd≈0.94 无区分度）。
-    for (let k = 1; k <= DIM && k < V; k++) {
-      // 幂迭代：x ← C·x / |C·x|（初始随机确定性种子）
-      let x = new Float64Array(V)
-      for (let i = 0; i < V; i++) x[i] = Math.sin((i + 1) * (k + 1) * 12.9898) * 0.5 + 0.5
-      let prev = 0
-      for (let it = 0; it < 25; it++) {
-        const y = matVec(x)
-        let norm = 0
-        for (let i = 0; i < V; i++) norm += y[i] * y[i]
-        norm = Math.sqrt(norm) || 1
-        for (let i = 0; i < V; i++) x[i] = y[i] / norm
-        const cur = x.reduce((s, v) => s + v * v, 0)
-        if (Math.abs(cur - prev) < 1e-9) break
-        prev = cur
-      }
-      // deflate：C ← C − λ·x·xᵀ（从共现矩阵减去主分量）
-      const lambda = x.reduce((s, v, i) => s + v * (matVec(x)[i]), 0) / x.reduce((s, v) => s + v * v, 0)
-      for (const [a, row] of co) {
-        const ia = idx.get(a)
-        if (ia === undefined) continue
-        const xa = x[ia] ?? 0
-        for (const [b, c] of row) {
-          const ib = idx.get(b)
-          if (ib === undefined) continue
-          row.set(b, c - lambda * xa * x[ib])
+    for (const words of nodeWords) {
+      const kept = words.filter((w) => !stopSet.has(w))
+      if (kept.length === 0) continue
+      const weights = new Map<string, number>()
+      for (const w of kept) weights.set(w, idf(w))
+      for (let i = 0; i < kept.length; i++) {
+        const wi = kept[i]!
+        const wiw = weights.get(wi)!
+        for (let j = i; j < kept.length; j++) {
+          const wj = kept[j]!
+          bump(wi, wj, wiw * weights.get(wj)!)
         }
       }
-      vecs.push(x)
-    }
-    // 词向量：top-k 特征向量按行组织
-    for (const w of words) {
-      const v = new Float64Array(DIM)
-      vecs.forEach((vec, k) => { v[k] = vec[idx.get(w)!] ?? 0 })
-      this.wordVec.set(w, v)
     }
   }
 
-  /** 文本 → 词向量加权平均（词频权重）。 */
-  private textVec(text: string): Float64Array | null {
-    const words = wordsOf(text)
-    const out = new Float64Array(PcaSemantics.DIM)
+  /** 查询文本 → 查询词的共现邻居强度（对记忆词的共现和）。 */
+  private queryStrength(queryWords: string[], memWords: string[]): number {
     let total = 0
-    for (const [w, c] of words) {
-      const v = this.wordVec.get(w)
-      if (!v) continue
-      for (let k = 0; k < PcaSemantics.DIM; k++) out[k] += v[k] * c
-      total += c
+    for (const q of queryWords) {
+      const row = this.co.get(q)
+      if (!row) continue
+      for (const m of memWords) {
+        total += row.get(m) ?? 0
+      }
     }
-    if (total === 0) return null
-    for (let k = 0; k < PcaSemantics.DIM; k++) out[k] /= total
-    return out
+    return total
   }
 
-  /** 余弦相似度（库内谱语义——能桥接共现词对如「缓存」↔「cache」）。 */
-  cosine(query: string, memText: string): number {
+  /** 统计语义分 [0,1]：查询-记忆共现强度归一化（能桥接「缓存」↔「cache」）。 */
+  score(query: string, memText: string): number {
     this.ensure()
-    const qv = this.textVec(query)
-    const mv = this.textVec(memText)
-    if (!qv || !mv) return 0
-    let dot = 0, na = 0, nb = 0
-    for (let k = 0; k < PcaSemantics.DIM; k++) {
-      dot += qv[k] * mv[k]
-      na += qv[k] * qv[k]
-      nb += mv[k] * mv[k]
+    const qWords = [...wordsOf(query).keys()]
+    const mWords = [...wordsOf(memText).keys()]
+    if (qWords.length === 0 || mWords.length === 0) return 0
+    // 直接词匹配分（同词也算"共现"——自共现已含）
+    let direct = 0
+    for (const q of qWords) {
+      const row = this.co.get(q)
+      if (!row) continue
+      for (const m of mWords) {
+        if (q === m) direct += row.get(m) ?? 0
+      }
     }
-    const d = Math.sqrt(na) * Math.sqrt(nb)
-    if (d === 0) return 0
-    // 映射到 [0,1]（余弦 ∈ [-1,1] → (cos+1)/2）
-    return (dot / d + 1) / 2
+    const cross = this.queryStrength(qWords, mWords)
+    // 归一化：cross+direct 相对查询词数（均值化），映射到 [0,1]（sigmoid 变体）
+    const raw = (cross + direct) / Math.max(1, qWords.length)
+    // 经验标定：raw 均值随库规模漂移——用 log 压缩 + 阈值映射
+    if (raw <= 0) return 0
+    return Math.min(1, Math.log1p(raw) / Math.log1p(50))
   }
 }
 
 export class SemanticScorer {
   /** 查询哈希命中的节点 id 集（图语义通道的种子）。 */
   private queryHits = new Set<string>()
-  private pca: PcaSemantics
+  private cooc: CoocSemantics
 
   constructor(private store: EngramStore) {
-    this.pca = new PcaSemantics(store)
+    this.cooc = new CoocSemantics(store)
   }
 
   /**
-   * 对候选打分（同步纯算法）：score = α·lexical + β·graph + γ·svd。
+   * 对候选打分（同步纯算法）：score = α·lexical + β·graph + γ·cooc。
    * α/β/γ 初始标定（0.5/0.25/0.25）；后续可经 fit-tau 数据驱动调整。
    */
   score(query: string, candidates: EngramNode[]): Map<string, SemanticScore> {
@@ -252,13 +231,13 @@ export class SemanticScorer {
           graph = 0.3 // 2 跳内（保守：任意边存在即弱信号）
         }
       }
-      // PCA 语义（库内谱收敛——语义桥通道）
-      const svd = this.pca.cosine(query, text)
+      // 统计语义（共现桥——「缓存」↔「cache」）
+      const cooc = this.cooc.score(query, text)
       out.set(e.id, {
-        score: Math.min(1, alpha * lexical + beta * graph + gamma * svd),
+        score: Math.min(1, alpha * lexical + beta * graph + gamma * cooc),
         lexical: Number(lexical.toFixed(4)),
         graph: Number(graph.toFixed(2)),
-        svd: Number(svd.toFixed(4)),
+        cooc: Number(cooc.toFixed(4)),
       })
     }
     return out

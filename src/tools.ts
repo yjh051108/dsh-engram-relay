@@ -84,7 +84,7 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
  * 阈值防误判；版本链 superseded 可追溯 = 自动修订的天然回滚安全网。
  * 返回 { dup, detailed }——detailed（通道分解）复用给自动织网。
  */
-async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<{ dup: EngramNode | null; detailed: Map<string, { score: number; lexical: number; graph: number; svd: number }> | null }> {
+async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<{ dup: EngramNode | null; detailed: Map<string, { score: number; lexical: number; graph: number; cooc: number }> | null }> {
   const cands = relay.store.lookup(text, 64)
   if (cands.length === 0) return { dup: null, detailed: null }
   const detailed = relay.model.semanticScores(text.slice(0, 300), cands)
@@ -111,7 +111,7 @@ async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLay
  * （causes/effects），系统自动织的是弱关系（link）——写入织的边 =
  * 未来检索召回的理由（可逆）。
  */
-async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<string, { score: number; lexical: number; graph: number; svd: number }>): Promise<number> {
+async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<string, { score: number; lexical: number; graph: number; cooc: number }>): Promise<number> {
   const ranked = [...detailed.entries()]
     .filter(([id, s]) => {
       const target = relay.store.get(id)
@@ -191,7 +191,8 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
     execute: async (args, exec) => {
-      const hit = await relay.recall(String(args.query), Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
+      const query = String(args.query)
+      const hit = await relay.recall(query, Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
       if (hit.engrams.length === 0) {
         // 新 agent 实测：无命中时需区分"没有这条记忆" vs "检索没召回到"
         const hint = hit.reason === 'no-hash-hit' || hit.reason === 'short-query'
@@ -199,7 +200,18 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
           : `（未召回相关记忆，reason=${hit.reason}）`
         return hint
       }
-      return hit.engrams.map((e) => entryLine(e, relay.store)).join('\n')
+      // 弱命中检测（第四轮新 agent 实测）：无相关记忆时 wake 仍可能返回
+      // 弱相关（词汇低重叠）条目——用语义打分判定 top 条目的置信度，
+      // 低置信则明示"未找到强相关记忆"，避免把噪声当命中。
+      let weakHint = ''
+      try {
+        const detailed = relay.model.semanticScores(query.slice(0, 300), hit.engrams)
+        const top = [...detailed.entries()].sort((a, b) => b[1].score - a[1].score)[0]
+        if (top && top[1].score < 0.3) {
+          weakHint = `\n（⚠️ 以上条目相关性较弱（最高 ${top[1].score.toFixed(2)}）——图谱中可能没有与查询强相关的记忆，可换关键词重试或 engram_store 写入）`
+        }
+      } catch { /* 弱命中检测失败不阻塞 */ }
+      return hit.engrams.map((e) => entryLine(e, relay.store)).join('\n') + weakHint
     },
   })))
 
@@ -559,6 +571,9 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const linked = relay.store.getMany(
         node.links.map((t) => relay.store.byTitle(t)?.id ?? '').filter(Boolean),
       )
+      // v0.5 第四轮新 agent 实测：depends-on/references 边织了看不见 →
+      // open 邻接补「依赖/引用」展示（graph 层查询）
+      const deps = relay.graph.depsOf(node.id)
       const parts: string[] = []
       parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''} · ${node.state ?? 'episodic'})`)
       parts.push(node.summary)
@@ -570,6 +585,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       else parts.push('**后果**（因果 ↓）：（无）')
       if (linked.length > 0) parts.push(`**关联**（双向链接）：${linked.map((c) => `[[${c.title}]]`).join('、')}`)
       else parts.push('**关联**（双向链接）：（无）')
+      if (deps.length > 0) parts.push(`**依赖/引用**：${deps.map((c) => `[[${c.title}]]`).join('、')}`)
       return parts.join('\n')
     },
   })))

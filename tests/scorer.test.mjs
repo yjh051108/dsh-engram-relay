@@ -65,13 +65,16 @@ test('scorer: 语义桥——PCA 通道桥接跨词共现（缓存↔cache，纯
     const b = store.add({ kind: 'fact', layer: 'project', projectId: '/w', title: '缓存优化', summary: '缓存淘汰策略 LRU 与 TTL 配置', content: '', links: [], sessionId: null, turn: 2, causes: [], effects: [], importance: 0.5 })
     store.add({ kind: 'fact', layer: 'project', projectId: '/w', title: '无关主题', summary: '天气很好适合散步买菜做饭', content: '', links: [], sessionId: null, turn: 3, causes: [], effects: [], importance: 0.5 })
     const scorer = new SemanticScorer(store)
-    // 查询用「cache」（与 B 无词汇重叠）——桥应让 PCA 通道把 B 拉高
+    // 查询用「cache」（与 B 无词汇重叠）——桥应让共现通道把 B 拉高
     const scores = scorer.score('cache 命中率', [store.get(a.id), store.get(b.id), store.all().find((e) => e.title === '无关主题')])
-    const svdB = scores.get(b.id).svd
-    const svdA = scores.get(a.id).svd
-    assert.ok(svdA > 0.05, `锚点记忆 A 的 PCA 分数非零 (${svdA})`)
-    assert.ok(svdB > 0.05, `桥接：B 经「缓存↔cache」共现获得 PCA 语义分 (${svdB})`)
+    const coocB = scores.get(b.id).cooc
+    const coocA = scores.get(a.id).cooc
+    assert.ok(coocA > 0.05, `锚点记忆 A 的共现分数非零 (${coocA})`)
+    assert.ok(coocB > 0.05, `桥接：B 经「缓存↔cache」共现获得统计语义分 (${coocB})`)
     assert.ok(scores.get(b.id).score > 0, 'B 的融合分数非零（语义桥生效）')
+    // 无关记忆的共现分应低于桥接记忆
+    const coocU = scores.get(store.all().find((e) => e.title === '无关主题').id).cooc
+    assert.ok(coocU < coocB, `无关记忆共现分应低 (${coocU} < ${coocB})`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
