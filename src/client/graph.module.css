@@ -101,6 +101,11 @@
 }
 
 .svg {
+  /* ⚠️ v0.6 关键修复：absolute + inset:0 严格填满画布——height:100% 在
+     高度链断裂时回退到 viewBox 固有比例（宽度×900/620）把 svg 撑成超高
+     矩形 → 内容超出可视区、下面 1/3 被切掉（用户实测'偏上/需下滑'根因） */
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   display: block;
