@@ -109,9 +109,14 @@ export function defaultTags(layer: EngramLayer, projectId: string | null): strin
  * 渲染时降级为仅标题（不占注入预算），图谱仍可检索、命中即复苏。
  */
 export function dormantOf(e: EngramNode, now: number = Date.now()): boolean {
-  if (e.hits >= 3) return false
+  if (e.hits >= 3 && e.kind !== 'event') return false
   const last = e.reinforces && e.reinforces.length > 0 ? e.reinforces[e.reinforces.length - 1] : e.createdAt
-  return (now - last) / 86400000 >= 30
+  // ⚠️ event（过程性记忆）客观过时：创建超过 30 天直接沉睡——事件发生即
+  // 结束，被检索命中（hits≥3）不改变"已过时"（用户实测：'重载失败'这类
+  // 已解决的过程记录不该永久新鲜）；非 event 按最后强化判定（活的记忆
+  // 靠使用保鲜）
+  const anchor = e.kind === 'event' ? e.createdAt : last
+  return (now - anchor) / 86400000 >= 30
 }
 
 /** 废止判定（版本链）：被新版本取代，退出检索/注入，可追溯。 */

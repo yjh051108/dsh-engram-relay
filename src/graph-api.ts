@@ -14,7 +14,7 @@
 
 import type { Context as CordisContext } from 'cordis'
 
-import { isVisible, type EngramNode } from './engram/store.js'
+import { isVisible, isSuperseded, type EngramNode } from './engram/store.js'
 import type { EngramRelay } from './relay.js'
 
 type HttpCtx = CordisContext & {
@@ -83,9 +83,10 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const viewer = resolveViewer(ctx, url, relay)
 
-      // GET /graph：全部可见节点 + 边（v0.4：项目不隔离，全可见融会贯通）
+      // GET /graph：当前有效节点 + 边（v0.6：**过滤废止旧版与待确认**——
+      // 版本链旧版/修订残留不再出现在图谱，兑现"过时记忆淘汰"）
       if (req.method === 'GET' && url.pathname === '/engram-relay/api/graph') {
-        const visible = relay.store.all().filter((n) => isVisible(n, viewer))
+        const visible = relay.store.all().filter((n) => isVisible(n, viewer) && !isSuperseded(n) && n.status !== 'pending')
         const ids = new Set(visible.map((n) => n.id))
         const edges: EdgeView[] = []
         const seen = new Set<string>()

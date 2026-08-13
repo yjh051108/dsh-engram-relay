@@ -541,18 +541,23 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const color = cid !== undefined ? clusterColor(cid) : projectColor(n.projectId)
               const selected = selectedId === n.id
               const isSemantic = n.state === 'semantic'
-              // 半径：度中心性为主（hub 大），semantic 加成，重要度微调
+              // v0.6 事件弱化：event（过程性记忆）缩小 + 降透明——知识
+              // （fact/decision/note）突出，过时过程不抢眼
+              const isEvent = n.kind === 'event'
+              // 半径：度中心性为主（hub 大），semantic 加成，重要度微调，
+              // event 弱化（×0.7）
               const deg = degreeOf.get(n.id) ?? 0
-              const rBase = 7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5 + (selected ? 2 : 0)
+              const rBase = (7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5) * (isEvent ? 0.7 : 1) + (selected ? 2 : 0)
               // ⚠️ 缩放补偿：屏幕大小 = 世界值 × (svgWidth/vw) → 要屏幕
               // 恒定，世界坐标半径 = 屏幕基准 ÷ zoomScale（放大后节点/文字
               // 保持屏幕大小，看的是更稀疏更清楚，不是更大）
               const r = rBase / zc
               const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
               const dimmed = highlight !== null && !inHighlight
-              // 入场淡入（动画期间节点依次出现）
+              // 入场淡入（动画期间节点依次出现）+ 事件弱化（透明度低一档）
               const fade = fadeOf(n.id)
-              const opacity = (dimmed ? 0.12 : 1) * fade
+              const eventDim = isEvent ? 0.55 : 1
+              const opacity = (dimmed ? 0.12 : 1) * fade * eventDim
               return (
                 <g
                   key={n.id}
