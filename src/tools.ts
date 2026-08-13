@@ -22,7 +22,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { EngramRelay } from './relay.js'
 import { ENGRAM_LAYERS, isVisible, isSuperseded, type EngramKind, type EngramLayer, type EngramNode, type EngramStore } from './engram/store.js'
-import type { CausalEdgeKind } from './engram/causal.js'
+import type { CausalEdgeKind, CausalGraph } from './engram/causal.js'
 
 type ToolsContext = CordisContext & { tools: ToolRegistry }
 
@@ -136,20 +136,20 @@ async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<st
 /** 入口行渲染（[[标题]][层] 摘要 + **因果/链接邻接**——渐进披露入口层
  *  就给导航信息：↑因/↓果（因果链）→ 关联（双向链接），模型看到即可
  *  决定顺着哪条边探究（engram_open 展开正文），不用盲目逐个 open。 */
-function entryLine(e: EngramNode, store: EngramStore): string {
+function entryLine(e: EngramNode, store: EngramStore, graph?: CausalGraph): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
   // 状态标注（新 agent 判断可信度：semantic=被反复巩固的知识，episodic=新写事件）
   const stateMark = e.state === 'semantic' ? '[语义]' : ''
   // 废止标注（防御性：wake 已过滤，但传播路径可能带入）
   const supersededMark = isSuperseded(e) ? '（已废止）' : ''
-  return `- [[${e.title}]][${e.layer}]${stateMark}${pendingMark}${supersededMark} ${e.summary}${neighborsOf(e, store)}`
+  return `- [[${e.title}]][${e.layer}]${stateMark}${pendingMark}${supersededMark} ${e.summary}${neighborsOf(e, store, graph)}`
 }
 
-/** 邻接摘要：↑因/↓果/关联（id 解析标题 + 按重要度排序 + 截断——入口
+/** 邻接摘要：↑因/↓果/关联/依赖（id 解析标题 + 按重要度排序 + 截断——入口
  *  层只给导航线索，别让因果链淹没摘要；展开留给 engram_open）。
  *  ⚠️ 废止标注紧跟各自链接（第六轮新 agent 实测：行尾统一标注无法判断
- *  属于哪个链接）。 */
-function neighborsOf(e: EngramNode, store: EngramStore): string {
+ *  属于哪个链接）。graph 可选：传入时补「⇄依赖」段（depends-on 边）。 */
+function neighborsOf(e: EngramNode, store: EngramStore, graph?: CausalGraph): string {
   const parts: string[] = []
   const nodeOf = (id: string): EngramNode | undefined => store.get(id)
   const titlesOf = (ids: string[], max: number): string[] => {
@@ -174,6 +174,15 @@ function neighborsOf(e: EngramNode, store: EngramStore): string {
   if (causes.length > 0) parts.push(`↑因:${render(causes)}${(e.causes?.length ?? 0) > 4 ? '…' : ''}`)
   if (effects.length > 0) parts.push(`↓果:${render(effects)}${(e.effects?.length ?? 0) > 4 ? '…' : ''}`)
   if (links.length > 0) parts.push(`→:${render(links)}`)
+  // 依赖/引用边（depends-on/references——graph 传入时展示；第九轮新 agent
+  // 建议：入口层也该看到，否则只靠 depends-on 织边的节点在 recall 里"无链接"）
+  if (graph) {
+    const deps = graph.depsOf(e.id)
+    if (deps.length > 0) {
+      const depTitles = deps.slice(0, 3).map((n) => `[[${n.title}]]`)
+      parts.push(`⇄:${depTitles.join(' ')}${deps.length > 3 ? '…' : ''}`)
+    }
+  }
   return parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
 }
 
@@ -183,7 +192,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_recall：按需唤醒检索（跨会话分层准入） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（跨会话全可见，项目即标签）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + **因果/链接邻接**：↑因=前因/↓果=后果/→=双向链接）。**入口图例**：[[标题]][层]（[语义]=已固化知识）摘要。看到 [[标题]] 后由你判断：需要详情就 engram_open 展开，顺着邻接可继续探究（递归导航），不需要就直接用摘要作答。',
+    description: '主动唤醒记忆图谱入口（跨会话全可见，项目即标签）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + **邻接**：↑因=前因/↓果=后果/→=双向链接/⇄=依赖引用）。**入口图例**：[[标题]][层]（[语义]=已固化知识）（已废止）摘要。看到 [[标题]] 后由你判断：需要详情就 engram_open 展开，顺着邻接可继续探究（递归导航），不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',
@@ -222,7 +231,15 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
           weakHint = `\n（⚠️ 以上条目相关性较弱（最高 ${top[1].score.toFixed(2)}）——图谱中可能没有与查询强相关的记忆，可换关键词重试或 engram_store 写入）`
         }
       } catch { /* 弱命中检测失败不阻塞 */ }
-      return hit.engrams.map((e) => entryLine(e, relay.store)).join('\n') + weakHint
+      // 同名提示（第九轮新 agent 建议）：recall 结果里同名节点并列时提示
+      // （open 已有同名提示，入口层补一致）
+      const dupTitles = hit.engrams
+        .map((e) => e.title)
+        .filter((t, i, arr) => arr.indexOf(t) !== i)
+      const dupHint = dupTitles.length > 0
+        ? `\n（⚠️ 结果含同名节点（${[...new Set(dupTitles)].join('、')}）——用 engram_open 展开可看到是哪个版本）`
+        : ''
+      return hit.engrams.map((e) => entryLine(e, relay.store, relay.graph)).join('\n') + weakHint + dupHint
     },
   })))
 
@@ -739,6 +756,11 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         if (causes.length > 0) parts.push(`↑因:${renderTitles(causes)}${(current.causes?.length ?? 0) > 4 ? '…' : ''}`)
         if (effects.length > 0) parts.push(`↓果:${renderTitles(effects)}${(current.effects?.length ?? 0) > 4 ? '…' : ''}`)
         if (links.length > 0) parts.push(`→:${renderTitles(links)}`)
+        // 依赖/引用段（与 recall 入口一致——depends-on 边在入口可见）
+        const deps = relay.graph.depsOf(current.id)
+        if (deps.length > 0) {
+          parts.push(`⇄:${deps.slice(0, 3).map((n) => `[[${n.title}]]`).join(' ')}${deps.length > 3 ? '…' : ''}`)
+        }
         const nbr = parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
         lines.push(`- [[${current.title}]][${current.layer}]${stateMark}${pendingMark}${supersededMark} ${current.summary}${nbr}${dupMark}`)
         shown++
