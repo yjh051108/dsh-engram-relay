@@ -63,7 +63,6 @@ interface GraphViewProps {
 export function GraphView({ t, sessionId }: GraphViewProps) {
   const [data, setData] = useState<GraphData | null>(null)
   const [detail, setDetail] = useState<NodeDetail | null>(null)
-  const [filter, setFilter] = useState<string>('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   // 无限画布视口（viewBox 四元组）：世界坐标无限，视口自由缩放/平移。
@@ -100,14 +99,13 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  // 层过滤（确定性力导向布局在簇计算之后——布局需要 clusterOf）。
+  // 节点/边（v0.6：单一全局视图——无过滤按钮，一张图显示全部）
   const { nodes, edges } = useMemo(() => {
     if (data === null) return { nodes: [], edges: [] }
-    const visible = filter === 'all' ? data.nodes : data.nodes.filter((n) => n.layer === filter)
-    const ids = new Set(visible.map((n) => n.id))
+    const ids = new Set(data.nodes.map((n) => n.id))
     const visibleEdges = data.edges.filter((e) => ids.has(e.from) && ids.has(e.to))
-    return { nodes: visible, edges: visibleEdges }
-  }, [data, filter])
+    return { nodes: data.nodes, edges: visibleEdges }
+  }, [data])
 
   // 自发簇（v0.4 终态优先）：前端对边做连通分量——簇由链接/因果密度
   // 自然形成（不依赖项目标签）。项目标签只作簇名（硬编码簇 = 脚手架；
@@ -146,72 +144,24 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterList = clusters.list
   const clusterOf = clusters.clusterOf
 
-  // ---- 实时演化布局（v0.6 用户要求：**实时渲染，不先算完再做动画**）----
-  // 增量力导向模拟器：节点按 createdAt 时序分帧加入（从中心弹出被斥力
-  // 推开），每帧 step(60) 实时演化渲染——加载即渲染、边加载边生长
-  // （Obsidian 观感），**无"先算完布局"的等待**。alpha 回升温和避免
-  // 旧节点乱晃；速度衰减 0.6 更平滑。
-  const [layout, setLayout] = useState<ForceLayout>(new Map())
-  const joinedAtRef = useRef(new Map<string, number>())
-  const simRef = useRef<ForceSimulator | null>(null)
-  useEffect(() => {
-    if (nodes.length === 0) {
-      setLayout(new Map())
-      return
-    }
-    setTarget(null) // 切换过滤/重新加载 → 重置运镜目标（越界检测接管）
-    const sim = createForceSimulator([], edges.map((e) => ({ from: e.from, to: e.to })), {
-      width: VIEW_W, height: VIEW_H,
+  // ---- 静态布局（v0.6 用户要求：**不要动画，一开始就显示全、秒显示**）----
+  // 确定性力导向一次性收敛（useMemo 缓存）；无动画/无生长/无运镜——
+  // 渲染即全图。性能：253 节点 500 迭代 ≈ 数十 ms。
+  const layout = useMemo(() => layoutForce(
+    nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
+    edges.map((e) => ({ from: e.from, to: e.to })),
+    {
+      width: VIEW_W, height: VIEW_H, iterations: 500,
       charge: -100,
       spring: 0.1,
       springLength: 110,
       collideRadius: 30,
       centerStrength: 0.08,
-      velocityDecay: 0.6,
       clusters: clusterOf.size > 0 ? clusterOf : undefined,
       clusterTarget: 110,
       clusterStrength: 0.04,
-    })
-    simRef.current = sim
-    joinedAtRef.current = new Map()
-    const sorted = [...nodes].sort((a, b) => a.createdAt - b.createdAt)
-    let idx = 0
-    let raf = 0
-    const tick = (): void => {
-      // 分帧加入（约 45 批——加载即渲染，无需等待）
-      const batch = Math.max(3, Math.ceil(nodes.length / 45))
-      for (let i = 0; i < batch && idx < sorted.length; i += 1, idx += 1) {
-        const n = sorted[idx]!
-        sim.addNode(n.id, 0.6 + n.importance)
-        joinedAtRef.current.set(n.id, performance.now())
-      }
-      // 每帧 60 迭代——平滑演化（之前 24 太糙会乱晃）
-      sim.step(60)
-      setLayout(sim.layout())
-      if (idx < sorted.length || sim.alpha() > 0.004) {
-        raf = requestAnimationFrame(tick)
-      }
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [nodes, edges, clusterOf])
-
-  // 节点生长（v0.6 "繁殖壮大"感）：加入后 350ms 内从 0.12 小点弹性
-  // 膨胀到 1.08 再回落 1（easeOutBack 微过冲）——"砰"地长出来
-  const growScaleOf = (id: string): number => {
-    const joined = joinedAtRef.current.get(id)
-    if (joined === undefined) return 1
-    const t = Math.min(1, (performance.now() - joined) / 350)
-    const c1 = 1.70158
-    const c3 = c1 + 1
-    const u = t - 1
-    return Math.max(0.12, 1 + c3 * u ** 3 + c1 * u ** 2)
-  }
-  const fadeOf = (id: string): number => {
-    const joined = joinedAtRef.current.get(id)
-    if (joined === undefined) return 1
-    return Math.min(1, (performance.now() - joined) / 350)
-  }
+    },
+  ), [nodes, edges, clusterOf])
 
   // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
   const degreeOf = useMemo(() => {
@@ -241,16 +191,14 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     return { nodeIds, edgeKeys }
   }, [selectedId, edges])
 
-  // ---- 闭环运镜系统（v0.6 用户建议：不开环瞬移——感知画面内外 +
-  // 平滑摄像头移动）----
-  // 目标视口计算（fitToCurrent：当前布局包围盒 ∪ 中心点——生成阶段
-  // 节点从中心弹出，中心必须始终在画面内）
+  // ---- 视口（v0.6：静态图——**一开始就显示全**，无运镜动画）----
+  // fitToCurrent：当前布局包围盒 ∪ 中心点（全图适配）
   const fitToCurrent = (): { vx: number; vy: number; vw: number; vh: number } | null => {
     const pts = nodes
       .map((n) => layout.get(n.id))
       .filter((p): p is ForcePoint => p !== undefined)
     if (pts.length === 0) return null
-    pts.push({ x: VIEW_W / 2, y: VIEW_H / 2 }) // 闭环：中心始终在画面内
+    pts.push({ x: VIEW_W / 2, y: VIEW_H / 2 }) // 中心始终在画面内
     const pad = 80
     const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
     const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
@@ -263,77 +211,19 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       vh: Math.max(150, maxY - minY),
     }
   }
-  const [target, setTarget] = useState<{ vx: number; vy: number; vw: number; vh: number } | null>(null)
-  const targetRef = useRef(target)
-  targetRef.current = target
   // fitToCurrent 的最新引用（拖拽 effect 的 onUp 闭包需要）
   const fitToCurrentRef = useRef(fitToCurrent)
   fitToCurrentRef.current = fitToCurrent
-  // 用户手动缩放/拖动 → 停止自动运镜（避免打架）；0.6s 无操作后恢复跟随
-  const lastUserOpRef = useRef(0)
-  const isUserControlled = (): boolean => Date.now() - lastUserOpRef.current < 600
-  // 闭环：目标视口变化（越界/回全图）→ PID 式指数平滑运镜（时间常数
-  // 0.25s，等效 PD：平滑逼近无振荡，不瞬移）
+  // 数据就绪 → 一次性 fit（瞬移，秒显示全图）
+  const didInitFitRef = useRef(false)
   useEffect(() => {
-    if (target === null) return
-    let raf = 0
-    let last = performance.now()
-    const tick = (now: number): void => {
-      const dt = Math.min(0.1, (now - last) / 1000)
-      last = now
-      // 用户正在操作 → 暂停跟随（等用户停手）
-      if (isUserControlled()) {
-        raf = requestAnimationFrame(tick)
-        return
-      }
-      setView((v) => {
-        const k = 1 - Math.exp(-dt / 0.25) // 指数平滑（PD 等效）
-        const nv = {
-          vx: v.vx + (target.vx - v.vx) * k,
-          vy: v.vy + (target.vy - v.vy) * k,
-          vw: v.vw + (target.vw - v.vw) * k,
-          vh: v.vh + (target.vh - v.vh) * k,
-        }
-        const dv = Math.abs(nv.vx - target.vx) + Math.abs(nv.vy - target.vy)
-          + Math.abs(nv.vw - target.vw) + Math.abs(nv.vh - target.vh)
-        if (dv < 1) {
-          // 已到位：直接设为目标并停（避免无限逼近）
-          return target
-        }
-        return nv
-      })
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [target])
-  // 闭环越界检测（生成阶段绝对显示全）：实时演化期间每帧检查当前
-  // 布局是否都在画面内（含余量）——越界则更新目标视口（视口平滑
-  // 跟随生长中的网络展开）
-  useEffect(() => {
-    if (isUserControlled()) return
-    const pts = nodes
-      .map((n) => layout.get(n.id))
-      .filter((p): p is ForcePoint => p !== undefined)
-    if (pts.length === 0) return
-    const pad = 40
-    const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
-    const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
-    const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
-    const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
-    const cur = viewRef.current
-    // 闭环判定：当前画面（含 padding 余量）是否完整包含所有节点
-    const inside = cur.vx <= minX && cur.vx + cur.vw >= maxX && cur.vy <= minY && cur.vy + cur.vh >= maxY
-    if (!inside) {
-      setTarget({
-        vx: minX,
-        vy: minY,
-        vw: Math.max(200, maxX - minX),
-        vh: Math.max(150, maxY - minY),
-      })
-    }
+    if (didInitFitRef.current) return
+    if (nodes.length === 0 || layout.size === 0) return
+    didInitFitRef.current = true
+    const f = fitToCurrent()
+    if (f !== null) setView(f)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [layout, nodes])
+  }, [nodes, layout])
 
   // 簇大圆：质心 + 半径（≥2 节点才画，避免视觉噪音）
   const clusterCircles = useMemo(() => clusterList
@@ -380,7 +270,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     const onWheel = (e: WheelEvent): void => {
       if (!e.ctrlKey) return
       e.preventDefault()
-      lastUserOpRef.current = Date.now() // 用户操作 → 暂停自动运镜
       const rect = svg.getBoundingClientRect()
       const mx = (e.clientX - rect.left) / rect.width // 鼠标归一化位置 [0,1]
       const my = (e.clientY - rect.top) / rect.height
@@ -401,17 +290,18 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }, [loading, nodes.length])
 
   // 拖拽平移视口（无限画布：空白处按下拖动 = 世界跟随鼠标）。
-  // 节点/边上的按下不启动拖拽——保留点击高亮；空白按下同时取消高亮
-  // （v0.5 用户要求：点空白回到总图，不卡在选中态）。
+  // ⚠️ v0.6 修"点空白不取消高亮"bug：点击目标是背景 rect/line 等
+  // 子元素（不是 svg 本体）时旧判断失效——改为**非节点元素即空白**
+  // （节点 g 带 data-node-id 属性，点击节点不触发拖拽/取消）
   useEffect(() => {
     const svg = svgRef.current
     if (svg === null) return
     const onDown = (e: MouseEvent): void => {
       if (e.button !== 0) return
       const target = e.target as Element
-      if (target !== svg && target.tagName !== 'svg') return // 空白处才拖拽
-      setSelectedId(null) // 点空白取消高亮（回到总图）
-      lastUserOpRef.current = Date.now() // 用户操作 → 暂停自动运镜
+      if (target.closest?.('[data-node-id]')) return // 节点上的按下不拖拽
+      if (target.closest?.('.' + (styles as unknown as Record<string, string>).detail)) return // 详情面板
+      setSelectedId(null) // 空白按下取消高亮
       const rect = svg.getBoundingClientRect()
       dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect, moved: false }
       e.preventDefault()
@@ -432,11 +322,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     const onUp = (): void => {
       const d = dragRef.current
       dragRef.current = null
-      // 单击空白（无位移）= 取消高亮 + **运镜回全图**（v0.6 用户要求）
+      // 单击空白（无位移）= 取消高亮 + **直接回全图**（瞬移，v0.6）
       if (d !== null && !d.moved) {
         setSelectedId(null)
         const f = fitToCurrentRef.current()
-        if (f !== null) setTarget(f)
+        if (f !== null) setView(f)
       }
     }
     svg.addEventListener('mousedown', onDown)
@@ -460,23 +350,12 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   return (
     <div className={styles.root}>
       <div className={styles.toolbar}>
-        <div className={styles.filters} title={t('graph.filter.title')}>
-          {['all', 'global', 'project'].map((f) => (
-            <button
-              key={f}
-              className={`${styles.filterBtn} ${filter === f ? styles.filterActive : ''}`}
-              onClick={() => setFilter(f)}
-              title={f === 'all' ? t('graph.filter.title') : `${t(`graph.filter.${f}`)} — ${t('graph.filter.title')}`}
-            >
-              {t(`graph.filter.${f}`)}
-            </button>
-          ))}
-        </div>
+        {/* v0.6：单一全局视图——无过滤按钮（给 AI 用，不是给人用） */}
         <div className={styles.meta}>
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => { const f = fitToCurrent(); if (f !== null) setTarget(f) }}>{t('graph.reset')}</button>
+          <button className={styles.refresh} onClick={() => { const f = fitToCurrent(); if (f !== null) setView(f) }}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
@@ -550,8 +429,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const key = `${e.from}|${e.to}|${e.kind}`
               const isHighlighted = highlight !== null && highlight.edgeKeys.has(key)
               const dimmed = highlight !== null && !isHighlighted
-              // 入场淡入：两端节点都出现后边才淡入（min 两端 fade）
-              const edgeFade = Math.min(fadeOf(e.from), fadeOf(e.to))
               const baseOpacity = dimmed ? 0.04 : isHighlighted ? 0.95 : 0.35
               if (e.kind === 'causes') {
                 const src = nodes.find((n) => n.id === e.from)
@@ -564,7 +441,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                     key={key}
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                     stroke={isHighlighted ? '#ffd166' : color}
-                    strokeOpacity={baseOpacity * edgeFade}
+                    strokeOpacity={baseOpacity}
                     strokeWidth={(isHighlighted ? 2.5 : 1.5) / zc}
                     className={styles.edge}
                   />
@@ -575,7 +452,7 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
                   key={key}
                   x1={a.x} y1={a.y} x2={b.x} y2={b.y}
                   stroke={isHighlighted ? '#ffd166' : '#aab2c0'}
-                  strokeOpacity={baseOpacity * edgeFade}
+                  strokeOpacity={baseOpacity}
                   strokeWidth={(isHighlighted ? 2 : 1) / zc}
                   strokeDasharray="5 4"
                   className={styles.edge}
@@ -606,24 +483,19 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               const r = rBase / zc
               const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
               const dimmed = highlight !== null && !inHighlight
-              // 入场淡入（动画期间节点依次出现）+ 事件弱化（透明度低一档）
-              const fade = fadeOf(n.id)
+              // 事件弱化（透明度低一档——v0.6 静态渲染，无动画淡入）
               const eventDim = isEvent ? 0.55 : 1
-              const opacity = (dimmed ? 0.12 : 1) * fade * eventDim
-              // 弹性生长缩放（v0.6："自我繁殖壮大"感——从 0.12 小点
-              // 膨胀到 1.08 再回落 1，easeOutBack 微过冲）
-              const grow = growScaleOf(n.id)
+              const opacity = (dimmed ? 0.12 : 1) * eventDim
               return (
                 <g
                   key={n.id}
+                  data-node-id={n.id}
                   className={`${styles.node} ${isSemantic ? styles.nodeSemantic : ''}`}
                   onClick={() => { setSelectedId(n.id); setDetail(null) }}
                   onDoubleClick={() => openDetail(n)}
                   role="button"
                   tabIndex={0}
                   opacity={opacity}
-                  transform={`translate(${p.x}, ${p.y}) scale(${grow}) translate(${-p.x}, ${-p.y})`}
-                  style={{ transition: 'opacity 0.2s' }}
                 >
                   {isSemantic && (
                     <circle cx={p.x} cy={p.y} r={r + 9 / zc} fill="url(#halo-grad)" pointerEvents="none" />
