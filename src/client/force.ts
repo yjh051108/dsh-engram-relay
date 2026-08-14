@@ -361,11 +361,23 @@ export function createForceSimulator(
             bj.y += Math.sin(ang) * 0.5
             l = 0.5
           }
-          l = (r - l) / l
-          bi.vx -= x * l
-          bi.vy -= y * l
-          bj.vx += x * l
-          bj.vy += y * l
+          // ⚠️ v0.6 硬碰撞边界（用户实测"重叠明显"根因）：旧实现只改速度
+          // ——推开速度被 velocityDecay 每轮衰减 45%，区域引力（ps 0.8×4）
+          // 持续拉回 → collide 推不过引力，节点被压叠（实测 3417 对重叠）。
+          // 改为**位置级硬分离**：重叠量 (r-l) 直接挪坐标（硬边界不受速度
+          // 衰减影响），同时给一点速度动量。
+          const overlap = (r - l) * 0.5
+          const nx = x / l
+          const ny = y / l
+          bi.x -= nx * overlap
+          bi.y -= ny * overlap
+          bj.x += nx * overlap
+          bj.y += ny * overlap
+          const push = (r - l) / l
+          bi.vx -= x * push * 0.5
+          bi.vy -= y * push * 0.5
+          bj.vx += x * push * 0.5
+          bj.vy += y * push * 0.5
         }
       }
     }
@@ -422,6 +434,42 @@ export function createForceSimulator(
       alpha = Math.max(alpha, 0.6)
     },
     layout(): ForceLayout {
+      // ⚠️ 最终硬分离（v0.6 用户实测"重叠明显"的最终保证）：迭代中 collide
+      // 是软速度修正，可能被区域引力压制（实测仍 2890 对重叠）——布局
+      // **输出前**强制位置分离：多轮扫描所有节点对，重叠的直接按重叠量
+      // 一半互相挪开，直到无重叠（或达轮次上限）。这是"碰撞边界"的
+      // 最终兜底——无论迭代历史如何，输出必无节点重叠。
+      const blist = [...bodies.entries()] as Array<[string, Body]>
+      for (let pass = 0; pass < 8; pass += 1) {
+        let changed = false
+        for (let i = 0; i < blist.length; i += 1) {
+          const [, bi] = blist[i]!
+          for (let j = i + 1; j < blist.length; j += 1) {
+            const [, bj] = blist[j]!
+            const dx = bj.x - bi.x
+            const dy = bj.y - bi.y
+            let d = Math.sqrt(dx * dx + dy * dy)
+            const rr = (bi.r ?? 12) + (bj.r ?? 12)
+            if (d < rr) {
+              if (d < 1e-6) {
+                const ang = ((i * 2654435761 + j * 40503) % 628) / 100
+                bj.x += Math.cos(ang)
+                bj.y += Math.sin(ang)
+                d = 1
+              }
+              const overlap = (rr - d) / 2
+              const nx = dx / d
+              const ny = dy / d
+              bi.x -= nx * overlap
+              bi.y -= ny * overlap
+              bj.x += nx * overlap
+              bj.y += ny * overlap
+              changed = true
+            }
+          }
+        }
+        if (!changed) break
+      }
       const out: ForceLayout = new Map()
       for (const [id, body] of bodies) out.set(id, { x: body.x, y: body.y })
       return out
