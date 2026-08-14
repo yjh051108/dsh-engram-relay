@@ -1,7 +1,7 @@
-{
+﻿{
   "name": "@dsh-external/dsh-engram-relay",
-  "version": "0.1.1",
-  "description": "大 engram 小 KV：外置 engram 转接层（跨会话分层记忆：global/project/session，AI 自主决策归属 + 因果链接索引 + 渐进披露 + 主动唤醒），为 DSH 实现超长上下文记忆稀疏路由，与官方 compact 共存（官方腾 KV，engram 保细节）",
+  "version": "0.1.2",
+  "description": "澶?engram 灏?KV锛氬缃?engram 杞帴灞傦紙璺ㄤ細璇濆垎灞傝蹇嗭細global/project/session锛孉I 鑷富鍐崇瓥褰掑睘 + 鍥犳灉閾炬帴绱㈠紩 + 娓愯繘鎶湶 + 涓诲姩鍞ら啋锛夛紝涓?DSH 瀹炵幇瓒呴暱涓婁笅鏂囪蹇嗙█鐤忚矾鐢憋紝涓庡畼鏂?compact 鍏卞瓨锛堝畼鏂硅吘 KV锛宔ngram 淇濈粏鑺傦級",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -114,3 +114,4 @@
     "sim:causal": "node tests/simulate-causal.mjs"
   }
 }
+
