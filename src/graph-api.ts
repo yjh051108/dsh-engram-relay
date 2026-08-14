@@ -13,6 +13,9 @@
  */
 
 import type { Context as CordisContext } from 'cordis'
+import { appendFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 import { isVisible, isSuperseded, type EngramNode } from './engram/store.js'
 import type { EngramRelay } from './relay.js'
@@ -114,6 +117,18 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
           total: visible.length,
           viewer,
         })
+        return
+      }
+
+      // POST /graph-log：浏览器运行时自检日志（项目圆重叠等——宿主可读，
+      // 不再靠用户描述猜）
+      if (req.method === 'POST' && url.pathname === '/engram-relay/api/graph-log') {
+        let body = ''
+        for await (const chunk of req) body += String(chunk)
+        try {
+          appendFileSync(join(homedir(), '.dsh', 'super-injector', 'engram-graph.log'), body)
+        } catch { /* 日志写失败不阻塞 */ }
+        sendJson(res, 200, { ok: true })
         return
       }
 

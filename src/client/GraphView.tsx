@@ -213,7 +213,10 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     && p.y >= view.vy - margin && p.y <= view.vy + view.vh + margin
   // ② 缩小隐藏标签：zoomScale < 0.35（标签屏幕 <4px 无意义）不渲染 text
   //    ——缩小时少 ~1/3 元素
-  const showLabels = zoomScale >= 0.35
+  // ⚠️ 阈值 0.35→1.0（v0.6 用户实测"严重重叠"真因：fit 全显时 zoomScale
+  // ≈0.65 > 0.35——几百个标签在缩小态全部显示糊成一团；放大到 1x 以上
+  // （节点屏幕 ≈12px）才显示标签，间距够不糊）
+  const showLabels = zoomScale >= 1.0
 
   // 选中高亮（v0.5：**单击节点只高亮延展边，不弹详情框**——详情改双击
   // 打开；点空白取消高亮回到总图）。邻居边/邻居节点高亮，其余淡出。
@@ -294,6 +297,24 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       const label = String(pid).split(/[\\/]/).pop() || '项目'
       out.push({ cx, cy, radius, label, color: projectColor(pid), multi: false })
     }
+    // ⚠️ 运行时重叠自检（v0.6：写日志文件 ~/.dsh/super-injector/engram-graph.log
+    // ——宿主能读，不再靠用户描述猜）
+    try {
+      const overlaps: string[] = []
+      for (let i = 0; i < out.length; i += 1) {
+        for (let j = i + 1; j < out.length; j += 1) {
+          const a = out[i]!, b = out[j]!
+          const d = Math.hypot(a.cx - b.cx, a.cy - b.cy)
+          if (d < a.radius + b.radius) {
+            overlaps.push(`[${a.label}]↔[${b.label}] 圆心距${d.toFixed(0)}<半径和${(a.radius + b.radius).toFixed(0)}`)
+          }
+        }
+      }
+      if (overlaps.length > 0) {
+        const line = `[${new Date().toISOString()}] 项目圆重叠 ${overlaps.length} 对: ${overlaps.join('; ')}\n`
+        void fetch('/engram-relay/api/graph-log', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: line })
+      }
+    } catch { /* 自检失败不阻塞 */ }
     return out
   }, [nodes, layout])
 
