@@ -53,6 +53,8 @@ export interface Config {
     tauTime: number;
     tauCause: number;
     maxNodes: number;
+    lessonMinScore: number;
+    lessonBudgetTokens: number;
 }
 export declare const Config: z<Config>;
 export declare function apply(ctx: Context, config: Config): void;

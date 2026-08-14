@@ -72,7 +72,9 @@ export declare class EngramWakeEngine {
     }): Promise<WakeHit>;
     /** 唤醒采样落盘：storeDir/wake-samples.jsonl（轮转：>8MB 时归档为 .1）。 */
     private appendSample;
-    /** 渲染记忆注入段（动态预算：按巩固状态分级——semantic 完整入口、episodic 标题+摘要、dormant 仅标题）。 */
+    /** 渲染记忆注入段（动态预算：按巩固状态分级——semantic 完整入口、episodic 标题+摘要、dormant 仅标题）。
+     *  教训类节点（tags 含「教训:」）用独立预算（lessonBudgetTokens）渲染 + ⚠️ 标记，
+     *  不挤占普通记忆预算（教训通道与主注入预算隔离）。 */
     renderInjection(budgetTokens: number): string;
     /** 供 status 工具读取。 */
     lastWake(): WakeHit;

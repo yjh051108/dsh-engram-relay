@@ -45,6 +45,9 @@ export declare function defaultTags(layer: EngramLayer, projectId: string | null
 export declare function dormantOf(e: EngramNode, now?: number): boolean;
 /** 废止判定（版本链）：被新版本取代，退出检索/注入，可追溯。 */
 export declare function isSuperseded(e: EngramNode): boolean;
+/** 教训判定（教训通道）：tags 含「教训:」前缀（命名空间约定，如 教训:代码）。
+ * 教训类记忆在唤醒时走独立低阈值席位（见 wake.ts lesson channel）。 */
+export declare function isLesson(e: EngramNode | undefined | null): boolean;
 /** 渐进披露层级。 */
 export interface EngramNode {
     id: string;
