@@ -123,18 +123,20 @@ dsh --profile web --dump-config
 
 ## 本项目约定
 
-- **Node 侧唯一第三方运行时依赖**：`@huggingface/transformers`（+`onnxruntime-node`），
-  只在 TS ONNX 嵌入路径懒 import。**嵌入编码降级链**：TS ONNX（包内 int8 模型
-  `model/bge-small-zh`，免 Python）→ Python 服务（spawn `python -m engram_model.server`）
-  → 重要度兜底。除此之外只 import 闭包内包（cordis / @deepseek-ai/* / schemastery）+
-  node: 内置，不要新增 npm 依赖（实装时 checkout 闭包不包含它们）。
+- **核心语义引擎 = SemanticScorer 三通道纯算法**（词汇 n-gram Jaccard + 词频 /
+  图语义传播 / PCA 共现谱分解）——**零外部模型、零第三方依赖、确定性可解释**，
+  这是算法特色，勿在文档里把它写成"bge 精排"。**可选向量缓存增强**（embedRaw 补分用）：
+  TS ONNX（`@huggingface/transformers` 懒 import + 包内 int8 `model/bge-small-zh`）
+  → Python 服务（spawn `python -m engram_model.server`）。除此之外只 import
+  闭包内包（cordis / @deepseek-ai/* / schemastery）+ node: 内置，不要新增 npm 依赖
+  （实装时 checkout 闭包不包含它们）。
 - **Python 侧**（`python/engram_model/`）：bge 嵌入编码（embed op，懒加载，
   路径取配置 embedModel 或环境变量 ENGRAM_EMBED_MODEL）+ 遗留 0.6B op
   （model.py 等仅保留作参考，0.6B 已移除，load 对缺失目录返回 loaded:false）。
   JSON 行协议服务必须 UTF-8 三流（Windows 管道 GBK 会破坏中文 JSON）。
-- **混合检索**（wake.ts）：哈希粗筛（store.lookup）→ embedder 余弦精排
-  （relay-model.embed）→ 因果传播 → 分层稀疏选择；embedder 缺失/抛错依次
-  降级 scorer → 重要度，哈希命中永不因打分器缺失被丢弃。
+- **混合检索**（wake.ts）：哈希粗筛（store.lookup）→ 三通道纯算法精排
+  （relay-model.embed → SemanticScorer）→ 因果传播 → 分层稀疏选择；
+  哈希命中永不因打分缺失被丢弃。
 - **与官方 compact 共存**：不阻止、不替代 `dsh-compact-basic`（它负责腾 KV）；
   engram 在 `agent/turn-stopping` 实时留底（细节保真，可唤醒找回）。
 - 工具 contributes 声明（dsh.plugin.json / dshx.contributes）必须与注册一致（契约校验）。

@@ -2,13 +2,23 @@
 
 本项目版本与仓库提交对应，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 0.1.1 安全修复 + 文档修正（2026-08-14）
+
+- **修复上游高危依赖**：Dependabot 报 `sharp <0.35.0`（libvips CVE-2026-33327/33328/35590/35591，
+  经 `@huggingface/transformers` 可选依赖引入）。transformers 全系列（3.x/4.x）仍声明
+  `sharp ^0.34.x`，上游无直接可用修复 → 采用 npm `overrides` 强制 `sharp ^0.35.0`（现装 0.35.3）
+- 验证：`npm audit` 0 漏洞；ONNX 嵌入真实链路冒烟通过（512 维，sharp 仅图像路径用到，
+  本插件文本嵌入路径不加载 sharp，覆盖无运行时风险）
+- **文档修正**：明确算法特色——核心语义引擎 = 三通道纯算法（词汇/图/PCA 共现，零模型），
+  bge/ONNX/Python 仅为可选向量缓存增强（README/AGENTS/配置描述全部对齐）
+
 ## 0.1.0 开源发布（2026-08-13）
 
 - 仓库公开（`dsh-external/dsh-engram-relay`）：去 `private`、补 repository/homepage/bugs/keywords
 - 开源卫生：清除全部开发者本机绝对路径（`cordis.patch.yml` / `src/index.ts` /
   python 脚本 / tests 的默认值改为环境变量或包内相对路径）；内部装机文档移出仓库
-- 开箱即用：`embedModel` 留空默认走包内 int8 bge 模型（TS ONNX，免 Python），
-  配置/环境变量可覆盖为本地 fp32 模型
+- 开箱即用：核心语义引擎 = 三通道纯算法（零模型、零依赖）；`embedModel` 留空即推荐形态，
+  可选增强（向量缓存）走包内 int8 bge（TS ONNX）或本地 fp32 模型
 - 元数据对齐：`dsh.plugin.json` 与 `dshx.contributes.tools` 补齐全部 13 个工具
   （新增 `engram_propose` / `engram_confirm` / `engram_reject` / `engram_weave`）
 - 图谱 UI：碰撞边界硬分离（位置级分离 + 输出前多轮扫描兜底，修节点重叠）
