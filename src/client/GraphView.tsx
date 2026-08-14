@@ -1,4 +1,4 @@
-﻿/**
+/**
  * GraphView — 记忆图谱可视化（DSH 会话页「图谱」Tab）。
  *
  * 数据面：host 的 /engram-relay/api/graph（分层准入：global + 本目录
@@ -158,8 +158,17 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   const clusterOf = clusters.clusterOf
 
   // ---- 静态布局（v0.6：一开始就显示全、秒显示；布局区域跟随容器）----
-  // 迭代 250（实测 292 节点 500 迭代 81ms / 250 迭代 45ms——布局质量
-  // 足够，减半提速；初始按簇散布收敛快）
+  // 节点度（链接数——hub 节点大小；⚠️ 必须在 layout 之前——layout 需要
+  // 它算节点碰撞半径，TDZ 会崩）
+  const degreeOf = useMemo(() => {
+    const deg = new Map<string, number>()
+    for (const e of edges) {
+      deg.set(e.from, (deg.get(e.from) ?? 0) + 1)
+      deg.set(e.to, (deg.get(e.to) ?? 0) + 1)
+    }
+    return deg
+  }, [edges])
+
   const layout = useMemo(() => {
     // ⚠️ 项目引力分组：**所有节点入组**（null 项目归 '__solo__' 组——
     // 通用节点若不参与项目引力，会被斥力散布全图、把布局纵向撑爆
@@ -169,23 +178,27 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
       projectGroups.set(n.id, n.projectId ?? '__solo__')
     }
     return layoutForce(
-      nodes.map((n) => ({ id: n.id, weight: 0.6 + n.importance })),
+      // ⚠️ 传节点半径（v0.6"碰撞边界"：collide 按实际半径——hub 节点
+      // 半径 ~22，固定 12 会互相压叠）
+      nodes.map((n) => {
+        const deg = degreeOf.get(n.id) ?? 0
+        const isSem = n.state === 'semantic'
+        const isEvt = n.kind === 'event'
+        const rBase = (7 + Math.min(9, deg * 1.2) + (isSem ? 3 : 0) + n.importance * 1.5) * (isEvt ? 0.7 : 1)
+        return { id: n.id, weight: 0.6 + n.importance, radius: Math.max(12, rBase) }
+      }),
       edges.map((e) => ({ from: e.from, to: e.to })),
       {
         width: canvasSize.w, height: canvasSize.h, iterations: 250,
         charge: -100,
         spring: 0.1,
         springLength: 110,
-        // ⚠️ collide 30→22（v0.6：大项目节点多，30 的防撞半径在窄切片里
-        // 垂直堆叠爆高——22 是节点可辨的最小安全间距）
         collideRadius: 22,
         centerStrength: 0.08,
         clusters: clusterOf.size > 0 ? clusterOf : undefined,
         clusterTarget: 110,
         clusterStrength: 0.04,
         projectGroups: projectGroups.size > 0 ? projectGroups : undefined,
-        // ps=0.4（自视扫描：dsh 聚成 178 半径、重叠 3/15；0.24 时 dsh
-        // 286 半径跨行重叠 7 对）
         projectStrength: 0.8,
       },
     )
@@ -201,16 +214,6 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   // ② 缩小隐藏标签：zoomScale < 0.35（标签屏幕 <4px 无意义）不渲染 text
   //    ——缩小时少 ~1/3 元素
   const showLabels = zoomScale >= 0.35
-
-  // 节点度（链接数——取经 Obsidian Dynamic-Node-Size：hub 节点大小=骨架）
-  const degreeOf = useMemo(() => {
-    const deg = new Map<string, number>()
-    for (const e of edges) {
-      deg.set(e.from, (deg.get(e.from) ?? 0) + 1)
-      deg.set(e.to, (deg.get(e.to) ?? 0) + 1)
-    }
-    return deg
-  }, [edges])
 
   // 选中高亮（v0.5：**单击节点只高亮延展边，不弹详情框**——详情改双击
   // 打开；点空白取消高亮回到总图）。邻居边/邻居节点高亮，其余淡出。
@@ -231,10 +234,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
   }, [selectedId, edges])
 
   // ---- 视口（v0.6：静态图——**一开始就显示全**，无运镜动画）----
-  // fitToCurrent：**画布比例自适应**——横向铺满布局宽，纵向按画布比例
-  // 居中（布局高可能超画布——大项目圆是物理必然；超出部分靠缩放/平移
-  // 查看，无限画布的意义；v0.6 自视实测：布局高 234% 远超画布，旧 fit
-  // 全显导致节点挤中间方块）
+  // fitToCurrent：**包围盒全显**（v0.6 布局已收敛到画布内 94%——不再用
+  // 裁剪式画布比例 fit，那会纵向裁掉行 0/行 1 圆边缘，看起来"挤/叠"）
   const fitToCurrent = (): { vx: number; vy: number; vw: number; vh: number } | null => {
     const pts = nodes
       .map((n) => layout.get(n.id))
@@ -245,20 +246,11 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
     const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
     const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
-    // 画布比例（svg 容器实际宽高比；缺省 2.12）
-    let aspect = 2.12
-    try {
-      const r = svgRef.current?.getBoundingClientRect()
-      if (r && r.width > 0 && r.height > 0) aspect = r.width / r.height
-    } catch { /* 容器未就绪用缺省 */ }
-    const fw = Math.max(200, maxX - minX)
-    const fh = Math.max(150, fw / aspect) // viewBox 比例 = 画布比例 → meet 占满
-    const cy = (minY + maxY) / 2 // 纵向居中
     return {
       vx: minX,
-      vy: cy - fh / 2,
-      vw: fw,
-      vh: fh,
+      vy: minY,
+      vw: Math.max(200, maxX - minX),
+      vh: Math.max(150, maxY - minY),
     }
   }
   // fitToCurrent 的最新引用（拖拽 effect 的 onUp 闭包需要）

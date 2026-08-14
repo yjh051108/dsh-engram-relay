@@ -23,6 +23,9 @@ export interface ForceNodeInput {
   id: string
   /** 斥力权重（大节点推得更远；缺省 1）。 */
   weight?: number
+  /** 碰撞半径（v0.6 用户要求"加个碰撞边界"：collide 按节点实际半径——
+   *  固定值 12 < hub 节点半径 ~22 会互相压叠）。 */
+  radius?: number
 }
 
 export interface ForceEdgeInput {
@@ -84,7 +87,7 @@ export type ForceLayout = Map<string, ForcePoint>
 
 const EPS = 1e-6
 
-interface Body { x: number; y: number; vx: number; vy: number; weight: number }
+interface Body { x: number; y: number; vx: number; vy: number; weight: number; r: number }
 
 export interface ForceSimulator {
   /** 迭代 n 轮（alpha 续接，不重置）。 */
@@ -181,7 +184,7 @@ export function createForceSimulator(
             x: center.x + (rr + jig * 4) * Math.cos(inner) + jig * 4,
             y: center.y + (rr + jig * 4) * Math.sin(inner) + jig * 4,
             vx: 0, vy: 0,
-            weight: Math.max(0.5, w),
+            weight: Math.max(0.5, w), r: nodes.find((nd) => nd.id === id)?.radius ?? 12,
           })
         })
       })
@@ -209,7 +212,7 @@ export function createForceSimulator(
             x: ccx + (rr + jig * 3) * Math.cos(inner) + jig * 3,
             y: ccy + (rr + jig * 3) * Math.sin(inner) + jig * 3,
             vx: 0, vy: 0,
-            weight: Math.max(0.5, w),
+            weight: Math.max(0.5, w), r: nodes.find((nd) => nd.id === id)?.radius ?? 12,
           })
         })
       })
@@ -222,7 +225,7 @@ export function createForceSimulator(
           x: cx + (ringRadius + jig * 4) * Math.cos(angle) + jig * 4,
           y: cy + (ringRadius + jig * 4) * Math.sin(angle) + jig * 4,
           vx: 0, vy: 0,
-          weight: Math.max(0.5, node.weight ?? 1),
+          weight: Math.max(0.5, node.weight ?? 1), r: node.radius ?? 12,
         })
       })
     }
@@ -348,7 +351,9 @@ export function createForceSimulator(
         const x = bj.x - bi.x
         const y = bj.y - bi.y
         let l = Math.sqrt(x * x + y * y)
-        const r = collideRadius + collideRadius
+        // ⚠️ 碰撞边界按节点实际半径（v0.6 用户要求"加个碰撞边界"：
+        // 固定 collideRadius 12 < hub 节点半径 ~22 会互相压叠）
+        const r = (bi.r ?? collideRadius) + (bj.r ?? collideRadius)
         if (l < r) {
           if (l < EPS) {
             const ang = ((i * 2654435761 + j * 40503) % 628) / 100
@@ -411,7 +416,7 @@ export function createForceSimulator(
         x: cx + jig * 24,
         y: cy + jigOf(bodies.size, 13) * 24,
         vx: 0, vy: 0,
-        weight: Math.max(0.5, weight),
+        weight: Math.max(0.5, weight), r: 12,
       })
       // 新节点加入 → 网络重新活动（alpha 回升）
       alpha = Math.max(alpha, 0.6)
