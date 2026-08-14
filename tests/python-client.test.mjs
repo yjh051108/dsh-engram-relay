@@ -35,7 +35,8 @@ test('client: missing server file degrades to null', async () => {
 
 // ---- v3：0.6B 移除后，Python 服务 = 嵌入服务（bge 语义精排） ----
 
-const BGE_PATH = process.env.ENGRAM_EMBED_MODEL || 'F:/dsh/01-memory/engram-trial/bge-small-zh'
+// bge 目录经 ENGRAM_EMBED_MODEL 提供（真实服务测试用）；未配置时该组测试 skip
+const BGE_PATH = process.env.ENGRAM_EMBED_MODEL || ''
 
 /**
  * 真实服务测试的环境探测：Python 可 spawn 且 engram server 能握手才跑。

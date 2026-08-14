@@ -2,10 +2,24 @@
   "id": "dsh-engram-relay",
   "version": "0.1.0",
   "main": "./lib/index.js",
-  "description": "大 engram 小 KV：魔改 Qwen3-0.6B（Engram 条件记忆 × DSA 稀疏路由），超长上下文记忆稀疏路由",
+  "description": "外置 engram 转接层：跨会话分层记忆（global/project/session，AI 自主决策归属）+ N-gram 哈希寻址 × bge 语义精排 × 因果图传播的超稀疏主动唤醒 + 渐进披露，与官方 compact 共存",
   "engines": { "dsh": ">=0.0.1" },
   "contributes": {
-    "tools": ["engram_recall", "engram_store", "engram_status"],
+    "tools": [
+      "engram_recall",
+      "engram_store",
+      "engram_propose",
+      "engram_confirm",
+      "engram_reject",
+      "engram_open",
+      "engram_search",
+      "engram_link",
+      "engram_update",
+      "engram_remove",
+      "engram_promote",
+      "engram_weave",
+      "engram_status"
+    ],
     "skills": []
   }
 }

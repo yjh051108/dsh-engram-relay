@@ -332,7 +332,7 @@ def train(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-path", dest="model_path", default=os.environ.get("ENGRAM_MODEL_PATH", r"F:/dsh/01-memory/engram-trial/qwen3-model"))
+    parser.add_argument("--model-path", dest="model_path", default=os.environ.get("ENGRAM_MODEL_PATH", ""))
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--batch-size", type=int, default=8)

@@ -11,7 +11,7 @@ import sys
 import time
 
 SERVER = os.path.join(os.path.dirname(__file__), "..", "engram_model", "server.py")
-MODEL_PATH = os.environ.get("ENGRAM_MODEL_PATH", r"F:/dsh/engram-trial/qwen3-model")
+MODEL_PATH = os.environ.get("ENGRAM_MODEL_PATH", "")
 
 
 def rpc(proc, req: dict, timeout=300):

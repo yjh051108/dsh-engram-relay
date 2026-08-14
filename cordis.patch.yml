@@ -3,10 +3,11 @@
 # 顶层 `- insert:` 包裹新增的插件行；`name` 引用包名，Loader 从 profile
 # node_modules 解析（依赖走官方闭包 fallback）。
 # config 默认值写在此（复活器 loader.create 时自动带上；profile patch 可覆盖）。
+# embedModel 留空 = 包内自带 int8 量化 bge 模型（开箱即用，免下载）；
+# 要更高精排质量可配置本地 fp32 bge-small-zh-v1.5 目录或设 ENGRAM_EMBED_MODEL。
 - insert:
     - id: dsh-engram-relay
       name: '@dsh-external/dsh-engram-relay'
       config:
-        embedModel: 'F:/dsh/01-memory/engram-trial/bge-small-zh'
         distillEveryTurns: 2
         injectBudgetTokens: 200

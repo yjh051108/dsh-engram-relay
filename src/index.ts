@@ -103,10 +103,9 @@ export const Config: z<Config> = z.object({
     .description('主库硬上限：超过触发归档淘汰（superseded→dormant→低激活，归档可恢复）；0=无限'),
 })
 
-/** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；旧 engram-trial 路径存在则沿用。 */
+/** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；解析失败 → 空串（走 Python 服务 ENGRAM_EMBED_MODEL / 重要度兜底）。 */
 function resolveEmbedModel(configured: string): string {
   if (configured.trim() !== '') return configured
-  const legacy = 'F:/dsh/01-memory/engram-trial/bge-small-zh'
   try {
     const bundled = new URL('../model/bge-small-zh/', import.meta.url).pathname
     // Windows 路径修复（file:// URL 的 /C:/ 前缀 + 非 ASCII 目录百分号编码解码）
@@ -115,7 +114,7 @@ function resolveEmbedModel(configured: string): string {
       : decodeURIComponent(bundled)
     if (bundledPath) return bundledPath
   } catch { /* 解析失败回退 */ }
-  return legacy
+  return ''
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -130,8 +129,8 @@ export function apply(ctx: Context, config: Config): void {
     pythonPath: config.pythonPath,
     pythonTimeoutMs: config.pythonTimeoutMs,
     checkpoint: config.checkpoint ?? '',
-    // 包内模型优先：空配置时用仓库自带 model/bge-small-zh（int8，免下载），
-    // 兼容旧配置的 engram-trial 路径（若存在则沿用）。
+    // 包内模型优先：空配置时用仓库自带 model/bge-small-zh（int8，免下载）；
+    // 显式配置（本地 fp32 目录）时沿用配置。
     embedModel: resolveEmbedModel(config.embedModel),
     distillRequireConfirm: config.distillRequireConfirm,
     semanticMinScore: config.semanticMinScore,

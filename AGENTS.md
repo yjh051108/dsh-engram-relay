@@ -123,9 +123,11 @@ dsh --profile web --dump-config
 
 ## 本项目约定
 
-- **Node 侧零第三方运行时依赖**：只 import 闭包内包（cordis / @deepseek-ai/* /
-  schemastery）+ node: 内置。嵌入编码全在 Python 服务（spawn `python -m engram_model.server`），
-  不要往 Node 侧加 npm 依赖（实装时 checkout 闭包不包含它们）。
+- **Node 侧唯一第三方运行时依赖**：`@huggingface/transformers`（+`onnxruntime-node`），
+  只在 TS ONNX 嵌入路径懒 import。**嵌入编码降级链**：TS ONNX（包内 int8 模型
+  `model/bge-small-zh`，免 Python）→ Python 服务（spawn `python -m engram_model.server`）
+  → 重要度兜底。除此之外只 import 闭包内包（cordis / @deepseek-ai/* / schemastery）+
+  node: 内置，不要新增 npm 依赖（实装时 checkout 闭包不包含它们）。
 - **Python 侧**（`python/engram_model/`）：bge 嵌入编码（embed op，懒加载，
   路径取配置 embedModel 或环境变量 ENGRAM_EMBED_MODEL）+ 遗留 0.6B op
   （model.py 等仅保留作参考，0.6B 已移除，load 对缺失目录返回 loaded:false）。

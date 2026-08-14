@@ -24,7 +24,7 @@ import torch
 from engram_model.model import EngramQwen3
 from train import generate_knowledge
 
-MODEL = os.environ.get("ENGRAM_MODEL_PATH", r"F:/dsh/engram-trial/qwen3-model")
+MODEL = os.environ.get("ENGRAM_MODEL_PATH", "")
 CKPT = "checkpoints/engram-trained/engram.pt"
 
 Q_PROMPTS = {

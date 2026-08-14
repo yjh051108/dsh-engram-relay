@@ -46,7 +46,7 @@ NODE_TEXT = {
 ALL_TITLES = [n for t in THEMES for n in t['nodes']]
 
 EMBED_MODEL_PATH = os.environ.get(
-    'ENGRAM_EMBED_MODEL', r'F:/dsh/01-memory/engram-trial/bge-small-zh'
+    'ENGRAM_EMBED_MODEL', ''
 )
 
 

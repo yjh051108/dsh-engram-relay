@@ -20,7 +20,7 @@ import torch
 
 from engram_model.model import EngramQwen3
 
-MODEL_PATH = os.environ.get("ENGRAM_MODEL_PATH", r"F:/dsh/engram-trial/qwen3-model")
+MODEL_PATH = os.environ.get("ENGRAM_MODEL_PATH", "")
 ROUNDS = 2000
 TOKENS_PER_ROUND = 500
 

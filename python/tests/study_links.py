@@ -18,8 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hash_text import TextHashAddressing, TextHashIndex  # noqa: E402
 
 STORE = os.path.expanduser('~/.dsh/engram-relay/engrams.jsonl')
-QUERIES_FILE = 'F:/dsh/.zcode/real-queries.txt'
-EMBED_MODEL = 'F:/dsh/01-memory/engram-trial/bge-small-zh'
+QUERIES_FILE = os.environ.get('ENGRAM_STUDY_QUERIES', '')
+EMBED_MODEL = os.environ.get('ENGRAM_EMBED_MODEL', '')
 
 TOPIC_KW = {
     '热重载': ['热重载', '重载', 'pnpm', 'hmr', 'patch'],

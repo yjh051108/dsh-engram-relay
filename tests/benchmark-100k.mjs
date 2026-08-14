@@ -20,7 +20,9 @@ import { ActivationCache } from '../lib/engram/activation.js'
 import { embedWithOnnx } from '../lib/model/onnx-embedder.js'
 
 const N = 100_000
-const MODEL_DIR = 'F:/dsh/01-memory/dsh-engram-relay/model/bge-small-zh'
+// 包内 int8 模型（仓库根 model/bge-small-zh）；可用 ENGRAM_EMBED_MODEL 覆盖
+const MODEL_DIR = process.env.ENGRAM_EMBED_MODEL
+  || new URL('../model/bge-small-zh', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 
 /** 主题偏置向量：每条 = 主题基向量 + 噪声（模拟真实记忆分布）。 */
 function synthVec(topicIdx, noise = 0.3) {

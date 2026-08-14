@@ -24,7 +24,7 @@
 │ 云端 API 主模型（100k 上下文，KV 保持小）                 │
 │   ↑ 超稀疏文本注入（systemPrompt 记忆段，预算 600 token）  │
 ├────────────────────────────────────────────────────────┤
-│ Node 插件（llm/stream 转接，零第三方运行时依赖）           │
+│ Node 插件（llm/stream 转接；仅 transformers.js 一个懒加载依赖）      │
 │  ├─ 请求前：哈希粗筛 → 分层准入 → bge 精排 → 因果传播 →    │
 │  │           稀疏注入（global 全可见 / project 同 cwd /    │
 │  │           session 本会话）                             │
@@ -33,8 +33,10 @@
 │  └─ 会话结束：agent/disposed → 只清 session 层临时记忆     │
 │            （global/project 跨会话持久）                   │
 ├────────────────────────────────────────────────────────┤
-│ Python 转接服务（JSON 行协议）                            │
-│  └─ embed op：bge-small-zh-v1.5 编码（懒加载，本地离线）   │
+│ 嵌入精排（降级链）                                       │
+│  ├─ TS ONNX：包内 int8 bge 模型（开箱即用，免 Python）    │
+│  └─ Python 转接服务（可选回退，JSON 行协议）：            │
+│      embed op：本地 fp32 bge-small-zh-v1.5 编码（懒加载） │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -59,9 +61,11 @@
 dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.git
 ```
 
-依赖：Node ≥ 18 + Python 3.10+（sentence-transformers、torch）。
-嵌入模型本地离线加载（无 HF 联网需求）：先下载 bge-small-zh-v1.5 到本地目录，
-再在 profile patch 里配置 `embedModel` 指向该目录（或设环境变量 `ENGRAM_EMBED_MODEL`）。
+依赖：Node ≥ 18。**语义精排开箱即用**——包内自带 int8 量化 bge-small-zh
+模型（`model/bge-small-zh/`，~24MB，TS ONNX 推理，无 Python、无联网要求）；
+可选增强：Python 3.10+（sentence-transformers）加载本地 **fp32** bge-small-zh-v1.5
+目录做更高精度精排（配置 `embedModel` 指向该目录，或设环境变量
+`ENGRAM_EMBED_MODEL`）。降级链：TS ONNX（包内 int8）→ Python 服务 → 重要度兜底。
 
 ## 工具
 
@@ -69,12 +73,16 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 |---|---|
 | `engram_recall` | 按需唤醒检索（跨会话分层准入 + 因果邻接，可过滤层） |
 | `engram_store` | 写入记忆（**AI 自主决策分层** + 因果前因/后果 + 双向链接） |
+| `engram_propose` | 提议记忆（写入 ⏳pending，用户确认后才参与召回，确认制沉淀） |
+| `engram_confirm` | 确认一个待确认节点（确认后参与 recall/唤醒命中） |
+| `engram_reject` | 拒绝（删除）一个待确认节点（仅 pending 可拒） |
 | `engram_open` | 展开入口（正文 + 层 + 链接 + 因果邻居，渐进披露第二层） |
 | `engram_search` | 盘点记忆图谱（按层/项目/类型/关键词检索，遵守可见性） |
 | `engram_link` | 显式连接节点（因果/依赖/引用边，双向链接织图谱） |
 | `engram_update` | 修正节点（摘要/正文/链接/重要度/标题） |
 | `engram_remove` | 删除节点（谨慎，不可恢复） |
 | `engram_promote` | 提升层（session→project/global，会话结束前转长期） |
+| `engram_weave` | 织网清洗（孤立节点语义配对自动织双向链接） |
 | `engram_status` | 查看服务状态（分层统计/槽位/因果边/模型/预算） |
 
 ## 配置（profile patch，如 `~/.dsh/profiles/web/cordis.patch.yml`）
@@ -83,14 +91,16 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 - id: dsh-engram-relay
   name: '@dsh-external/dsh-engram-relay'
   config:
-    embedModel: 'F:/dsh/01-memory/engram-trial/bge-small-zh'   # bge 本地目录（必配才能语义精排）
+    # 可选：本地 fp32 bge 模型目录（比包内 int8 精度更高）；
+    # 缺省留空 = 用包内 int8 模型开箱即用
+    embedModel: '/path/to/bge-small-zh-v1.5'
 ```
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `embedModel` | `` | bge 嵌入模型目录（本地路径；空 = 服务端 `ENGRAM_EMBED_MODEL`，再空则禁用精排） |
+| `embedModel` | `` | bge 嵌入模型目录；空 = 包内 int8 模型（TS ONNX）→ Python 服务 `ENGRAM_EMBED_MODEL` → 禁用精排 |
 | `modelId` | `` | 遗留：0.6B 蒸馏模型目录（已移除；空 = 不加载） |
-| `pythonPath` | `python` | Python 解释器（spawn 转接服务） |
+| `pythonPath` | `python` | Python 解释器（可选精排增强服务） |
 | `injectBudgetTokens` | `600` | 单次唤醒注入预算（超稀疏，<1%） |
 | `maxWakePerTurn` | `3` | 每回合唤醒条数上限 |
 | `storeDir` | `~/.dsh/engram-relay/` | engram 持久化目录 |

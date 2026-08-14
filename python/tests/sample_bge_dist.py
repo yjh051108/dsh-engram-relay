@@ -16,6 +16,7 @@ os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
 # 采样用真实记忆条目（从 engrams.jsonl 读标题+摘要）
 STORE = os.path.expanduser('~/.dsh/engram-relay/engrams.jsonl')
+EMBED_MODEL = os.environ.get('ENGRAM_EMBED_MODEL', '')
 
 QUERIES = [
     '缓存命中率优化方案',          # 主题:缓存
@@ -73,8 +74,10 @@ def main():
         memories = memories[:60]
 
     # 加载 bge（与生产 server 一致：sentence_transformers）
+    if not EMBED_MODEL:
+        raise SystemExit('请设置环境变量 ENGRAM_EMBED_MODEL 指向本地 bge-small-zh 目录')
     from sentence_transformers import SentenceTransformer
-    model = SentenceTransformer('F:/dsh/01-memory/engram-trial/bge-small-zh')
+    model = SentenceTransformer(EMBED_MODEL)
 
     def embed(texts):
         return model.encode(texts, normalize_embeddings=True)

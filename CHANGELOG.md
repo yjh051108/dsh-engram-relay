@@ -2,6 +2,17 @@
 
 本项目版本与仓库提交对应，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 0.1.0 开源发布（2026-08-13）
+
+- 仓库公开（`dsh-external/dsh-engram-relay`）：去 `private`、补 repository/homepage/bugs/keywords
+- 开源卫生：清除全部开发者本机绝对路径（`cordis.patch.yml` / `src/index.ts` /
+  python 脚本 / tests 的默认值改为环境变量或包内相对路径）；内部装机文档移出仓库
+- 开箱即用：`embedModel` 留空默认走包内 int8 bge 模型（TS ONNX，免 Python），
+  配置/环境变量可覆盖为本地 fp32 模型
+- 元数据对齐：`dsh.plugin.json` 与 `dshx.contributes.tools` 补齐全部 13 个工具
+  （新增 `engram_propose` / `engram_confirm` / `engram_reject` / `engram_weave`）
+- 图谱 UI：碰撞边界硬分离（位置级分离 + 输出前多轮扫描兜底，修节点重叠）
+
 ## 未发布（2026-08-13 更新）
 
 ### 真实历史数据仿真（`simulate_real.py`）
