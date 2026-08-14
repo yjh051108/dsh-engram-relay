@@ -84,7 +84,7 @@ export const Config: z<Config> = z.object({
   checkpoint: z.string().default('')
     .description('遗留：训练好的原生 engram checkpoint 路径（0.6B 已移除）'),
   embedModel: z.string().default('')
-    .description('bge 嵌入模型目录（本地路径；空 = 优先包内 model/bge-small-zh（仓库自带 int8），再空则服务端 ENGRAM_EMBED_MODEL 环境变量）'),
+    .description('可选增强：bge 嵌入模型目录（向量缓存补分；本地路径。空 = 核心三通道纯算法语义引擎（零模型，默认推荐）；可选依次：包内 model/bge-small-zh（int8 ONNX）→ 服务端 ENGRAM_EMBED_MODEL 环境变量）'),
   distillRequireConfirm: z.boolean().default(false)
     .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
   semanticMinScore: z.number().min(0).max(1).default(0.42)
@@ -103,7 +103,7 @@ export const Config: z<Config> = z.object({
     .description('主库硬上限：超过触发归档淘汰（superseded→dormant→低激活，归档可恢复）；0=无限'),
 })
 
-/** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；解析失败 → 空串（走 Python 服务 ENGRAM_EMBED_MODEL / 重要度兜底）。 */
+/** 可选向量缓存模型解析：空配置 → 仓库自带 model/bge-small-zh（int8）；解析失败 → 空串（走 Python 服务 ENGRAM_EMBED_MODEL / 纯算法引擎）。 */
 function resolveEmbedModel(configured: string): string {
   if (configured.trim() !== '') return configured
   try {

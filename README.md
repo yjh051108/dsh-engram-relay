@@ -1,7 +1,7 @@
 # dsh-engram-relay
 
 > 跨会话分层记忆：大一统记忆图谱（Obsidian 式双向链接 + 因果双向追溯 + 自组织聚类），
-> N-gram 哈希确定性寻址 × bge 语义精排 × 因果传播的超稀疏主动唤醒，渐进披露
+> N-gram 哈希确定性寻址 × **三通道纯算法语义精排（词汇/图/共现，零外部模型）** × 因果传播的超稀疏主动唤醒，渐进披露
 > （入口 = `[[标题]]` + 摘要，按需展开正文）；**分层归属由 AI 自主决策**——
 > global 全局持久 / project 项目持久 / session 会话临时，跨会话沉淀与召回。
 
@@ -11,10 +11,14 @@
 外置记忆转接层（无需训练任何小模型）：
 
 1. **[Engram（条件记忆，[deepseek-ai/Engram](https://github.com/deepseek-ai/Engram)）](https://arxiv.org/abs/2601.07372)**：N-gram 哈希 O(1) 确定性寻址 → 巨大静态记忆表。为 Transformer 补上「知识查找原语」（MoE 扩计算容量，Engram 扩静态记忆容量）。
-2. **bge-small-zh-v1.5（专用嵌入模型，~95MB）**：对哈希粗筛候选做语义精排，修掉哈希的 mode-level 跨主题误命中（同 80 查询实测：纯哈希精确率 54% → 混合 95%）。
+2. **三通道纯算法语义引擎（SemanticScorer，零嵌入模型）**：对哈希粗筛候选做语义精排——
+   词汇通道（n-gram Jaccard 重叠 + 词频）、图通道（因果/链接邻居语义传播）、
+   共现通道（PCA 谱分解语义桥，跨词共现如「缓存↔cache」）；确定性、可解释、
+   **零外部模型、零联网、零 Python**。修掉哈希的 mode-level 跨主题误命中
+   （同 80 查询实测：纯哈希精确率 54% → 混合 95%，三通道承接了当年 bge 实验的增益）。
 3. **因果图**：节点间 `causes/effects` 双向边，唤醒时沿因果链双向传播激活——「什么导致了它 / 它导致了什么」，这是普通向量索引做不到的。
 
-**混合检索管线**：哈希粗筛（精确、O(1)、确定性）→ bge 语义精排（修误命中）→
+**混合检索管线**：哈希粗筛（精确、O(1)、确定性）→ 三通道纯算法精排（修误命中，零模型）→
 因果传播（召回前因后果）→ top-K 超稀疏注入 = **精确 + 语义 + 因果**。
 
 ## 架构
@@ -24,18 +28,18 @@
 │ 云端 API 主模型（100k 上下文，KV 保持小）                 │
 │   ↑ 超稀疏文本注入（systemPrompt 记忆段，预算 600 token）  │
 ├────────────────────────────────────────────────────────┤
-│ Node 插件（llm/stream 转接；仅 transformers.js 一个懒加载依赖）      │
-│  ├─ 请求前：哈希粗筛 → 分层准入 → bge 精排 → 因果传播 →    │
-│  │           稀疏注入（global 全可见 / project 同 cwd /    │
-│  │           session 本会话）                             │
+│ Node 插件（核心零第三方运行时依赖）                       │
+│  ├─ 请求前：哈希粗筛 → 分层准入 → 三通道纯算法精排 →      │
+│  │           因果传播 → 稀疏注入（global 全可见 /          │
+│  │           project 同 cwd / session 本会话）             │
 │  ├─ 写入：模型调 engram_store 落节点（自主分层 + 因果）     │
 │  ├─ 维护：search/link/update/remove/promote（织图谱/转层） │
 │  └─ 会话结束：agent/disposed → 只清 session 层临时记忆     │
 │            （global/project 跨会话持久）                   │
 ├────────────────────────────────────────────────────────┤
-│ 嵌入精排（降级链）                                       │
-│  ├─ TS ONNX：包内 int8 bge 模型（开箱即用，免 Python）    │
-│  └─ Python 转接服务（可选回退，JSON 行协议）：            │
+│ 可选向量缓存增强（非必需；核心语义引擎零模型）            │
+│  ├─ TS ONNX：包内 int8 bge 模型（transformers.js 懒加载） │
+│  └─ Python 转接服务（遗留回退，JSON 行协议）：            │
 │      embed op：本地 fp32 bge-small-zh-v1.5 编码（懒加载） │
 └────────────────────────────────────────────────────────┘
 ```
@@ -61,11 +65,12 @@
 dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.git
 ```
 
-依赖：Node ≥ 18。**语义精排开箱即用**——包内自带 int8 量化 bge-small-zh
-模型（`model/bge-small-zh/`，~24MB，TS ONNX 推理，无 Python、无联网要求）；
-可选增强：Python 3.10+（sentence-transformers）加载本地 **fp32** bge-small-zh-v1.5
-目录做更高精度精排（配置 `embedModel` 指向该目录，或设环境变量
-`ENGRAM_EMBED_MODEL`）。降级链：TS ONNX（包内 int8）→ Python 服务 → 重要度兜底。
+依赖：Node ≥ 18。**核心语义引擎零模型、零依赖、开箱即用**——三通道纯算法
+（词汇 n-gram + 图语义传播 + PCA 共现），无需下载嵌入模型、无需 Python、无联网。
+可选增强（向量缓存补分用，非必需）：包内自带 int8 量化 bge-small-zh
+（`model/bge-small-zh/`，~24MB，TS ONNX 懒加载）或 Python 3.10+
+（sentence-transformers）加载本地 fp32 bge-small-zh-v1.5 目录
+（配置 `embedModel` 或环境变量 `ENGRAM_EMBED_MODEL`）。
 
 ## 工具
 
@@ -91,16 +96,16 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 - id: dsh-engram-relay
   name: '@dsh-external/dsh-engram-relay'
   config:
-    # 可选：本地 fp32 bge 模型目录（比包内 int8 精度更高）；
-    # 缺省留空 = 用包内 int8 模型开箱即用
+    # 可选增强（向量缓存）：本地 fp32 bge 模型目录；
+    # 缺省留空 = 核心三通道纯算法引擎（推荐，零模型零配置）
     embedModel: '/path/to/bge-small-zh-v1.5'
 ```
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `embedModel` | `` | bge 嵌入模型目录；空 = 包内 int8 模型（TS ONNX）→ Python 服务 `ENGRAM_EMBED_MODEL` → 禁用精排 |
+| `embedModel` | `` | 可选增强：bge 嵌入模型目录（向量缓存补分）；空 = 核心三通道纯算法（零模型），包内 int8（TS ONNX）→ Python 服务 `ENGRAM_EMBED_MODEL` 依次可选 |
 | `modelId` | `` | 遗留：0.6B 蒸馏模型目录（已移除；空 = 不加载） |
-| `pythonPath` | `python` | Python 解释器（可选精排增强服务） |
+| `pythonPath` | `python` | Python 解释器（可选增强服务） |
 | `injectBudgetTokens` | `600` | 单次唤醒注入预算（超稀疏，<1%） |
 | `maxWakePerTurn` | `3` | 每回合唤醒条数上限 |
 | `storeDir` | `~/.dsh/engram-relay/` | engram 持久化目录 |
@@ -112,19 +117,22 @@ src/                    # Node 插件（llm/stream 转接 + 工具）
 ├── engram/hash.ts      # N-gram 多头哈希寻址（论文移植，确定性）
 ├── engram/causal.ts    # 因果图（causes/effects 双向传播）
 ├── engram/store.ts     # 大一统记忆图谱（节点/链接/聚类/持久化）
-├── engram/wake.ts      # 唤醒管线（哈希粗筛 → 精排 → 因果 → 稀疏截断）
-└── model/              # Python 服务客户端（embed/distill/status）
-python/engram_model/    # Python 转接服务
+├── engram/wake.ts      # 唤醒管线（哈希粗筛 → 三通道纯算法精排 → 因果 → 稀疏截断）
+├── engram/semantic-scorer.ts  # 三通道纯算法语义引擎（词汇/图/PCA 共现，零模型）
+└── model/              # 可选向量缓存：TS ONNX（包内 int8）+ Python 服务客户端
+python/engram_model/    # Python 转接服务（可选/遗留）
 ├── hash.py             # N-gram 哈希寻址（Python 移植，与 TS 同构）
 ├── server.py           # JSON 行协议服务（embed op：bge 编码；遗留 0.6B op）
-python/embed_compare.py # 哈希 vs bge vs 混合 检索质量对比（95% 精确率）
+python/embed_compare.py # 哈希 vs bge vs 混合 检索质量对比（95% 精确率，历史实验）
 python/tests/           # 哈希/融合模块数学测试
 ```
 
 ## 设计要点
 
 - **确定性寻址**：相同 N-gram 模式永远命中相同槽位（精确匹配，非相似度近似）；
-- **混合检索**：哈希粗筛保证精确命中保底，bge 精排修跨主题误命中，因果传播召回前因后果；
+- **三通道纯算法语义精排**：哈希粗筛保证精确命中保底，词汇（n-gram Jaccard + 词频）/
+  图（因果链接邻居传播）/ 共现（PCA 谱分解语义桥）三通道修跨主题误命中——
+  零嵌入模型、确定性、可解释；因果传播再召回前因后果；
 - **渐进披露**：入口超稀疏（title + summary），正文/链接按需展开；
 - **零核心改动**：只使用公开 seam（`llm/stream`、`systemPrompt.context`、`tools.register`、`agent/turn-stopping`、`agent/disposed`）。
 
