@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "@dsh-external/dsh-engram-relay",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "澶?engram 灏?KV锛氬缃?engram 杞帴灞傦紙璺ㄤ細璇濆垎灞傝蹇嗭細global/project/session锛孉I 鑷富鍐崇瓥褰掑睘 + 鍥犳灉閾炬帴绱㈠紩 + 娓愯繘鎶湶 + 涓诲姩鍞ら啋锛夛紝涓?DSH 瀹炵幇瓒呴暱涓婁笅鏂囪蹇嗙█鐤忚矾鐢憋紝涓庡畼鏂?compact 鍏卞瓨锛堝畼鏂硅吘 KV锛宔ngram 淇濈粏鑺傦級",
   "type": "module",
   "main": "./lib/index.js",

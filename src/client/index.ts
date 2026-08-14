@@ -55,31 +55,49 @@ export function apply(ctx: ClientContext & { slots: SlotsService; locale: Locale
 
   let cancelled = false
   let disposeTab: (() => void) | undefined
+  let probeTimer: ReturnType<typeof setTimeout> | undefined
 
   // 探测 graph API：host 加载成功才注册「图谱」Tab（与 memory-evolve 的
   // 各 Tab 同模式——API 404 即插件未装配，Tab 保持隐藏）。
-  void fetch('/engram-relay/api/graph')
-    .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-    .then(() => {
-      if (cancelled) return
-      disposeTab = ctx.slots.inject('conversation.view', () =>
-        ctx.slots.register({
-          name: 'conversation.view',
-          id: 'engram-graph',
-          order: 24,
-          label: () => t('graphTab.label'),
-          locale: LOCALE_NS,
-        }, (props) => {
-          // strict-session slot：props 自带 sessionId（host 端据此解析 cwd
-          // 做分层准入）。
-          const sessionId = (props as { sessionId?: string }).sessionId
-          return GraphView({ t, sessionId })
-        }))
-    })
-    .catch(() => { /* host 端不可用：Tab 保持隐藏 */ })
+  // ⚠️ 启动竞态修复（2026-08-14 用户反馈"装了插件但图谱不显示"）：client
+  // bundle 执行可能早于 host 的 webServer 路由注册完成（新装/冷启动），
+  // 一次探测失败就永久隐藏 Tab。改为**指数退避重试**：1s/2s/4s/8s/16s/
+  // 30s/60s（约 2 分钟窗口），期间 host 就绪即注册；窗口耗尽才保持隐藏。
+  const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 30000, 60000]
+  const registerTab = (): void => {
+    disposeTab = ctx.slots.inject('conversation.view', () =>
+      ctx.slots.register({
+        name: 'conversation.view',
+        id: 'engram-graph',
+        order: 24,
+        label: () => t('graphTab.label'),
+        locale: LOCALE_NS,
+      }, (props) => {
+        // strict-session slot：props 自带 sessionId（host 端据此解析 cwd
+        // 做分层准入）。
+        const sessionId = (props as { sessionId?: string }).sessionId
+        return GraphView({ t, sessionId })
+      }))
+  }
+  const probe = (attempt: number): void => {
+    void fetch('/engram-relay/api/graph')
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then(() => {
+        if (cancelled) return
+        registerTab()
+      })
+      .catch(() => {
+        if (cancelled) return
+        const delay = RETRY_DELAYS_MS[attempt]
+        if (delay === undefined) return // 窗口耗尽：保持隐藏（host 端不可用）
+        probeTimer = setTimeout(() => probe(attempt + 1), delay)
+      })
+  }
+  probe(0)
 
   ctx.effect(() => () => {
     cancelled = true
+    if (probeTimer !== undefined) clearTimeout(probeTimer)
     disposeTab?.()
   }, 'dsh-engram-relay: graph tab')
 }
