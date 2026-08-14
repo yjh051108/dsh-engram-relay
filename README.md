@@ -1,5 +1,8 @@
 # dsh-engram-relay
 
+> **本仓库是公开镜像**（上游：`dsh-external/dsh-engram-relay`，BSD-3-Clause）。
+> 安装请用下方公开地址；上游转为公开后本镜像仍保持同步。
+
 > 跨会话分层记忆：大一统记忆图谱（Obsidian 式双向链接 + 因果双向追溯 + 自组织聚类），
 > N-gram 哈希确定性寻址 × bge 语义精排 × 因果传播的超稀疏主动唤醒，渐进披露
 > （入口 = `[[标题]]` + 摘要，按需展开正文）；**分层归属由 AI 自主决策**——
@@ -57,8 +60,8 @@
 ## 安装
 
 ```bash
-# dshx（marisa）外部插件管理器
-dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.git
+# dshx（marisa）外部插件管理器（公开镜像地址）
+dshx install dsh-engram-relay https://github.com/yjh051108/dsh-engram-relay.git
 ```
 
 依赖：Node ≥ 18。**语义精排开箱即用**——包内自带 int8 量化 bge-small-zh
