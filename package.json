@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-engram-relay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "大 engram 小 KV：外置 engram 转接层（跨会话分层记忆：global/project/session，AI 自主决策归属 + 因果链接索引 + 渐进披露 + 主动唤醒），为 DSH 实现超长上下文记忆稀疏路由，与官方 compact 共存（官方腾 KV，engram 保细节）",
   "type": "module",
   "main": "./lib/index.js",
@@ -46,6 +46,9 @@
   "dependencies": {
     "@huggingface/transformers": "3.6.3",
     "onnxruntime-node": "1.20.1"
+  },
+  "overrides": {
+    "sharp": "^0.35.0"
   },
   "dsh": {
     "bundle": {
