@@ -2,6 +2,16 @@
 
 本项目版本与仓库提交对应，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## 0.1.4 图谱修复 + BOM 修复（2026-08-14）
+
+- **图谱 Tab 启动竞态修复**（用户反馈"装了插件但图谱无法显示"）：client 对
+  `/engram-relay/api/graph` 的探测从"一次失败永久隐藏"改为**指数退避重试**
+  （1s/2s/4s/8s/16s/30s/60s，约 2 分钟窗口）——新装/冷启动时 host 的
+  webServer 路由可能晚于 client bundle 就绪，重试期间 host 挂载即注册 Tab；
+  effect 生命周期正确清理定时器
+- **0.1.3 BOM 修复并入**：package.json/lock 去除 UTF-8 BOM（v0.1.2 事故，
+  PowerShell Set-Content 引入；BOM 导致 tsdown/JSON.parse 失败）
+
 ## 0.1.2 教训通道（2026-08-14）
 
 - **教训唤醒机制**：tags 含 `教训:` 的节点在自动唤醒时用更低阈值（`lessonMinScore`
