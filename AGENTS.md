@@ -123,6 +123,13 @@ dsh --profile web --dump-config
 
 ## 本项目约定
 
+- **构建必须两步一起跑**：`npm run build:all`（= `bash scripts/build.sh` host tsc +
+  `npm run build:client` tsdown）。只跑 build.sh 会导致 client bundle 过期——
+  web 端 client-modules 按内容 hash 做 rev，旧 bundle + 旧 rev 会让浏览器
+  `bundle script ... failed to load`（本次实战踩坑：分支切换 + 漏跑 client 构建）。
+  另注意：`git checkout` 切到提交过 lib/ 的分支会**覆盖工作树 lib/**，构建产物
+  以 `npm run build:all` 的最后一次为准。
+
 - **核心语义引擎 = SemanticScorer 三通道纯算法**（词汇 n-gram Jaccard + 词频 /
   图语义传播 / PCA 共现谱分解）——**零外部模型、零第三方依赖、确定性可解释**，
   这是算法特色，勿在文档里把它写成"bge 精排"。**可选向量缓存增强**（embedRaw 补分用）：
