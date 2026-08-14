@@ -124,6 +124,13 @@ export function isSuperseded(e: EngramNode): boolean {
   return e.supersededBy !== undefined && e.supersededBy !== ''
 }
 
+/** 教训判定（教训通道）：tags 含「教训:」前缀（命名空间约定，如 教训:代码）。
+ * 教训类记忆在唤醒时走独立低阈值席位（见 wake.ts lesson channel）。 */
+export function isLesson(e: EngramNode | undefined | null): boolean {
+  if (!e) return false
+  return (e.tags ?? []).some((t) => typeof t === 'string' && t.startsWith('教训:'))
+}
+
 /** 渐进披露层级。 */
 export interface EngramNode {
   id: string

@@ -107,6 +107,8 @@ dshx install dsh-engram-relay https://github.com/dsh-external/dsh-engram-relay.g
 | `modelId` | `` | 遗留：0.6B 蒸馏模型目录（已移除；空 = 不加载） |
 | `pythonPath` | `python` | Python 解释器（可选增强服务） |
 | `injectBudgetTokens` | `600` | 单次唤醒注入预算（超稀疏，<1%） |
+| `lessonMinScore` | `0.42` | **教训通道阈值**（v0.6）：tags 含 `教训:` 的节点在自动唤醒时独立补位——同类操作时踩坑提醒必达（主 top-1 会漏掉低分教训）；`0` = 关闭 |
+| `lessonBudgetTokens` | `60` | 教训通道注入预算（独立于主预算，提醒不挤占普通记忆） |
 | `maxWakePerTurn` | `3` | 每回合唤醒条数上限 |
 | `storeDir` | `~/.dsh/engram-relay/` | engram 持久化目录 |
 
@@ -133,6 +135,10 @@ python/tests/           # 哈希/融合模块数学测试
 - **三通道纯算法语义精排**：哈希粗筛保证精确命中保底，词汇（n-gram Jaccard + 词频）/
   图（因果链接邻居传播）/ 共现（PCA 谱分解语义桥）三通道修跨主题误命中——
   零嵌入模型、确定性、可解释；因果传播再召回前因后果；
+- **教训通道（v0.6）**：tags 含 `教训:` 的节点（如 `教训:代码`）在自动唤醒时用
+  更低阈值（`lessonMinScore` 0.42，主 top-1 约 0.50）**独立补位**——同类操作时
+  「踩过的坑」即使语义分略低也会提醒，渲染带 `⚠️教训` 标记 + 分类 tag，
+  独立预算不挤占普通记忆；`0` 可关闭；
 - **渐进披露**：入口超稀疏（title + summary），正文/链接按需展开；
 - **零核心改动**：只使用公开 seam（`llm/stream`、`systemPrompt.context`、`tools.register`、`agent/turn-stopping`、`agent/disposed`）。
 

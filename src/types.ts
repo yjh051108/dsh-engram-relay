@@ -40,4 +40,10 @@ export interface EngramRelayConfig {
   /** 硬上限（v0.5）：主库节点数超过该值触发归档淘汰（superseded → dormant
    *  → 低激活；归档到 archived.jsonl 可恢复）。0 = 无限（默认 10000）。 */
   maxNodes: number
+  /** 教训通道阈值（v0.6）：tags 含「教训:」的节点在自动唤醒时用更低阈值
+   * （默认 0.42，低于主阈值 ≈0.50）独立占席——同类操作时踩坑提醒必达；
+   * 0 = 关闭教训通道。 */
+  lessonMinScore: number
+  /** 教训通道注入预算（独立于 injectBudgetTokens，教训提醒不挤占普通记忆）。 */
+  lessonBudgetTokens: number
 }
