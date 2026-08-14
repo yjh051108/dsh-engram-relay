@@ -273,71 +273,46 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, layout, canvasSize])
 
-  // 项目大圆（v0.6 用户诉求：**每个项目一个大圆形**——同 projectId 节点
-  // ≥3 个画项目级圆，标签=项目名；项目是标签不是硬边界，跨项目融合簇
-  // 仍按连通分量）
-  const projectCircles = useMemo(() => {
+  // ⚠️ v0.6 用户定案：**不要族圆**——项目大圆/簇圆全删（圆是视觉噪音，
+  // 簇自己聚拢的效果就是最美的）。布局聚团（区域引力/簇引力）保留，
+  // 节点碰撞边界保留——簇靠节点聚拢自然呈现，无圆无标签（缩小态）。
+  // 运行时重叠自检保留（聚团质心重叠检测——写日志，宿主可读）
+  const projectCircles: Array<{ cx: number; cy: number; radius: number; label: string; color: string; multi: boolean }> = []
+  const clusterCircles: Array<{ cx: number; cy: number; radius: number; label: string; multi: boolean }> = []
+  try {
+    // 聚团质心重叠自检（替代项目圆检测）
     const byProject = new Map<string | null, string[]>()
     for (const n of nodes) {
       const arr = byProject.get(n.projectId) ?? []
       arr.push(n.id)
       byProject.set(n.projectId, arr)
     }
-    const out: Array<{ cx: number; cy: number; radius: number; label: string; color: string; multi: boolean }> = []
+    const centers: Array<{ cx: number; cy: number; label: string }> = []
     for (const [pid, ids] of byProject) {
-      // ⚠️ 通用（null 项目）不画项目圆（v0.6：global 层节点散布全图，
-      // 圆半径可达 967 罩住一切——用户实测"中间一个大圆"根因之一）
-      if (pid === null) continue
-      if (ids.length < 3) continue // 项目节点太少不画圆（视觉噪音）
+      if (pid === null || ids.length < 3) continue
       const pts = ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
       if (pts.length < 3) continue
-      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length
-      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length
-      const radius = Math.max(70, ...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 50
-      const label = String(pid).split(/[\\/]/).pop() || '项目'
-      out.push({ cx, cy, radius, label, color: projectColor(pid), multi: false })
+      centers.push({
+        cx: pts.reduce((s, p) => s + p.x, 0) / pts.length,
+        cy: pts.reduce((s, p) => s + p.y, 0) / pts.length,
+        label: String(pid).split(/[\\/]/).pop() || '项目',
+      })
     }
-    // ⚠️ 运行时重叠自检（v0.6：写日志文件 ~/.dsh/super-injector/engram-graph.log
-    // ——宿主能读，不再靠用户描述猜）
-    try {
-      const overlaps: string[] = []
-      for (let i = 0; i < out.length; i += 1) {
-        for (let j = i + 1; j < out.length; j += 1) {
-          const a = out[i]!, b = out[j]!
-          const d = Math.hypot(a.cx - b.cx, a.cy - b.cy)
-          if (d < a.radius + b.radius) {
-            overlaps.push(`[${a.label}]↔[${b.label}] 圆心距${d.toFixed(0)}<半径和${(a.radius + b.radius).toFixed(0)}`)
-          }
+    const overlaps: string[] = []
+    for (let i = 0; i < centers.length; i += 1) {
+      for (let j = i + 1; j < centers.length; j += 1) {
+        const a = centers[i]!, b = centers[j]!
+        const d = Math.hypot(a.cx - b.cx, a.cy - b.cy)
+        if (d < 220) { // 聚团质心最小间距阈值
+          overlaps.push(`[${a.label}]↔[${b.label}] 质心距${d.toFixed(0)}`)
         }
       }
-      if (overlaps.length > 0) {
-        const line = `[${new Date().toISOString()}] 项目圆重叠 ${overlaps.length} 对: ${overlaps.join('; ')}\n`
-        void fetch('/engram-relay/api/graph-log', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: line })
-      }
-    } catch { /* 自检失败不阻塞 */ }
-    return out
-  }, [nodes, layout])
-
-  // 连通分量簇圆：**只画大簇（≥5 节点）**——小簇不画圆（v0.6 用户反馈
-  // "那么多族"——满屏小圆是噪音；项目大圆承担分组，小簇以节点本身可辨）
-  const clusterCircles = useMemo(() => clusterList
-    .filter((c) => c.ids.length >= 5)
-    .map((c) => {
-      const pts = c.ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
-      if (pts.length === 0) return null
-      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length
-      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length
-      const radius = Math.max(60, ...pts.map((p) => Math.hypot(p.x - cx, p.y - cy))) + 40
-      const projNames = [...c.projects].map((p) => {
-        if (p === null) return '通用'
-        const parts = String(p).split(/[\\/]/)
-        return parts[parts.length - 1] || '项目'
-      })
-      const label = c.projects.size > 1 ? `${projNames.join(' ⇄ ')}（融合）` : projNames[0]
-      return { cx, cy, radius, label, multi: c.projects.size > 1 }
-    })
-    .filter((c): c is { cx: number; cy: number; radius: number; label: string; multi: boolean } => c !== null),
-  [clusterList, layout])
+    }
+    if (overlaps.length > 0) {
+      const line = `[${new Date().toISOString()}] 聚团过近 ${overlaps.length} 对: ${overlaps.join('; ')}\n`
+      void fetch('/engram-relay/api/graph-log', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: line })
+    }
+  } catch { /* 自检失败不阻塞 */ }
 
   /** 项目着色（v0.4）：projectId 哈希取色；null（通用知识）灰色。
    *  ⚠️ function 声明（提升）——projectCircles useMemo 在其定义前引用，
@@ -486,60 +461,8 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
               height={view.vh + 4000}
               fill="url(#dot-grid)"
             />
-            {/* 项目大圆（v0.6：**每个项目一个大圆形**——同项目节点 ≥3 个；
-                项目色淡填充 + 项目名标签；底层） */}
-            {projectCircles.map((c, i) => (
-              <g key={`project-${i}`} className={styles.cluster}>
-                <circle
-                  cx={c.cx} cy={c.cy} r={c.radius}
-                  fill={c.color}
-                  fillOpacity={0.06}
-                  stroke={c.color}
-                  strokeOpacity={0.35}
-                  strokeWidth={1.5 / zc}
-                  strokeDasharray={c.multi ? '6 4' : undefined}
-                />
-                <text
-                  x={c.cx} y={c.cy - c.radius + 24 / zc}
-                  textAnchor="middle"
-                  className={styles.clusterLabel}
-                  style={{
-                    fontSize: 13 / zc,
-                    fontWeight: 700,
-                    paintOrder: 'stroke',
-                    stroke: 'rgba(10,14,22,0.85)',
-                    strokeWidth: 3 / zc,
-                  }}
-                >
-                  {c.label}
-                </text>
-              </g>
-            ))}
-            {/* 连通分量簇圆（≥5 节点才画——小簇以节点本身可辨） */}
-            {clusterCircles.map((c, i) => (
-              <g key={`cluster-${i}`} className={styles.cluster}>
-                <circle
-                  cx={c.cx} cy={c.cy} r={c.radius}
-                  fill={c.multi ? 'rgba(138,148,166,0.08)' : 'rgba(255,255,255,0.05)'}
-                  stroke={c.multi ? 'rgba(138,148,166,0.5)' : 'rgba(255,255,255,0.16)'}
-                  strokeWidth={1.5 / zc}
-                  strokeDasharray={c.multi ? '6 4' : undefined}
-                />
-                <text
-                  x={c.cx} y={c.cy - c.radius + 20 / zc}
-                  textAnchor="middle"
-                  className={styles.clusterLabel}
-                  style={{
-                    fontSize: 11 / zc,
-                    paintOrder: 'stroke',
-                    stroke: 'rgba(10,14,22,0.85)',
-                    strokeWidth: 3 / zc,
-                  }}
-                >
-                  {c.label}
-                </text>
-              </g>
-            ))}
+            {/* ⚠️ v0.6 用户定案：不要族圆——项目圆/簇圆已删（聚团靠节点
+                聚拢自然呈现） */}
             {/* 边（v0.5：causes 带方向箭头 + 簇色；选中节点时其延展边
                 高亮（亮色加粗），其余边淡出） */}
             {edges.map((e) => {
@@ -658,14 +581,13 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
             <span><span className={styles.legendLineSolid} />{t('graph.legend.causes')}</span>
             <span><span className={styles.legendLineDash} />{t('graph.legend.link')}</span>
             <span>
-              <span className={styles.legendDot} style={{ background: clusterColor('c0') }} />
-              {t('graph.legend.cluster')}
+              <span className={styles.legendDot} style={{ background: projectColor('D:\\x') }} />
+              {t('graph.legend.project')}
             </span>
             <span>
               <span className={styles.legendDot} style={{ background: projectColor(null) }} />
               {t('graph.legend.solo')}
             </span>
-            <span><span className={styles.legendCluster} />{t('graph.legend.clusterRing')}</span>
           </div>
         </div>
       )}
