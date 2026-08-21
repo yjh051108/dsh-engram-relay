@@ -811,7 +811,11 @@ class ConditionDex:
                 continue
             resp = sa.get("response") or {}
             trig = str(resp.get("trigger", ""))
-            content = n.content or ""
+            # content 过滤模板元数据段（观测位置/观测工具/存在约束/层级/状态/领域）——
+            # 避免模板字段参与评分误命中（「观测工具」查询曾命中所有模板卡）
+            content = (n.content or "")
+            for _f in ("观测位置", "观测工具", "存在约束", "核心主张", "识别卡", "层级", "状态", "领域", "通用"):
+                content = content.replace(_f, " ")
             domain = sa.get("domain", "") or ""
 
             if translator is not None:
