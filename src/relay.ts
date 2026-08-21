@@ -225,14 +225,24 @@ export class EngramRelay {
         // 过长或含疑问词的卡名降级为保底名（词段拼接）
         const rawName = String(card.name ?? '').trim()
         if (rawName.length > 12 || /[怎么什么如何为什么哪个多少是否能否要不要]/.test(rawName)) {
-          const words = query.split(/[，。！？,.!?;；\s]+/).filter((w: string) => w.length >= 2 && !/[怎么什么如何为什么哪个多少能否要不要啥哪]/.test(w))
+          const _g2 = new Set<string>()
+          for (const _seg of (query.match(/[\u4e00-\u9fff]+/g) ?? [])) {
+            for (let _i = 0; _i < _seg.length - 1; _i++) _g2.add(_seg.slice(_i, _i + 2))
+          }
+          const words = [..._g2].filter((w: string) => !/[怎么什么如何为什么哪个多少能否要不要啥哪]/.test(w))
           card.name = (words.slice(0, 2).join('') || '未知主题').slice(0, 10)
           this.debugLog(`auto-card name sanitized: ${rawName} → ${card.name}`)
         }
       }
       if (!card) {
         // 保底卡：LLM 空返回时从查询启发式构造（占位可用，下次即命中）
-        const words = query.split(/[，。！？,.!?;；\s]+/).filter((w: string) => w.length >= 2 && !/[怎么什么如何为什么哪个多少能否要不要啥哪]/.test(w))
+        // 词提取用 2-gram（无标点长句也能拆词）+ ASCII 词
+        const _grams = new Set<string>()
+        for (const _seg of (query.match(/[\u4e00-\u9fff]+/g) ?? [])) {
+          for (let _i = 0; _i < _seg.length - 1; _i++) _grams.add(_seg.slice(_i, _i + 2))
+        }
+        for (const _m of query.toLowerCase().matchAll(/[a-z0-9]{2,}/g)) _grams.add(_m[0])
+        const words = [..._grams].filter((w: string) => !/[怎么什么如何为什么哪个多少能否要不要啥哪]/.test(w))
         // 标题：取前两个实义词段（避免整句截断成半句）
         const nameParts = words.slice(0, 2).join('')
         card = {
