@@ -806,6 +806,9 @@ class ConditionDex:
             sa = n.state_attributes
             if not sa.get("name"):
                 continue
+            # 占位卡（pending）不参与出招——防污染排序
+            if sa.get("status") == "pending":
+                continue
             resp = sa.get("response") or {}
             trig = str(resp.get("trigger", ""))
             content = n.content or ""
@@ -1416,6 +1419,8 @@ class ConditionDex:
             if node is None:
                 continue
             sa = node.state_attributes
+            if sa.get("status") == "pending":
+                continue  # 占位卡不参与锚定
             resp = sa.get("response") or {}
             # claim：优先 state_attributes，否则用 content（知识卡内容）
             claim = str(sa.get("claim") or (node.content or ""))[:120]

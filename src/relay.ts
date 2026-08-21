@@ -240,17 +240,20 @@ export class EngramRelay {
           trigger: words.slice(0, 5).join(','),
           action: '按未知主题处理：先声明条件空间，谨慎回答并标注不确定性',
           level: 2,
+          // 占位卡标记 pending：不参与 respond/verify（防污染），等 LLM 生成真卡
+          status: 'pending',
         }
         this.debugLog(`auto-card fallback card: ${card.name}`)
       }
+      const cardFinal = card as { name?: string; domain?: string; claim?: string; trigger?: string; action?: string; level?: number; status?: string }
       // 查重②：灵枢 add_card 内部同名检查（existed）
       const res = await fetch(`${url}/dex/query`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: 'add_card', params: { ...card, source: 'auto-gap' } }),
+        body: JSON.stringify({ op: 'add_card', params: { ...cardFinal, source: 'auto-gap' } }),
         signal: AbortSignal.timeout(4000),
       })
       const data = (await res.json()) as { existed?: boolean; ok?: boolean }
-      this.ctx.logger?.info?.('[engram-relay] 自动补卡: %s → %s', card.name, data.existed ? '已存在' : '新增')
+      this.ctx.logger?.info?.('[engram-relay] 自动补卡: %s → %s', cardFinal.name, data.existed ? '已存在' : '新增')
     } catch (e) {
       this.ctx.logger?.warn?.('[engram-relay] 自动补卡失败: %s', String(e).slice(0, 120))
     } finally {
@@ -696,7 +699,7 @@ function fallbackDistill(conversation: string): Array<{ kind: string; layer: str
   return [{ kind: 'note', layer: 'session', title, summary: clean.slice(0, 80), content: clean }]
 }
 
-function parseCardJson(text: string): { name?: string; domain?: string; claim?: string; trigger?: string; action?: string; level?: number } | null {
+function parseCardJson(text: string): { name?: string; domain?: string; claim?: string; trigger?: string; action?: string; level?: number; status?: string } | null {
   let t = text.trim()
   const fence = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
   if (fence) t = fence[1]
