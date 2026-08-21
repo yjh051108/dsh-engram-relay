@@ -220,7 +220,12 @@ export class SemanticScorer {
     for (const e of candidates) {
       const text = `${e.title}：${e.summary}`
       const mGrams = charNgrams(text, 2)
-      const lex = jaccard(qGrams, mGrams)
+      // v0.3.34：查询侧 2-gram 命中率（替代 Jaccard——不被候选文本长度稀释，
+      // 与灵枢 bigram_hit 对称——变体查询召回增强：
+      // 「脏标题怎么处理」vs「脏标题」——加词不再稀释命中率）
+      const lex = qGrams.size > 0
+        ? [...qGrams].filter((g) => mGrams.has(g)).length / qGrams.size
+        : 0
       // 词频增强：查询词在候选中的覆盖率
       const mWords = wordsOf(text)
       let hitWords = 0
