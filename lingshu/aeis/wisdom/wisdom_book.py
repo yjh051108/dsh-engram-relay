@@ -829,7 +829,8 @@ class ConditionDex:
                         score += w * 1.0 * edu_w
                         if term not in matched:
                             matched.append(term)
-                # 2) 学科路由（教育层级加权）
+                # 2) 学科路由（教育层级加权；域内区分由卡 trigger 术语承担——
+                #    同域多卡时 trigger 精确命中（1) 语义指纹）已优先）
                 for term, w in fp.items():
                     dom = getattr(translator, 'DOMAIN_ROUTE', {}).get(term)
                     if dom and (dom in domain or any(dom in t for t in (n.tags or []))):
