@@ -1373,8 +1373,12 @@ class ConditionDex:
     # 取信息差最少的判断：对 K 生成候选学科归属假设 → 以系统内基地（verified 学科+观测层记录）为
     # 不可伪造证据 → 四维 D_norm 评分 → 取最小者 → E_reduction>0.50 采纳 → 归档观测层
 
-    VERIFY_WEIGHTS = {"trust": 0.30, "behavior": 0.25, "connection": 0.30,
-                      "prediction_error": 0.15}  # P5 案例权重
+    # 权重实证（45 正例/15 负例网格扫描 1771 组合）：
+    # (0.40, 0.00, 0.10, 0.50) F1=0.918 vs 当前 0.740——
+    # 统一锚定后 behavior 维度冗余（respond 已含 trigger 评分），
+    # prediction_error（claim 重叠）是关键区分维度
+    VERIFY_WEIGHTS = {"trust": 0.40, "behavior": 0.00, "connection": 0.10,
+                      "prediction_error": 0.50}
 
     def _base_evidence(self):
         """不可伪造基地：verified 学科（设计者终裁）+ 观测层记录（系统自动产生·带时间戳）。"""
@@ -1436,12 +1440,13 @@ class ConditionDex:
 
             # U_trust：验证等级（verified 终裁 → 信息差小；pending → 大）
             u_trust = 0.10 if status == "verified" else (0.60 if status == "pending" else 0.75)
-            # U_behavior：出招匹配（K 与 trigger/action 重叠越高，行为信息差越小）
-            u_behavior = 1.0 - self._overlap(knowledge, kit)
+            # U_behavior：出招匹配（K 与 trigger/action 的 2-gram 命中越高，行为信息差越小）
+            u_behavior = 1.0 - self._bigram_hit(knowledge, kit)
             # U_connection：锚定强度（语义连接越强，信息差越小；锚定分已含检索+trigger 重叠）
             u_connection = 1.0 - min(1.0, max(0.0, a.get("score", 0.0)))
-            # U_prediction_error：主张距离（K 与 claim 重叠越高，预测误差越小）
-            u_prediction_error = 1.0 - self._overlap(knowledge, claim)
+            # U_prediction_error：主张距离（K 与 claim+trigger 的 2-gram 命中越高，预测误差越小）
+            # （并入 trigger："1+1"与"1加1"词法同义由 trigger 覆盖）
+            u_prediction_error = 1.0 - self._bigram_hit(knowledge, claim + " " + kit)
 
             d_norm = (self.VERIFY_WEIGHTS["trust"] * u_trust
                       + self.VERIFY_WEIGHTS["behavior"] * u_behavior
