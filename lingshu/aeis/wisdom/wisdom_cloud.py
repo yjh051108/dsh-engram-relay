@@ -110,6 +110,9 @@ class DexHandler(BaseHTTPRequestHandler):
 
     # ---------------- 实现 ----------------
 
+    # 学习统计（模块级：收敛观测仪表盘）
+    _LEARN_STATS = {"respond": 0, "strong": 0, "weak": 0, "miss": 0,
+                    "clusters": 0, "cards": 0}
     # 自动补词网状态（模块级：服务进程内持续统计）
     _WEAK_HITS = {}  # 查询→{count, top_card, last_at}
 
@@ -198,6 +201,8 @@ class DexHandler(BaseHTTPRequestHandler):
         try:
             if op == "filter":
                 return {"op": op, "results": d.dex_filter(**params)}
+            if op == "learn_stats":
+                return {"op": op, "results": dict(self._LEARN_STATS)}
             if op == "add_card":
                 # 自动补卡端点（relay 缺口闭环调用）：add_entry 写入知识卡
                 name = params.get("name", "")
@@ -257,7 +262,17 @@ class DexHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                     cluster_hint = None
-                return {"op": op, "results": results, "cluster": cluster_hint}
+                # 学习统计（收敛观测）
+                try:
+                    self._LEARN_STATS["respond"] += 1
+                    top_s = results[0].get("score") if results else 0
+                    if top_s >= 0.5: self._LEARN_STATS["strong"] += 1
+                    elif top_s >= 0.1: self._LEARN_STATS["weak"] += 1
+                    else: self._LEARN_STATS["miss"] += 1
+                    if cluster_hint: self._LEARN_STATS["clusters"] += 1
+                except Exception:
+                    pass
+                return {"op": op, "results": results, "cluster": cluster_hint, "learn": dict(self._LEARN_STATS)}
             if op == "status_node":
                 return {"op": op, "results": d.dex_status(params.get("node_id", ""))}
             if op == "cs":
