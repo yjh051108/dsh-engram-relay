@@ -2466,7 +2466,7 @@ class ConditionDex:
                 return {s}
             return {s[i:i + 2] for i in range(len(s) - 1)}
 
-        qb = bigrams(query)
+        qb = {g for g in bigrams(query) if not any(w in g for w in ("什么", "怎么", "为啥", "为什么", "是什么"))}
         nb = bigrams(doc)
         if not qb:
             return 0.0
