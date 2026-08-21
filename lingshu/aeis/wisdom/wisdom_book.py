@@ -829,12 +829,13 @@ class ConditionDex:
                         score += w * 1.0 * edu_w
                         if term not in matched:
                             matched.append(term)
-                # 2) 学科路由（教育层级加权；域内区分由卡 trigger 术语承担——
-                #    同域多卡时 trigger 精确命中（1) 语义指纹）已优先）
+                # 2) 学科路由（教育层级加权；域分按查询原词×trigger 相关加权——
+                #    同域多卡时 trigger 词面相关的卡拿满域分，避免域内并列噪声）
+                _trig_rel = self._bigram_hit(condition, trig + sa.get("name", ""))
                 for term, w in fp.items():
                     dom = getattr(translator, 'DOMAIN_ROUTE', {}).get(term)
                     if dom and (dom in domain or any(dom in t for t in (n.tags or []))):
-                        score += w * 1.2 * edu_w
+                        score += w * 1.2 * edu_w * (0.2 + 0.8 * _trig_rel)
                         if dom not in matched:
                             matched.append(dom)
                 # 2.5) 学科词直配：trigger「如：」后的学科关键词与查询双向包含
