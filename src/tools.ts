@@ -741,10 +741,17 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     execute: async (args) => {
       const condition = String(args.condition).trim()
       if (!condition) return '（空条件）'
-      const r = (await relay.lingshuRespond(condition, Number(args.limit ?? 3))) as { results?: Array<{ name?: string; score?: number; action?: string; level?: number; status?: string }>; error?: string }
+      const r = (await relay.lingshuRespond(condition, Number(args.limit ?? 3))) as { results?: Array<{ name?: string; score?: number; action?: string; level?: number; status?: string }>; error?: string; memoryHint?: { title?: string; summary?: string; id?: string } }
       if (r.error) return `（灵枢出招不可用：${r.error}）`
       const results = r.results ?? []
-      if (results.length === 0) return '（图谱无命中——灵枢诚实边界：不知道就说不知道）'
+      if (results.length === 0) {
+        // 跨端联动：图谱无命中 → 附记忆侧线索（知+忆双通道）
+        const h = r.memoryHint
+        if (h?.title) {
+          return `（图谱无命中——诚实边界；记忆侧线索：${h.title} — ${h.summary ?? ''}${h.id ? `（记忆 ${h.id.slice(0, 8)}）` : ''}——可 engram_recall 展开）`
+        }
+        return '（图谱无命中——灵枢诚实边界：不知道就说不知道）'
+      }
       return results.map((h, i) => `${i + 1}. ${h.name ?? '?'}（score=${(h.score ?? 0).toFixed(2)}, L${h.level ?? '?'}, ${h.status ?? '?'}）：${h.action ?? ''}`.slice(0, 300)).join('\n')
     },
   })))

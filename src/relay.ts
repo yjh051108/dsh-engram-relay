@@ -301,6 +301,23 @@ export class EngramRelay {
       const rs = data.results ?? []
       if (!rs.some((h) => h.name && (h.score ?? 0) >= 0.02)) {
         this.recordKnowledgeGap(condition)
+        // 跨端联动（v0.3.33）：图谱无命中 → 附记忆侧线索（知+忆双通道）
+        try {
+          const mh = await this.wake.query(condition, 1, {
+            sessionId: this.currentSessionId ?? undefined,
+            cwd: this.currentCwd ?? undefined,
+          })
+          if (mh.engrams.length > 0) {
+            const e = mh.engrams[0]
+            ;(data as { memoryHint?: unknown }).memoryHint = {
+              title: e.title,
+              summary: (e.summary ?? '').slice(0, 60),
+              id: e.id,
+            }
+          }
+        } catch {
+          // 记忆补充失败不影响主路径
+        }
       }
       return data
     } catch (e) {
