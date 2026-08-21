@@ -124,9 +124,13 @@ class DexHandler(BaseHTTPRequestHandler):
             return None
         top = results[0] if results else {}
         top_score = top.get("score") or top.get("algo_score") or 0
+        top_algo = top.get("algo_score") or 0
         top_name = top.get("name")
         if not top_name or float(top_score) >= 0.5:
             return None  # 强命中无需补
+        # 相关性门槛：algo_score（词面关联）低于噪声线 → top 卡是重叠噪声，不建簇
+        if float(top_algo) < 0.05:
+            return None
         key = q[:30]
         rec = self._WEAK_HITS.get(key)
         if rec is None:
@@ -233,8 +237,14 @@ class DexHandler(BaseHTTPRequestHandler):
                         pass
                 # 自动补词网：弱命中（top<0.5）高频（≥3）→ 自动生成俗语簇（零 LLM）
                 try:
-                    cluster_hint = _auto_cluster(params.get("condition", ""), results)
-                except Exception:
+                    cluster_hint = self._auto_cluster(params.get("condition", ""), results)
+                except Exception as _e:
+                    import traceback as _tb
+                    try:
+                        with open(r"D:\\aeis\\_cluster_err.log", "a", encoding="utf-8") as _f:
+                            _f.write(_tb.format_exc() + "\n")
+                    except Exception:
+                        pass
                     cluster_hint = None
                 return {"op": op, "results": results, "cluster": cluster_hint}
             if op == "status_node":
