@@ -132,7 +132,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **织边方法（可选，你自主决定）**：想关联已有记忆时直接写——links 填 [[标题]]（双向引用）、causes/effects 填 [[标题]] 或 id（因果前因/后果，标题自动解析）；想不起来或不确定就不写，系统会自动基于语义×时序推荐关联候选，届时你再决定采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）；仅本次会话相关（临时进度/过程）→ session（会话结束清理，重要事后 engram_promote 转长期）。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **织边方法（可选，你自主决定）**：想关联已有记忆时直接写——links 填 [[标题]]（双向引用）、causes/effects 填 [[标题]] 或 id（因果前因/后果，标题自动解析）；想不起来或不确定就不写，系统会自动基于语义×时序推荐关联候选，届时你再决定采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增；⑥ **分支沉淀（v2）**：分支探索结束后，用 engram_store 把分支结论写入图谱（causes 填主链结论标题——分支思考成为决策树，可回溯复用）。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）；仅本次会话相关（临时进度/过程）→ session（会话结束清理，重要事后 engram_promote 转长期）。',
     parameters: {
       layer: {
         type: 'string',
