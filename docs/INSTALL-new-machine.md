@@ -34,7 +34,7 @@ cd F:\dsh\02-web-ui\dsh-browser-panel
 npm install
 ```
 
-> ⚠️ **必须 `npm run build` 而不是只跑 tsc**：`lib/client.js`（WebUI 图谱 Tab 的
+> ⚠️ **必须 `npm run build` 而不是只跑 tsc**：`lib/client.js`（client 占位 entry，boot 注入依赖）
 > bundle）由 tsdown 构建，`build.sh` 已内置该步骤。若只编译 host 就装配，
 > client-modules 在 `dsh.client` 声明下找不到 `lib/client.js`，会导致整个
 > `window.__DSH_BOOT__` 注入失败——WebUI 所有插件面（含官方）首装即丢。
@@ -57,7 +57,7 @@ dsh plugin --profile web add .
 # browser-panel / code-map 同理
 ```
 
-从 GitHub 仓库直接装（云仓库，新机器零本地构建）：
+从 GitHub 仓库直接装（云仓库）：
 ```powershell
 dsh plugin --profile web add "git+https://github.com/yjh051108/dsh-engram-relay.git"
 # git 依赖的 prepare 脚本被 pnpm 默认拦截：按 pnpm 打印的提示，把 allowBuilds
@@ -75,8 +75,9 @@ dsh plugin --profile web add "git+https://github.com/yjh051108/dsh-engram-relay.
 
 ## 4. 模型（已随仓库分发，零下载）
 
-- `dsh-engram-relay/model/bge-small-zh/`：int8 ONNX（23MB）已入库——**开箱即用**；
-- embedModel 配置**留空**即自动使用包内模型（`resolveEmbedModel` 已实现）；
+- `dsh-engram-relay/model/bge-small-zh/`：int8 ONNX（23MB）已入库；
+- embedModel **留空 = 纯算法语义匹配（SemanticScorer 主路径，零模型）**——默认；
+- 需 bge 对比验证时显式配置 `embedModel` 指向 `model/bge-small-zh`；
 - fp32 高精度版（96MB）：本地旧机 `engram-trial/bge-small-zh-onnx/model.onnx`，或重新导出（`python/tests/` 导出脚本）。
 
 ## 5. 旧记忆迁移（可选）
@@ -88,7 +89,7 @@ dsh plugin --profile web add "git+https://github.com/yjh051108/dsh-engram-relay.
 
 ```powershell
 # 启动 web 后让 Agent 执行：
-engram_status    # engramCount > 0、embedModel 指向包内 model
+engram_status    # engramCount > 0、semanticEngine=纯算法 SemanticScorer（默认）
 engram_recall "缓存命中率"   # 应召回相关记忆（bge 工作）
 dev_plugin_status  # super-injector active
 ```
