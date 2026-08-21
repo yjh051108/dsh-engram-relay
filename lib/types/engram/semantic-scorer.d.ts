@@ -40,6 +40,8 @@ export declare class SemanticScorer {
      * 对候选打分（同步纯算法）：score = α·lexical + β·graph + γ·cooc。
      * α/β/γ 初始标定（0.5/0.25/0.25）；后续可经 fit-tau 数据驱动调整。
      */
+    /** 查询级结果缓存（LRU 16——重复查询免重算；压力阀场景同主题多轮查询收益大） */
+    private scoreCache;
     score(query: string, candidates: EngramNode[]): Map<string, SemanticScore>;
     /** store 变化后调用（共现表懒重建——写入/蒸馏后）。 */
     markDirty(): void;

@@ -207,9 +207,20 @@ export class SemanticScorer {
    * 对候选打分（同步纯算法）：score = α·lexical + β·graph + γ·cooc。
    * α/β/γ 初始标定（0.5/0.25/0.25）；后续可经 fit-tau 数据驱动调整。
    */
+  /** 查询级结果缓存（LRU 16——重复查询免重算；压力阀场景同主题多轮查询收益大） */
+  private scoreCache = new Map<string, Map<string, SemanticScore>>()
+
   score(query: string, candidates: EngramNode[]): Map<string, SemanticScore> {
     const out = new Map<string, SemanticScore>()
     if (candidates.length === 0) return out
+    // 命中缓存（候选 id 集不变才可用）
+    const key = query + '|' + candidates.map((c) => c.id).join(',')
+    const cached = this.scoreCache.get(key)
+    if (cached) {
+      this.scoreCache.delete(key)
+      this.scoreCache.set(key, cached)
+      return new Map(cached)
+    }
     const qGrams = charNgrams(query, 2)
     const qWords = wordsOf(query)
     // 图语义种子：查询哈希命中（O(1) 寻址）
@@ -272,6 +283,12 @@ export class SemanticScorer {
         graph: s.graph,
         cooc: Number(cooc.toFixed(4)),
       })
+    }
+    // LRU 写缓存（16 上限）
+    this.scoreCache.set(key, new Map(out))
+    if (this.scoreCache.size > 16) {
+      const first = this.scoreCache.keys().next().value
+      if (first !== undefined) this.scoreCache.delete(first)
     }
     return out
   }

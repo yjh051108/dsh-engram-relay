@@ -111,16 +111,18 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
       const q = url.searchParams.get('q') ?? ''
       const limit = Math.min(10, Number(url.searchParams.get('limit') ?? 5))
+      const _t0 = Date.now()
       try {
         const hit = await relay.wake.query(q, limit, {
           sessionId: relay.currentSessionId ?? undefined,
           cwd: relay.currentCwd ?? undefined,
-        })
+        }, { skipVerify: true })
         const items = hit.engrams.map((e) => ({
           id: e.id, title: e.title, summary: e.summary, kind: e.kind,
           layer: e.layer, importance: e.importance, hits: e.hits,
           verify: hit.verify?.[e.id] ?? null,
         }))
+        ;(relay as unknown as { debugLog?: (m: string) => void }).debugLog?.(`search ${q.slice(0, 16)} took ${Date.now() - _t0}ms reason=${hit.reason} items=${items.length}`)
         sendJson(res, 200, { query: q, reason: hit.reason, items, total: items.length })
       } catch (error) {
         sendJson(res, 500, { error: String(error).slice(0, 200) })

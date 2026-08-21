@@ -87,6 +87,7 @@ export declare class EngramWakeEngine {
     /** 核心查询：向量/哈希粗筛 → 分层准入 → 语义精排（bge）→ 因果传播 → 分层稀疏选择。 */
     query(query: string, limit: number, viewer?: WakeViewer, opts?: {
         auto?: boolean;
+        skipVerify?: boolean;
     }): Promise<WakeHit>;
     /** 渲染记忆注入段（动态预算：按相关度分级——高分完整入口、中分标题+摘要、低分仅标题）。 */
     renderInjection(budgetTokens: number): string;

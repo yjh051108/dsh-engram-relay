@@ -154,7 +154,7 @@ export class EngramWakeEngine {
   }
 
   /** 核心查询：向量/哈希粗筛 → 分层准入 → 语义精排（bge）→ 因果传播 → 分层稀疏选择。 */
-  async query(query: string, limit: number, viewer: WakeViewer = {}, opts: { auto?: boolean } = {}): Promise<WakeHit> {
+  async query(query: string, limit: number, viewer: WakeViewer = {}, opts: { auto?: boolean; skipVerify?: boolean } = {}): Promise<WakeHit> {
     // （浅思维拉取移至 hit 构建后——条件算子需要唤醒结果）
     // 1. 粗筛：向量索引（prefilter 钩子，语义无盲区）→ 回退哈希 lookup。
     //    多取候选：分层准入会过滤掉一部分，保证命中不因层过滤而丢失。
@@ -302,7 +302,7 @@ export class EngramWakeEngine {
     }
     // 融合：灵枢白箱验证闸门——选中的 engram 过 auto_verify，标注注入行
     // （✓锚定 / ~部分 / ?图谱外）；验证失败降级为无标注，绝不阻塞唤醒。
-    const vf = this.verifier
+    const vf = opts.skipVerify ? undefined : this.verifier
     if (vf && picked.length > 0) {
       const marks: Record<string, VerifyMark> = {}
       await Promise.all(
