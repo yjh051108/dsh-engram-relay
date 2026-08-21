@@ -158,7 +158,18 @@ class DexHandler(BaseHTTPRequestHandler):
             else:
                 words.add(s[:2]); words.add(s[-2:])
         _QW = set("怎么 什么 如何 为啥 为什么 哪些 哪个 多少 哪里 何时 是否 有没有 能不能 会不会 怎么样 怎样 这样 那样 一个 一种 一下 起来 以后 内容 东西".split())
-        new_words = [w for w in words if w not in existing and w not in top_name and w not in _QW]
+        # 已覆盖词：翻译表 + 目标卡 trigger（从卡库查——避免建无用簇）
+        from aeis.core import MemoryLayer as _ML
+        _top_trig = set()
+        try:
+            for _n in self.cloud.store.query_nodes(layer=_ML.KNOWLEDGE, limit=2000):
+                _sa = _n.state_attributes or {}
+                if _sa.get("name") == top_name:
+                    _top_trig = set(t.strip() for t in str((_sa.get("response") or {}).get("trigger") or "").split(",") if t.strip())
+                    break
+        except Exception:
+            pass
+        new_words = [w for w in words if w not in existing and w not in _top_trig and w not in top_name and w not in _QW]
         if not new_words:
             rec["count"] = 0  # 无新词可补，重置计数
             return None
