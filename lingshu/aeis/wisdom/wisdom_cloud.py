@@ -275,6 +275,15 @@ class DexHandler(BaseHTTPRequestHandler):
                     if cluster_hint: self._LEARN_STATS["clusters"] += 1
                 except Exception:
                     pass
+                # 学习趋势持久化（每 20 次响应快照——跨重启长期观测）
+                try:
+                    if self._LEARN_STATS["respond"] % 20 == 0:
+                        with open(r"D:\\aeis\\learn_stats.log", "a", encoding="utf-8") as _f:
+                            import datetime as _dt
+                            _f.write(_dt.datetime.now().isoformat(timespec="seconds") + " " +
+                                     json.dumps(self._LEARN_STATS, ensure_ascii=False) + "\n")
+                except Exception:
+                    pass
                 return {"op": op, "results": results, "cluster": cluster_hint, "learn": dict(self._LEARN_STATS)}
             if op == "status_node":
                 return {"op": op, "results": d.dex_status(params.get("node_id", ""))}
