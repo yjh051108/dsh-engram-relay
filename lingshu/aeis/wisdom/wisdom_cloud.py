@@ -208,6 +208,9 @@ class DexHandler(BaseHTTPRequestHandler):
                 name = params.get("name", "")
                 if not name:
                     return {"op": op, "ok": False, "error": "name required"}
+                # 学习统计：auto-gap 来源计数（补卡仪表盘）
+                if str(params.get("source", "")) == "auto-gap":
+                    self._LEARN_STATS["cards"] += 1
                 # 同名查重（灵枢 _by_name upsert——重复写入会覆盖，先查）
                 if hasattr(d, "_by_name") and name in d._by_name:
                     return {"op": op, "ok": True, "existed": True, "name": name}
