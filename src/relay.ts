@@ -757,9 +757,13 @@ function fallbackDistill(conversation: string): Array<{ kind: string; layer: str
   if (clean.length < 20) clean = text.slice(-200).replace(/^[用户助手AI]\s*[:：]?\s*/i, '').trim()
   if (clean.length < 20) return []
   // 去引导词 + 取首个完整句段（标题不再从词中间切）
-  let title = clean.replace(/^[询问请问查找查询关于]+/i, '')
+  // v0.3.120：清洗行首 markdown 符号（##/###/emoji/列表符——蒸馏汇报残留）
+  let title = clean
+    .replace(/^[\s#>*\-]+/, '')
+    .replace(/^[🗑️✅❌🔧📌✨⚡🏷️]+/, '')
+    .replace(/^[询问请问查找查询关于]+/i, '')
     .split(/[，。！？,.!?;；\n]/)[0]
-    .replace(/[\[\]()（）]/g, '').trim().slice(0, 10)
+    .replace(/[\[\]()（）#]/g, '').trim().slice(0, 10)
   if (!title || /^(assistant|user|ai|助手|用户|对话)$/i.test(title)) title = '对话片段'
   return [{ kind: 'note', layer: 'session', title, summary: clean.slice(0, 80), content: clean }]
 }
