@@ -284,10 +284,16 @@ class DexHandler(BaseHTTPRequestHandler):
                     horizon=int(params.get("horizon", 2)),
                     limit=int(params.get("limit", 4)))}
             if op == "auto_verify":
+                # 传 translator（与 respond 一致）——锚定走翻译表评分链路
+                try:
+                    import semantic_translate as _st
+                except Exception:
+                    _st = None
                 return {"op": op, "results": d.dex_auto_verify(
                     params.get("knowledge", ""),
                     limit=int(params.get("limit", 5)),
-                    threshold=float(params.get("threshold", 0.50)))}
+                    threshold=float(params.get("threshold", 0.50)),
+                    translator=_st)}
             if op == "compose":
                 return {"op": op, "results": d.dex_compose(
                     params.get("knowledge", ""),

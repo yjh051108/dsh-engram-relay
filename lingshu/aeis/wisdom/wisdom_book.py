@@ -1390,12 +1390,18 @@ class ConditionDex:
                            "kind": "record", "content": n.content, "tags": tags})
         return ev
 
-    def dex_auto_verify(self, knowledge, limit=5, threshold=0.50):
+    def dex_auto_verify(self, knowledge, limit=5, threshold=0.50, translator=None):
         """自动验证：基地自动裁判取代人工 T。取信息差最少的判断（领先次优≥0.04 且 D_norm<0.65 才采纳）。
         阈值实证（45 正例/15 负例）：最优 0.65（F1=0.95，假阳性 0）优于 0.68（假阳性 13%）。"""
         base = self._base_evidence()
-        pred = self.dex_predict(knowledge, horizon=1, limit=limit)
-        anchors = pred.get("anchors", [])[:limit]
+        # 统一锚定链路：候选改用 dex_respond（翻译表+fused 评分，与出招一致）——
+        # 避免 predict 预测链路与 respond 评分链路分歧导致的误锚
+        cands = self.dex_respond(knowledge, limit=limit, translator=translator)
+        anchors = []
+        for c in cands:
+            node = self._resolve_entry(c.get("name")) if c.get("name") else None
+            if node is not None:
+                anchors.append({"id": node.id, "score": float(c.get("score") or 0), "name": c.get("name")})
         if not anchors:
             # 无锚定：基地也检索不到 → 诚实盲区
             rec = {"type": "自动验证记录", "知识": knowledge[:24], "判定": "无法判断（词汇表外）",
@@ -1458,7 +1464,8 @@ class ConditionDex:
         # 采纳条件：相对缩减显著（领先次优）+ 绝对信息差可接受
         runner_up = scored[1]["d_norm"] if len(scored) > 1 else 1.0
         lead = runner_up - best["d_norm"]
-        if lead >= 0.04 and best["d_norm"] < 0.65:
+        # lead 0.01（配合 D_norm<0.65 双门槛；主防线是 D_norm——负例全 ≥0.65 被挡）
+        if lead >= 0.01 and best["d_norm"] < 0.65:
             judgment = f"采纳「{best['name']}」为工作假设"
             judgment_note = (f"信息差最少的判断：{best['name']}（D_norm={best['d_norm']}，"
                              f"领先次优 {runner_up} 达 {round(lead,3)}）——"
