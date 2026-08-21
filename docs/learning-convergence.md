@@ -57,3 +57,8 @@
 **结论**：补卡（λ）→ 覆盖率上升（c 增）——学习机制在真实数据上验证数学收敛方向。
 持续观测：respond 响应携带 learn 统计（strong/weak/miss/clusters/cards），
 多会话使用后 strong 占比应随学习事件增长——长期收敛曲线的仪表盘。
+
+## 长期观测（v0.3.53 起）
+
+灵枢侧每 20 次出招将学习统计快照追加到 `learn_stats.log`（时间戳 + strong/weak/miss/clusters/cards）——
+跨重启累积，多日使用后可直接绘制覆盖率收敛曲线（c(t) 实测轨迹）。
