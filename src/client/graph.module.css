@@ -3,17 +3,10 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  /* ⚠️ v0.6 兜底：宿主容器可能本身超高（conversation.view 容器高度异常）
-     导致图谱组件假设的可视区超出屏幕实际可视区（用户实测'下面看不见、
-     要下滑'）——max-height:100vh 保证图谱**绝不超出屏幕可视高度**；
-     父容器正常（≤视口）时不生效 */
-  max-height: 100vh;
   gap: 8px;
   padding: 12px;
   box-sizing: border-box;
   font-size: 13px;
-  /* 图谱 Tab 自身禁止滚动——内容超出时由 canvas 内部消化 */
-  overflow: hidden;
 }
 
 .toolbar {
@@ -94,64 +87,50 @@
 .canvas {
   position: relative;
   flex: 1;
-  /* ⚠️ v0.6 关键修复：flex 子项默认 min-height:auto 会按内容撑破容器
-     （svg 100% 高度链）→ 产生滚动条、图谱只显示部分。min-height:0 让
-     canvas 严格占满剩余空间，图谱占满整个可视框 */
-  min-height: 0;
+  min-height: 320px;
   border: 1px solid rgba(127, 127, 127, 0.15);
   border-radius: 8px;
   overflow: hidden;
-  background: rgba(0, 0, 0, 0.15);
+  background: radial-gradient(ellipse at center, rgba(74, 125, 255, 0.05), rgba(0, 0, 0, 0.18) 70%);
 }
 
 .svg {
-  /* ⚠️ v0.6 关键修复：absolute + inset:0 严格填满画布——height:100% 在
-     高度链断裂时回退到 viewBox 固有比例（宽度×900/620）把 svg 撑成超高
-     矩形 → 内容超出可视区、下面 1/3 被切掉（用户实测'偏上/需下滑'根因） */
-  position: absolute;
-  inset: 0;
   width: 100%;
   height: 100%;
   display: block;
-  cursor: grab; /* 无限画布：空白处拖拽平移 */
   touch-action: none;
-}
-
-.edge {
-  pointer-events: none;
-}
-
-/* 自发簇大圆（连通分量）——项目即标签的几何形态 */
-.cluster {
-  pointer-events: none;
-}
-
-.clusterLabel {
-  fill: var(--ds-color-text-3, #6a7284);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
+  cursor: grab;
   user-select: none;
 }
 
-.node {
-  cursor: pointer;
-  /* ⚠️ v0.6 用户反馈"外白内黑的框"：节点 g 带 tabIndex 点击后获得焦点，
-     浏览器画默认矩形 outline（白框包住圆+标签）——去掉 */
-  outline: none;
+.svgPanning {
+  cursor: grabbing;
 }
 
-.node:focus {
-  outline: none;
+/* 边：随距离淡出 + 挂载淡入（过滤切换时新边平滑出现） */
+.edge {
+  pointer-events: none;
+  transition: opacity 0.25s;
+  animation: edgeFade 0.4s ease;
+}
+
+@keyframes edgeFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* 节点：过滤切换时位置平滑过渡（CSS transform），悬停淡出其余 */
+.node {
+  cursor: pointer;
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s;
 }
 
 .node circle {
-  transition: r 0.15s, filter 0.15s;
+  transition: r 0.15s, stroke-width 0.15s;
 }
 
-/* semantic（固化知识）节点：悬浮时发光强化层次感 */
-.nodeSemantic circle {
-  filter: drop-shadow(0 0 6px rgba(74, 125, 255, 0.35));
+.nodeHover circle {
+  filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.45));
 }
 
 .nodeLabel {
@@ -159,15 +138,12 @@
   font-size: 10px;
   pointer-events: none;
   user-select: none;
+  transition: fill 0.15s;
 }
 
-/* semantic 节点标签：更亮更大（知识锚点） */
-.nodeLabelSemantic {
-  fill: var(--ds-color-text-1, #e8eaee);
-  font-size: 11px;
+.nodeLabelHover {
+  fill: #e8eaee;
   font-weight: 600;
-  pointer-events: none;
-  user-select: none;
 }
 
 .legend {
@@ -182,6 +158,7 @@
   background: rgba(0, 0, 0, 0.35);
   border-radius: 6px;
   padding: 4px 10px;
+  pointer-events: none;
 }
 
 .legendLineSolid {
@@ -211,30 +188,27 @@
   vertical-align: middle;
 }
 
-.legendCluster {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1.5px dashed rgba(138, 148, 166, 0.5);
-  margin-right: 5px;
-  vertical-align: middle;
-}
-
-/* ---- 详情侧栏（v0.6：悬浮 overlay——不占布局，图谱始终占满可视框） ---- */
-.detail {
+/* 缩放/平移提示（右下角，浅色胶囊） */
+.zoomHint {
   position: absolute;
   right: 10px;
-  top: 10px;
-  bottom: 10px;
-  width: 280px;
+  bottom: 8px;
+  font-size: 11px;
+  color: var(--ds-color-text-3, #5c6572);
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 6px;
+  padding: 3px 10px;
+  pointer-events: none;
+}
+
+/* ---- 详情侧栏 ---- */
+.detail {
   border: 1px solid rgba(127, 127, 127, 0.2);
   border-radius: 8px;
   padding: 10px 12px;
-  background: rgba(10, 14, 22, 0.92);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  background: rgba(0, 0, 0, 0.2);
+  max-height: 260px;
   overflow: auto;
-  z-index: 10;
 }
 
 .detailHead {

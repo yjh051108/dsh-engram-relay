@@ -99,7 +99,7 @@ class CoocSemantics {
   private rebuild(): void {
     this.built = true
     this.co = new Map()
-    const nodes = this.store.all().filter((e) => e.status !== 'pending' && !e.supersededBy)
+    const nodes = this.store.all().filter((e) => e.status !== 'pending')
     if (nodes.length < 2) return
     const df = new Map<string, number>()
     const nodeWords: string[][] = []
@@ -268,6 +268,11 @@ export class SemanticScorer {
       })
     }
     return out
+  }
+
+  /** store 变化后调用（共现表懒重建——写入/蒸馏后）。 */
+  markDirty(): void {
+    this.cooc.markDirty()
   }
 
   /** 图语义种子暴露（调试/测试）。 */

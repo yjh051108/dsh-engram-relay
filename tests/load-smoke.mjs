@@ -13,11 +13,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-if (!process.env.DSH_CHECKOUT) {
-  console.error('请设置环境变量 DSH_CHECKOUT 指向 dsh 源码 checkout（运行：DSH_CHECKOUT=<checkout> node tests/load-smoke.mjs）')
-  process.exit(2)
-}
-const CHECKOUT = process.env.DSH_CHECKOUT
+const CHECKOUT = process.env.DSH_CHECKOUT ?? 'C:/Users/Eldwen/.dsh/source/staging-20260809T150526Z'
 const toUrl = (p) => new URL(`file:///${p.replace(/\\/g, '/')}`).href
 
 async function main() {

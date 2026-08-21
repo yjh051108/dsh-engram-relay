@@ -12,7 +12,7 @@
  *    双向传播（前因/后果）→ 只注入极少数超稀疏痕迹（预算默认 600
  *    token），渐进披露（入口 = [[标题]] + 摘要，按需展开全文）；
  *  - 写入：模型经 engram_store 工具落节点（分层/标题/摘要/正文/链接/
- *    因果），记忆跨会话持久（global/project 两层，session 层已删除）；
+ *    因果），session 层在会话结束清理，global/project 跨会话持久；
  *  - 维护：engram_search（盘点）/ link（织图谱）/ update / remove /
  *    promote（session→project/global 转长期）——类 LSP 的能力声明 +
  *    按需请求-响应；
@@ -47,14 +47,7 @@ export interface Config {
     embedModel: string;
     distillRequireConfirm: boolean;
     semanticMinScore: number;
-    recencyWeight: number;
-    wakeSampleLog: boolean;
-    tauSem: number;
-    tauTime: number;
-    tauCause: number;
-    maxNodes: number;
-    lessonMinScore: number;
-    lessonBudgetTokens: number;
+    lingshuVerifyUrl: string;
 }
 export declare const Config: z<Config>;
 export declare function apply(ctx: Context, config: Config): void;

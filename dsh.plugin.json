@@ -1,9 +1,4 @@
 {
-  "id": "dsh-engram-relay",
-  "version": "0.1.0",
-  "main": "./lib/index.js",
-  "description": "外置 engram 转接层：跨会话分层记忆（global/project/session，AI 自主决策归属）+ N-gram 哈希寻址 × bge 语义精排 × 因果图传播的超稀疏主动唤醒 + 渐进披露，与官方 compact 共存",
-  "engines": { "dsh": ">=0.0.1" },
   "contributes": {
     "tools": [
       "engram_recall",
@@ -17,9 +12,9 @@
       "engram_update",
       "engram_remove",
       "engram_promote",
-      "engram_weave",
-      "engram_status"
-    ],
-    "skills": []
+      "engram_status",
+      "engram_verify",
+      "engram_respond"
+    ]
   }
 }

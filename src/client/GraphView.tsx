@@ -3,13 +3,17 @@
  *
  * 数据面：host 的 /engram-relay/api/graph（分层准入：global + 本目录
  * project + 本会话 session）。渲染：确定性力导向布局（force.ts）+ SVG。
- *  - 节点 = 记忆（颜色按层：global 蓝 / project 绿 / session 橙）
- *  - 实线边 = 因果（causes），虚线边 = 双向链接（link）
- *  - 点击节点 → 拉取详情（渐进披露第二层：正文/前因/后果/关联）
- *  - 层过滤 + 刷新
+ *  - 节点 = 记忆（颜色按层：global 蓝 / project 绿 / session 橙；
+ *    半径随 importance 增长）
+ *  - 实线边 = 因果（causes），虚线边 = 双向链接（link），随距离淡出
+ *  - 交互：滚轮缩放（以光标为中心）、拖拽平移、双击复位、
+ *    悬停高亮邻接网络（其余淡化）+ 原生 tooltip（标题/摘要）、
+ *    点击节点 → 详情侧栏（渐进披露第二层）
+ *  - 过滤切换时节点位置平滑过渡（CSS transform），标签贪心防重叠、
+ *    缩放足够深才批量显示（悬停节点标签常显）
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { layoutForce, type ForceLayout, type ForcePoint } from './force.ts'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { layoutForce, type ForcePoint } from './force.ts'
 import styles from './graph.module.css'
 
 export interface GraphNodeData {
@@ -17,13 +21,11 @@ export interface GraphNodeData {
   title: string
   summary: string
   kind: string
-  layer: 'global' | 'project'
+  layer: 'global' | 'project' | 'session'
   projectId: string | null
   importance: number
   hits: number
   createdAt: number
-  /** 巩固状态（v0.5 视觉分层：semantic=固化知识突出显示）。 */
-  state: string
 }
 
 export interface GraphEdgeData {
@@ -38,14 +40,57 @@ interface GraphData {
   total: number
 }
 
+interface NodeDetail extends GraphNodeData {
+  content: string
+  causes: GraphNodeData[]
+  effects: GraphNodeData[]
+  links: GraphNodeData[]
+}
+
 /** 层 → 颜色。 */
 export const LAYER_COLORS: Record<string, string> = {
   global: '#4a7dff',
   project: '#34c98a',
+  session: '#ff9f43',
+}
+
+/** 边类型 → 渲染样式。 */
+export const EDGE_STYLE: Record<'causes' | 'link', { color: string; dash: string }> = {
+  causes: { color: '#8a94a6', dash: '' },
+  link: { color: '#aab2c0', dash: '5 4' },
 }
 
 const VIEW_W = 900
 const VIEW_H = 620
+const MIN_K = 0.2
+const MAX_K = 3.2
+
+/** 视口变换：先平移后缩放（屏幕 = t + p·k）。 */
+interface Transform { x: number; y: number; k: number }
+
+/** 把一组节点点集适配进画布（含标签/半径余量），返回初始变换。 */
+function fitTransform(points: Array<{ x: number; y: number; r: number }>, w: number, h: number): Transform {
+  if (points.length === 0) return { x: w / 2, y: h / 2, k: 1 }
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const p of points) {
+    const m = p.r + 42 // 半径 + 标签余量
+    if (p.x - m < minX) minX = p.x - m
+    if (p.y - m < minY) minY = p.y - m
+    if (p.x + m > maxX) maxX = p.x + m
+    if (p.y + m > maxY) maxY = p.y + m
+  }
+  const bw = Math.max(1, maxX - minX)
+  const bh = Math.max(1, maxY - minY)
+  const k = Math.min(1.25, Math.max(0.25, 0.92 * Math.min(w / bw, h / bh)))
+  return {
+    k,
+    x: (w - bw * k) / 2 - minX * k,
+    y: (h - bh * k) / 2 - minY * k,
+  }
+}
 
 interface GraphViewProps {
   t: (key: string, params?: Record<string, unknown>) => string
@@ -55,46 +100,15 @@ interface GraphViewProps {
 
 export function GraphView({ t, sessionId }: GraphViewProps) {
   const [data, setData] = useState<GraphData | null>(null)
+  const [detail, setDetail] = useState<NodeDetail | null>(null)
+  const [filter, setFilter] = useState<string>('all')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  // 无限画布视口（viewBox 四元组）：世界坐标无限，视口自由缩放/平移。
-  //  vx/vy = 视口左上角世界坐标，vw/vh = 视口尺寸（世界单位）
-  const VIEW_DEFAULT = { vx: 0, vy: 0, vw: VIEW_W, vh: VIEW_H }
-  const [view, setView] = useState(VIEW_DEFAULT)
-  const viewRef = useRef(view)
-  viewRef.current = view
-  const svgRef = useRef<SVGSVGElement>(null)
-  const dragRef = useRef<{ startX: number; startY: number; startView: typeof VIEW_DEFAULT; rect: DOMRect; moved: boolean } | null>(null)
-  const lastWheelRef = useRef(0)
-  // ⚠️ v0.6 布局区域跟随容器实际尺寸（用户反馈：宽屏画布节点只占中间
-  // 小正方形、左右大片空白——布局固定 900×620 世界区域导致）：
-  // ResizeObserver 读 canvas 容器宽高 → 布局在容器比例的区域内展开 →
-  // fit 后节点铺满画布
-  const [canvasSize, setCanvasSize] = useState({ w: VIEW_W, h: VIEW_H })
-  useEffect(() => {
-    const el = svgRef.current?.parentElement
-    if (!el) return
-    const ro = new ResizeObserver(() => {
-      const r = el.getBoundingClientRect()
-      if (r.width > 0 && r.height > 0) setCanvasSize({ w: r.width, h: r.height })
-    })
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [loading])
-
-  // v0.5 缩放补偿：节点/文字尺寸随视口缩放**反向补偿**——屏幕大小 =
-  // 世界值 × (svgWidth/vw)，要屏幕恒定 → 世界值 = 基准 × (vw/VIEW_W) =
-  // 基准 ÷ zoomScale（⚠️ 曾误乘 zoomScale 越放大越大——已修正）。
-  // v0.6 折中（用户要求"缩得极小节点也得缩小"）：**放大恒定、缩小跟随**——
-  // 补偿系数 zc = max(zoomScale, 1)：放大（zoomScale>1）屏幕恒定；
-  // 缩小（zoomScale<1）世界尺寸不变 → 屏幕按比例变小，不挤成一坨。
-  const zoomScale = VIEW_W / view.vw
-  // ⚠️ 补偿系数三分段（v0.6 用户要求"放大到够稀疏就该真放大——摄像头靠前"）：
-  //  缩小（zoomScale<1）    → zc=1：元素世界尺寸不变，屏幕跟随缩小（不挤）
-  //  放大初期（1..2.5）     → zc=zoomScale：屏幕恒定，间距变大（变稀疏）
-  //  放大后期（>2.5 已够稀疏）→ zc=2.5 封顶：元素屏幕开始随缩放**一起变大**
-  //    （整体放大感——稀疏度不再变，是摄像头靠前）
-  const zc = Math.max(1, Math.min(zoomScale, 2.5))
+  const [tf, setTf] = useState<Transform>({ x: 0, y: 0, k: 1 })
+  const [hover, setHover] = useState<string | null>(null)
+  const [panning, setPanning] = useState(false)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const panState = useRef<{ sx: number; sy: number; tx: number; ty: number } | null>(null)
 
   const loadGraph = (): void => {
     setLoading(true)
@@ -112,316 +126,202 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId])
 
-  // 节点/边（v0.6：单一全局视图——无过滤按钮，一张图显示全部）
-  const { nodes, edges } = useMemo(() => {
-    if (data === null) return { nodes: [], edges: [] }
-    const ids = new Set(data.nodes.map((n) => n.id))
+  // 层过滤 + 布局（确定性力导向，含碰撞分离硬约束）。
+  const { nodes, edges, layout, radiusOf, neighbors } = useMemo(() => {
+    if (data === null) return { nodes: [], edges: [], layout: new Map<string, ForcePoint>(), radiusOf: new Map<string, number>(), neighbors: new Map<string, Set<string>>() }
+    const visible = filter === 'all' ? data.nodes : data.nodes.filter((n) => n.layer === filter)
+    const ids = new Set(visible.map((n) => n.id))
     const visibleEdges = data.edges.filter((e) => ids.has(e.from) && ids.has(e.to))
-    return { nodes: data.nodes, edges: visibleEdges }
-  }, [data])
-
-  // 自发簇（v0.4 终态优先）：前端对边做连通分量——簇由链接/因果密度
-  // 自然形成（不依赖项目标签）。项目标签只作簇名（硬编码簇 = 脚手架；
-  // 簇跨项目 = 融会贯通/套娃在图上可见）。
-  const clusters = useMemo(() => {
-    if (nodes.length === 0) return { list: [], clusterOf: new Map<string, string>() }
-    const adj = new Map<string, Set<string>>()
-    for (const n of nodes) adj.set(n.id, new Set())
-    for (const e of edges) {
-      adj.get(e.from)?.add(e.to)
-      adj.get(e.to)?.add(e.from)
+    // 半径随 importance（7–16），权重随 importance（0.6–1.6）
+    const radiusOf = new Map<string, number>()
+    for (const n of visible) {
+      radiusOf.set(n.id, 7 + Math.max(0, Math.min(1, n.importance)) * 9)
     }
-    const visited = new Set<string>()
-    const list: Array<{ ids: string[]; projects: Set<string | null> }> = []
-    const clusterOf = new Map<string, string>()
-    for (const n of nodes) {
-      if (visited.has(n.id)) continue
-      const ids: string[] = []
-      const projects = new Set<string | null>()
-      const queue = [n.id]
-      visited.add(n.id)
-      while (queue.length > 0) {
-        const id = queue.shift()!
-        ids.push(id)
-        projects.add(nodes.find((x) => x.id === id)?.projectId ?? null)
-        for (const nb of adj.get(id) ?? []) {
-          if (!visited.has(nb)) { visited.add(nb); queue.push(nb) }
-        }
-      }
-      const cid = `c${list.length}`
-      for (const id of ids) clusterOf.set(id, cid)
-      list.push({ ids, projects })
-    }
-    return { list, clusterOf }
-  }, [nodes, edges])
-  const clusterList = clusters.list
-  const clusterOf = clusters.clusterOf
-
-  // ---- 静态布局（v0.6：一开始就显示全、秒显示；布局区域跟随容器）----
-  // 节点度（链接数——hub 节点大小；⚠️ 必须在 layout 之前——layout 需要
-  // 它算节点碰撞半径，TDZ 会崩）
-  const degreeOf = useMemo(() => {
-    const deg = new Map<string, number>()
-    for (const e of edges) {
-      deg.set(e.from, (deg.get(e.from) ?? 0) + 1)
-      deg.set(e.to, (deg.get(e.to) ?? 0) + 1)
-    }
-    return deg
-  }, [edges])
-
-  const layout = useMemo(() => {
-    // ⚠️ 项目引力分组：**所有节点入组**（null 项目归 '__solo__' 组——
-    // 通用节点若不参与项目引力，会被斥力散布全图、把布局纵向撑爆
-    // （自视实测高 199% 远超画布）；归组后聚在画布中心）
-    const projectGroups = new Map<string, string>()
-    for (const n of nodes) {
-      projectGroups.set(n.id, n.projectId ?? '__solo__')
-    }
-    return layoutForce(
-      // ⚠️ 传节点半径（v0.6"碰撞边界"：collide 按实际半径——hub 节点
-      // 半径 ~22，固定 12 会互相压叠）
-      nodes.map((n) => {
-        const deg = degreeOf.get(n.id) ?? 0
-        const isSem = n.state === 'semantic'
-        const isEvt = n.kind === 'event'
-        const rBase = (7 + Math.min(9, deg * 1.2) + (isSem ? 3 : 0) + n.importance * 1.5) * (isEvt ? 0.7 : 1)
-        return { id: n.id, weight: 0.6 + n.importance, radius: Math.max(12, rBase) }
-      }),
-      edges.map((e) => ({ from: e.from, to: e.to })),
+    const layout = layoutForce(
+      visible.map((n) => ({ id: n.id, weight: 0.6 + n.importance, radius: radiusOf.get(n.id) })),
+      visibleEdges.map((e) => ({ from: e.from, to: e.to })),
       {
-        width: canvasSize.w, height: canvasSize.h, iterations: 250,
-        charge: -100,
-        spring: 0.1,
-        springLength: 110,
-        collideRadius: 22,
-        centerStrength: 0.08,
-        clusters: clusterOf.size > 0 ? clusterOf : undefined,
-        clusterTarget: 110,
-        clusterStrength: 0.04,
-        projectGroups: projectGroups.size > 0 ? projectGroups : undefined,
-        projectStrength: 0.8,
+        // 两阶段布局（组件级排布 → 成员级展开）：布局保持自然尺度，
+        // 视图经 fitTransform 缩放适配；参数经 95 节点压力图扫描定稿
+        // （聚团比 4.9、零重叠、边距≈110）
+        iterations: 250,
+        repulsionScale: 0.25,
+        springScale: 2.0,
+        center: 0.02,
+        alphaDecay: 0.995,
+        damping: 0.8,
+        maxMove: 8,
+        radius: 12,
+        gap: 14,
       },
     )
-  }, [nodes, edges, clusterOf, canvasSize])
-
-  // ---- 渲染性能（v0.6 用户反馈"加载很久很卡"：卡顿根源 = 缩放/平移时
-  // 每帧全量重渲染 1000+ SVG 元素）----
-  // ① 视口裁剪：只渲染当前 view 内（含余量）的节点与边——放大时可见
-  //    元素骤减，缩放流畅
-  const cull = (p: ForcePoint, margin = 150 / zc): boolean =>
-    p.x >= view.vx - margin && p.x <= view.vx + view.vw + margin
-    && p.y >= view.vy - margin && p.y <= view.vy + view.vh + margin
-  // ② 缩小隐藏标签：zoomScale < 0.35（标签屏幕 <4px 无意义）不渲染 text
-  //    ——缩小时少 ~1/3 元素
-  // ⚠️ 阈值 0.35→1.0（v0.6 用户实测"严重重叠"真因：fit 全显时 zoomScale
-  // ≈0.65 > 0.35——几百个标签在缩小态全部显示糊成一团；放大到 1x 以上
-  // （节点屏幕 ≈12px）才显示标签，间距够不糊）
-  const showLabels = zoomScale >= 1.0
-
-  // 选中高亮（v0.5：**单击节点只高亮延展边，不弹详情框**——详情改双击
-  // 打开；点空白取消高亮回到总图）。邻居边/邻居节点高亮，其余淡出。
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  const highlight = useMemo(() => {
-    const sel = selectedId
-    if (sel === null) return null
-    const nodeIds = new Set<string>([sel])
-    const edgeKeys = new Set<string>()
-    for (const e of edges) {
-      if (e.from === sel || e.to === sel) {
-        nodeIds.add(e.from)
-        nodeIds.add(e.to)
-        edgeKeys.add(`${e.from}|${e.to}|${e.kind}`)
-      }
+    const neighbors = new Map<string, Set<string>>()
+    for (const n of visible) neighbors.set(n.id, new Set())
+    for (const e of visibleEdges) {
+      neighbors.get(e.from)?.add(e.to)
+      neighbors.get(e.to)?.add(e.from)
     }
-    return { nodeIds, edgeKeys }
-  }, [selectedId, edges])
+    return { nodes: visible, edges: visibleEdges, layout, radiusOf, neighbors }
+  }, [data, filter])
 
-  // ---- 视口（v0.6：静态图——**一开始就显示全**，无运镜动画）----
-  // fitToCurrent：**包围盒全显**（v0.6 布局已收敛到画布内 94%——不再用
-  // 裁剪式画布比例 fit，那会纵向裁掉行 0/行 1 圆边缘，看起来"挤/叠"）
-  const fitToCurrent = (): { vx: number; vy: number; vw: number; vh: number } | null => {
-    const pts = nodes
-      .map((n) => layout.get(n.id))
-      .filter((p): p is ForcePoint => p !== undefined)
-    if (pts.length === 0) return null
-    const pad = 80
-    const minX = pts.reduce((s, p) => Math.min(s, p.x), Infinity) - pad
-    const maxX = pts.reduce((s, p) => Math.max(s, p.x), -Infinity) + pad
-    const minY = pts.reduce((s, p) => Math.min(s, p.y), Infinity) - pad
-    const maxY = pts.reduce((s, p) => Math.max(s, p.y), -Infinity) + pad
-    return {
-      vx: minX,
-      vy: minY,
-      vw: Math.max(200, maxX - minX),
-      vh: Math.max(150, maxY - minY),
-    }
-  }
-  // fitToCurrent 的最新引用（拖拽 effect 的 onUp 闭包需要）
-  const fitToCurrentRef = useRef(fitToCurrent)
-  fitToCurrentRef.current = fitToCurrent
-  // 自动适配视口：数据就绪 / **canvasSize 变化**（ResizeObserver 异步回调
-  // 晚于首次渲染——布局重新按容器比例（如 2.12:1）展开后必须重新 fit，
-  // 否则节点仍挤在默认 900×620 的中间方形区域；用户手动缩放不触发）
-  const lastFitKeyRef = useRef('')
+  // 布局变化（数据/过滤切换）→ 自动适配视图。
+  const refit = useCallback((): void => {
+    const pts = [...layout.entries()].map(([id, p]) => ({ x: p.x, y: p.y, r: radiusOf.get(id) ?? 12 }))
+    setTf(fitTransform(pts, VIEW_W, VIEW_H))
+  }, [layout, radiusOf])
+
   useEffect(() => {
-    if (nodes.length === 0 || layout.size === 0) return
-    const key = `${nodes.length}|${canvasSize.w}x${canvasSize.h}`
-    if (lastFitKeyRef.current === key) return
-    lastFitKeyRef.current = key
-    const f = fitToCurrent()
-    if (f !== null) setView(f)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, layout, canvasSize])
+    refit()
+  }, [refit])
 
-  // ⚠️ v0.6 用户定案：**不要族圆**——项目大圆/簇圆全删（圆是视觉噪音，
-  // 簇自己聚拢的效果就是最美的）。布局聚团（区域引力/簇引力）保留，
-  // 节点碰撞边界保留——簇靠节点聚拢自然呈现，无圆无标签（缩小态）。
-  // 运行时重叠自检保留（聚团质心重叠检测——写日志，宿主可读）
-  const projectCircles: Array<{ cx: number; cy: number; radius: number; label: string; color: string; multi: boolean }> = []
-  const clusterCircles: Array<{ cx: number; cy: number; radius: number; label: string; multi: boolean }> = []
-  try {
-    // 聚团质心重叠自检（替代项目圆检测）
-    const byProject = new Map<string | null, string[]>()
-    for (const n of nodes) {
-      const arr = byProject.get(n.projectId) ?? []
-      arr.push(n.id)
-      byProject.set(n.projectId, arr)
+  // ---- 坐标换算（preserveAspectRatio=meet 的精确逆变换）----
+  const toViewBox = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
+    const el = svgRef.current
+    if (!el) return { x: 0, y: 0 }
+    const rect = el.getBoundingClientRect()
+    if (rect.width === 0 || rect.height === 0) return { x: 0, y: 0 }
+    const s = Math.min(rect.width / VIEW_W, rect.height / VIEW_H)
+    const ox = (rect.width - VIEW_W * s) / 2
+    const oy = (rect.height - VIEW_H * s) / 2
+    return { x: (clientX - rect.left - ox) / s, y: (clientY - rect.top - oy) / s }
+  }, [])
+
+  // ---- 缩放（以光标为锚点，滚轮；原生非 passive 监听）----
+  const zoomAt = useCallback((clientX: number, clientY: number, factor: number): void => {
+    const p = toViewBox(clientX, clientY)
+    setTf((prev) => {
+      const k = Math.min(MAX_K, Math.max(MIN_K, prev.k * factor))
+      const x = p.x - (p.x - prev.x) * (k / prev.k)
+      const y = p.y - (p.y - prev.y) * (k / prev.k)
+      return { x, y, k }
+    })
+  }, [toViewBox])
+
+  useEffect(() => {
+    const el = svgRef.current
+    if (!el) return
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault()
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.18 : 1 / 1.18)
     }
-    const centers: Array<{ cx: number; cy: number; label: string }> = []
-    for (const [pid, ids] of byProject) {
-      if (pid === null || ids.length < 3) continue
-      const pts = ids.map((id) => layout.get(id)).filter((p): p is ForcePoint => p !== undefined)
-      if (pts.length < 3) continue
-      centers.push({
-        cx: pts.reduce((s, p) => s + p.x, 0) / pts.length,
-        cy: pts.reduce((s, p) => s + p.y, 0) / pts.length,
-        label: String(pid).split(/[\\/]/).pop() || '项目',
-      })
-    }
-    const overlaps: string[] = []
-    for (let i = 0; i < centers.length; i += 1) {
-      for (let j = i + 1; j < centers.length; j += 1) {
-        const a = centers[i]!, b = centers[j]!
-        const d = Math.hypot(a.cx - b.cx, a.cy - b.cy)
-        if (d < 220) { // 聚团质心最小间距阈值
-          overlaps.push(`[${a.label}]↔[${b.label}] 质心距${d.toFixed(0)}`)
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [zoomAt])
+
+  // ---- 平移（拖拽空白处）----
+  const onPointerDown = (e: React.PointerEvent<SVGSVGElement>): void => {
+    if (e.button !== 0) return
+    if ((e.target as Element).closest('[data-node]') !== null) return // 节点上不拖拽
+    const p = toViewBox(e.clientX, e.clientY)
+    panState.current = { sx: p.x, sy: p.y, tx: tf.x, ty: tf.y }
+    setPanning(true)
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>): void => {
+    const pan = panState.current
+    if (pan === null) return
+    const p = toViewBox(e.clientX, e.clientY)
+    setTf((prev) => ({
+      x: pan.tx + (p.x - pan.sx),
+      y: pan.ty + (p.y - pan.sy),
+      k: prev.k,
+    }))
+  }
+
+  const onPointerUp = (e: React.PointerEvent<SVGSVGElement>): void => {
+    panState.current = null
+    setPanning(false)
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch { /* 已释放 */ }
+  }
+
+  const openDetail = (node: GraphNodeData): void => {
+    const q = sessionId !== undefined && sessionId !== '' ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
+    void fetch(`/engram-relay/api/node/${encodeURIComponent(node.title)}${q}`)
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((d: NodeDetail) => setDetail(d))
+      .catch((e: unknown) => setError(String((e as Error)?.message ?? e)))
+  }
+
+  // ---- 标签布局（贪心防重叠：重要性优先；缩放足够深才批量显示）----
+  const labelPlacements = useMemo(() => {
+    const out = new Map<string, { x: number; y: number }>()
+    if (tf.k < 0.85) return out
+    interface Box { x: number; y: number; w: number; h: number }
+    const placed: Box[] = []
+    const overlaps = (a: Box, b: Box): boolean =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+    const sorted = [...nodes].sort((a, b) => b.importance - a.importance)
+    for (const n of sorted) {
+      const p = layout.get(n.id)
+      if (p === undefined) continue
+      const r = radiusOf.get(n.id) ?? 12
+      const text = n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title
+      // 10px 字号：中文 ~10px/字，拉丁 ~6px/字，取中间值
+      const w = text.length * 7 + 4
+      const h = 12
+      const box: Box = { x: p.x - w / 2, y: p.y + r + 5, w, h }
+      let hit = placed.some((b) => overlaps(box, b))
+      if (!hit) {
+        // 与其他节点圆相交 → 跳过（圆-矩形相交判定）
+        for (const m of nodes) {
+          if (m.id === n.id) continue
+          const pm = layout.get(m.id)
+          if (pm === undefined) continue
+          const rm = radiusOf.get(m.id) ?? 12
+          const cxp = Math.max(box.x, Math.min(pm.x, box.x + box.w))
+          const cyp = Math.max(box.y, Math.min(pm.y, box.y + box.h))
+          if ((cxp - pm.x) ** 2 + (cyp - pm.y) ** 2 < rm * rm) { hit = true; break }
         }
       }
-    }
-    if (overlaps.length > 0) {
-      const line = `[${new Date().toISOString()}] 聚团过近 ${overlaps.length} 对: ${overlaps.join('; ')}\n`
-      void fetch('/engram-relay/api/graph-log', { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: line })
-    }
-  } catch { /* 自检失败不阻塞 */ }
-
-  /** 项目着色（v0.4）：projectId 哈希取色；null（通用知识）灰色。
-   *  ⚠️ function 声明（提升）——projectCircles useMemo 在其定义前引用，
-   *  const 箭头函数会 TDZ 报错（Cannot access before initialization）。 */
-  function projectColor(projectId: string | null): string {
-    if (projectId === null) return '#8a94a6'
-    let h = 0
-    for (const ch of projectId) h = (h * 31 + ch.charCodeAt(0)) >>> 0
-    return `hsl(${h % 360} 55% 55%)`
-  }
-
-  /** 簇着色（v0.5 取经 Obsidian color groups：**同簇同色**——分类感知的
-   *  核心。簇色相从簇 id 确定性哈希；孤立节点回退项目色）。 */
-  function clusterColor(clusterId: string): string {
-    let h = 0
-    for (const ch of clusterId) h = (h * 131 + ch.charCodeAt(0)) >>> 0
-    // 色相错开（黄金角）+ 高饱和亮色（暗色背景下醒目）
-    return `hsl(${(h + 35) % 360} 65% 62%)`
-  }
-
-  // Ctrl+滚轮缩放（围绕鼠标位置，作用于视口）。必须用原生非 passive 监听：
-  // React 的 onWheel 在根容器以 passive 注册，preventDefault 拦不住页面缩放。
-  useEffect(() => {
-    const svg = svgRef.current
-    if (svg === null) return
-    const onWheel = (e: WheelEvent): void => {
-      if (!e.ctrlKey) return
-      e.preventDefault()
-      // ⚠️ 节流（v0.6 性能）：滚轮高频触发 → 每帧全量重渲染卡顿。
-      // 50ms 内只处理最后一次（丢中间帧，缩放仍平滑）
-      const now = performance.now()
-      if (now - lastWheelRef.current < 50) return
-      lastWheelRef.current = now
-      const rect = svg.getBoundingClientRect()
-      const mx = (e.clientX - rect.left) / rect.width // 鼠标归一化位置 [0,1]
-      const my = (e.clientY - rect.top) / rect.height
-      // viewBox 语义：vw 变小 = 看到更少 = 放大。故上滚（deltaY<0）缩小 vw
-      // （放大），下滚（deltaY>0）增大 vw（缩小）——与 Obsidian 方向一致。
-      const factor = e.deltaY < 0 ? 1 / 1.15 : 1.15
-      setView((v) => {
-        const vw2 = Math.min(100000, Math.max(10, v.vw * factor))
-        const vh2 = v.vh * factor
-        // 保持鼠标下的世界点在缩放前后不动：w = vx + mx·vw
-        const wx = v.vx + mx * v.vw
-        const wy = v.vy + my * v.vh
-        return { vx: wx - mx * vw2, vy: wy - my * vh2, vw: vw2, vh: vh2 }
-      })
-    }
-    svg.addEventListener('wheel', onWheel, { passive: false })
-    return () => svg.removeEventListener('wheel', onWheel)
-  }, [loading, nodes.length])
-
-  // 拖拽平移视口（无限画布：空白处按下拖动 = 世界跟随鼠标）。
-  // ⚠️ v0.6 修"点空白不取消高亮"bug：点击目标是背景 rect/line 等
-  // 子元素（不是 svg 本体）时旧判断失效——改为**非节点元素即空白**
-  // （节点 g 带 data-node-id 属性，点击节点不触发拖拽/取消）
-  useEffect(() => {
-    const svg = svgRef.current
-    if (svg === null) return
-    const onDown = (e: MouseEvent): void => {
-      if (e.button !== 0) return
-      const target = e.target as Element
-      if (target.closest?.('[data-node-id]')) return // 节点上的按下不拖拽
-      setSelectedId(null) // 空白按下取消高亮
-      const rect = svg.getBoundingClientRect()
-      dragRef.current = { startX: e.clientX, startY: e.clientY, startView: viewRef.current, rect, moved: false }
-      e.preventDefault()
-    }
-    const onMove = (e: MouseEvent): void => {
-      const d = dragRef.current
-      if (d === null) return
-      // 记录移动量（区分单击/拖拽）
-      d.moved = d.moved || Math.hypot(e.clientX - d.startX, e.clientY - d.startY) > 3
-      const dx = (e.clientX - d.startX) / d.rect.width // 屏幕像素 → 视口比例
-      const dy = (e.clientY - d.startY) / d.rect.height
-      setView((v) => ({
-        ...v,
-        vx: d.startView.vx - dx * d.startView.vw,
-        vy: d.startView.vy - dy * d.startView.vh,
-      }))
-    }
-    const onUp = (): void => {
-      const d = dragRef.current
-      dragRef.current = null
-      // 单击空白（无位移）= **只取消高亮**（v0.6 用户指正：不要 fit 回全图
-      // ——视口保持当前缩放/位置，避免"点一下空白就最小化"的割裂感）
-      if (d !== null && !d.moved) {
-        setSelectedId(null)
+      if (!hit) {
+        placed.push(box)
+        out.set(n.id, { x: box.x, y: box.y })
       }
     }
-    svg.addEventListener('mousedown', onDown)
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      svg.removeEventListener('mousedown', onDown)
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
+    return out
+  }, [nodes, layout, radiusOf, tf.k])
+
+  const titleOf = (n: GraphNodeData): string =>
+    n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title
+
+  // 悬停邻接网络：节点/边透明度
+  const nodeOpacity = (id: string): number => {
+    if (hover === null) return 1
+    if (id === hover || neighbors.get(hover)?.has(id) === true) return 1
+    return 0.15
+  }
+  const edgeOpacity = (e: GraphEdgeData): number => {
+    const a = layout.get(e.from)
+    const b = layout.get(e.to)
+    let base = 0.9
+    if (a !== undefined && b !== undefined) {
+      const d = Math.hypot(a.x - b.x, a.y - b.y)
+      base = 0.35 + 0.65 * Math.max(0, Math.min(1, 1 - d / 550))
     }
-  }, [loading, nodes.length])
+    if (hover === null) return base
+    if (e.from === hover || e.to === hover) return 0.95
+    return 0.07
+  }
 
   return (
     <div className={styles.root}>
       <div className={styles.toolbar}>
-        {/* v0.6：单一全局视图——无过滤按钮（给 AI 用，不是给人用） */}
+        <div className={styles.filters}>
+          {['all', 'global', 'project', 'session'].map((f) => (
+            <button
+              key={f}
+              className={`${styles.filterBtn} ${filter === f ? styles.filterActive : ''}`}
+              onClick={() => setFilter(f)}
+            >
+              {t(`graph.filter.${f}`)}
+            </button>
+          ))}
+        </div>
         <div className={styles.meta}>
           <span className={styles.count}>
             {data !== null ? t('graph.count', { nodes: nodes.length, edges: edges.length }) : ''}
           </span>
-          <button className={styles.refresh} onClick={() => { const f = fitToCurrent(); if (f !== null) setView(f) }}>{t('graph.reset')}</button>
           <button className={styles.refresh} onClick={loadGraph}>{t('graph.refresh')}</button>
         </div>
       </div>
@@ -436,158 +336,138 @@ export function GraphView({ t, sessionId }: GraphViewProps) {
 
       {!loading && nodes.length > 0 && (
         <div className={styles.canvas}>
-          {/* 无限画布：动态 viewBox 即视口（世界坐标无限，缩放/拖拽只动视口） */}
           <svg
             ref={svgRef}
-            viewBox={`${view.vx} ${view.vy} ${view.vw} ${view.vh}`}
-            className={styles.svg}
+            viewBox={`0 0 ${VIEW_W} ${VIEW_H}`}
+            className={`${styles.svg} ${panning ? styles.svgPanning : ''}`}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerLeave={onPointerUp}
+            onDoubleClick={(e) => {
+              if ((e.target as Element).closest('[data-node]') === null) refit()
+            }}
           >
-            <defs>
-              {/* 背景点阵（无限画布尺度感） */}
-              <pattern id="dot-grid" width="40" height="40" patternUnits="userSpaceOnUse">
-                <circle cx="1.5" cy="1.5" r="1.2" fill="rgba(255,255,255,0.06)" />
-              </pattern>
-              {/* semantic 节点光环（固化知识发光） */}
-              <radialGradient id="halo-grad">
-                <stop offset="0%" stopColor="#4a7dff" stopOpacity="0.28" />
-                <stop offset="100%" stopColor="#4a7dff" stopOpacity="0" />
-              </radialGradient>
-            </defs>
-            {/* 背景点阵层 */}
-            <rect
-              x={view.vx - 2000}
-              y={view.vy - 2000}
-              width={view.vw + 4000}
-              height={view.vh + 4000}
-              fill="url(#dot-grid)"
-            />
-            {/* ⚠️ v0.6 用户定案：不要族圆——项目圆/簇圆已删（聚团靠节点
-                聚拢自然呈现） */}
-            {/* 边（v0.5：causes 带方向箭头 + 簇色；选中节点时其延展边
-                高亮（亮色加粗），其余边淡出） */}
-            {edges.map((e) => {
-              const a = layout.get(e.from)
-              const b = layout.get(e.to)
-              if (a === undefined || b === undefined) return null
-              // 视口裁剪：两端都在视口外 → 跳过（v0.6 性能）
-              if (!cull(a) && !cull(b)) return null
-              const key = `${e.from}|${e.to}|${e.kind}`
-              const isHighlighted = highlight !== null && highlight.edgeKeys.has(key)
-              const dimmed = highlight !== null && !isHighlighted
-              const baseOpacity = dimmed ? 0.04 : isHighlighted ? 0.95 : 0.35
-              if (e.kind === 'causes') {
-                const src = nodes.find((n) => n.id === e.from)
-                const scid = src ? clusterOf.get(src.id) : undefined
-                const color = scid !== undefined
-                  ? clusterColor(scid)
-                  : (src ? projectColor(src.projectId) : '#8a94a6')
+            <g transform={`translate(${tf.x} ${tf.y}) scale(${tf.k})`}>
+              {/* 边（全局坐标，随视图缩放；随距离淡出） */}
+              {edges.map((e) => {
+                const a = layout.get(e.from)
+                const b = layout.get(e.to)
+                if (a === undefined || b === undefined) return null
+                const style = EDGE_STYLE[e.kind] ?? EDGE_STYLE.link
                 return (
                   <line
-                    key={key}
+                    key={`${e.from}|${e.to}|${e.kind}`}
                     x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                    stroke={isHighlighted ? '#ffd166' : color}
-                    strokeOpacity={baseOpacity}
-                    strokeWidth={(isHighlighted ? 2.5 : 1.5) / zc}
+                    stroke={style.color}
+                    strokeWidth={e.kind === 'causes' ? 1.4 : 1}
+                    strokeDasharray={style.dash}
+                    opacity={edgeOpacity(e)}
                     className={styles.edge}
                   />
                 )
-              }
-              return (
-                <line
-                  key={key}
-                  x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                  stroke={isHighlighted ? '#ffd166' : '#aab2c0'}
-                  strokeOpacity={baseOpacity}
-                  strokeWidth={(isHighlighted ? 2 : 1) / zc}
-                  strokeDasharray="5 4"
-                  className={styles.edge}
-                />
-              )
-            })}
-            {/* 节点（v0.5：同簇同色 + 大小按度 + semantic 光环 + 标签 halo；
-                缩放补偿（尺寸/文字随 zoomScale 保持屏幕大小）；
-                选中时其邻居高亮，其余淡出） */}
-            {nodes.map((n) => {
-              const p = layout.get(n.id)
-              if (p === undefined) return null
-              // 视口裁剪（v0.6 性能：只渲染 view 内节点——放大时元素骤减）
-              if (!cull(p)) return null
-              // 簇色优先（同簇同色）；孤立节点回退项目色（灰色）
-              const cid = clusterOf.get(n.id)
-              const color = cid !== undefined ? clusterColor(cid) : projectColor(n.projectId)
-              const selected = selectedId === n.id
-              const isSemantic = n.state === 'semantic'
-              // v0.6 事件弱化：event（过程性记忆）缩小 + 降透明——知识
-              // （fact/decision/note）突出，过时过程不抢眼
-              const isEvent = n.kind === 'event'
-              // 半径：度中心性为主（hub 大），semantic 加成，重要度微调，
-              // event 弱化（×0.7）
-              const deg = degreeOf.get(n.id) ?? 0
-              const rBase = (7 + Math.min(9, deg * 1.2) + (isSemantic ? 3 : 0) + n.importance * 1.5) * (isEvent ? 0.7 : 1) + (selected ? 2 : 0)
-              // ⚠️ 缩放补偿：屏幕大小 = 世界值 × (svgWidth/vw) → 要屏幕
-              // 恒定，世界坐标半径 = 屏幕基准 ÷ zoomScale（放大后节点/文字
-              // 保持屏幕大小，看的是更稀疏更清楚，不是更大）
-              const r = rBase / zc
-              const inHighlight = highlight !== null && highlight.nodeIds.has(n.id)
-              const dimmed = highlight !== null && !inHighlight
-              // 事件弱化（透明度低一档——v0.6 静态渲染，无动画淡入）
-              const eventDim = isEvent ? 0.55 : 1
-              const opacity = (dimmed ? 0.12 : 1) * eventDim
-              return (
-                <g
-                  key={n.id}
-                  data-node-id={n.id}
-                  className={`${styles.node} ${isSemantic ? styles.nodeSemantic : ''}`}
-                  onClick={() => setSelectedId(n.id)}
-                  role="button"
-                  tabIndex={0}
-                  opacity={opacity}
-                >
-                  {/* ⚠️ 透明热区（v0.6 用户指正：鼠标必须精确点到圆圈才算点击
-                      ——热区扩大到覆盖文字标签，r+22/zc，pointerEvents 全开） */}
-                  <circle cx={p.x} cy={p.y} r={r + 22 / zc} fill="transparent" pointerEvents="all" />
-                  {isSemantic && (
-                    <circle cx={p.x} cy={p.y} r={r + 9 / zc} fill="url(#halo-grad)" pointerEvents="none" />
-                  )}
-                  <circle
-                    cx={p.x} cy={p.y}
-                    r={r}
-                    fill={color}
-                    fillOpacity={selected ? 1 : isSemantic ? 0.95 : 0.82}
-                    stroke={selected ? '#fff' : isSemantic ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.35)'}
-                    strokeWidth={(selected ? 2 : isSemantic ? 1.5 : 1) / zc}
-                  />
-                  {showLabels && (
-                    <text
-                      x={p.x} y={p.y + r + 12 / zc}
-                      textAnchor="middle"
-                      className={isSemantic ? styles.nodeLabelSemantic : styles.nodeLabel}
-                      style={{
-                        fontSize: (isSemantic ? 11 : 10) / zc,
-                        paintOrder: 'stroke',
-                        stroke: 'rgba(10,14,22,0.9)',
-                        strokeWidth: 3 / zc,
-                      }}
-                    >
-                      {n.title.length > 14 ? `${n.title.slice(0, 13)}…` : n.title}
-                    </text>
-                  )}
-                </g>
-              )
-            })}
+              })}
+              {/* 节点（本地坐标 + CSS transform 平移 → 过滤切换平滑过渡） */}
+              {nodes.map((n) => {
+                const p = layout.get(n.id)
+                if (p === undefined) return null
+                const r = radiusOf.get(n.id) ?? 12
+                const color = LAYER_COLORS[n.layer] ?? '#888'
+                const selected = detail !== null && detail.id === n.id
+                const hovering = hover === n.id
+                const label = hovering ? 'always' : labelPlacements.get(n.id) !== undefined ? 'shown' : 'hidden'
+                return (
+                  <g
+                    key={n.id}
+                    data-node
+                    className={`${styles.node} ${hovering ? styles.nodeHover : ''}`}
+                    style={{
+                      transform: `translate(${p.x}px, ${p.y}px)`,
+                      opacity: nodeOpacity(n.id),
+                    }}
+                    onClick={() => openDetail(n)}
+                    onMouseEnter={() => setHover(n.id)}
+                    onMouseLeave={() => setHover(null)}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <title>{n.title} — {n.summary}</title>
+                    <circle
+                      r={selected ? r + 5 : hovering ? r + 2.5 : r}
+                      fill={color}
+                      fillOpacity={0.9}
+                      stroke={selected ? '#fff' : 'rgba(255,255,255,0.4)'}
+                      strokeWidth={selected ? 2 : hovering ? 1.6 : 1}
+                    />
+                    {label !== 'hidden' && (
+                      <text
+                        y={r + 16}
+                        textAnchor="middle"
+                        fontSize={10 / tf.k}
+                        className={`${styles.nodeLabel} ${hovering ? styles.nodeLabelHover : ''}`}
+                      >
+                        {titleOf(n)}
+                      </text>
+                    )}
+                  </g>
+                )
+              })}
+            </g>
           </svg>
 
           <div className={styles.legend}>
             <span><span className={styles.legendLineSolid} />{t('graph.legend.causes')}</span>
             <span><span className={styles.legendLineDash} />{t('graph.legend.link')}</span>
-            <span>
-              <span className={styles.legendDot} style={{ background: projectColor('D:\\x') }} />
-              {t('graph.legend.project')}
+            {(['global', 'project', 'session'] as const).map((layer) => (
+              <span key={layer}>
+                <span className={styles.legendDot} style={{ background: LAYER_COLORS[layer] }} />
+                {t(`graph.layer.${layer}`)}
+              </span>
+            ))}
+          </div>
+
+          <div className={styles.zoomHint}>{t('graph.zoomHint')}</div>
+        </div>
+      )}
+
+      {/* 详情侧栏（渐进披露第二层） */}
+      {detail !== null && (
+        <div className={styles.detail}>
+          <div className={styles.detailHead}>
+            <span className={styles.detailTitle}>
+              [[{detail.title}]] ({detail.kind} · {t(`graph.layer.${detail.layer}`)})
             </span>
-            <span>
-              <span className={styles.legendDot} style={{ background: projectColor(null) }} />
-              {t('graph.legend.solo')}
-            </span>
+            <button className={styles.detailClose} onClick={() => setDetail(null)}>{t('graph.detail.close')}</button>
+          </div>
+          <p className={styles.detailSummary}>{detail.summary}</p>
+          {detail.content !== '' && (
+            <pre className={styles.detailContent}>{detail.content}</pre>
+          )}
+          <div className={styles.detailSection}>
+            <span className={styles.detailSectionTitle}>{t('graph.detail.causes')}</span>
+            {detail.causes.length > 0
+              ? detail.causes.map((c) => (
+                <button key={c.id} className={styles.detailNode} onClick={() => openDetail(c)}>[[{c.title}]]</button>
+              ))
+              : <span className={styles.detailNone}>{t('graph.detail.none')}</span>}
+          </div>
+          <div className={styles.detailSection}>
+            <span className={styles.detailSectionTitle}>{t('graph.detail.effects')}</span>
+            {detail.effects.length > 0
+              ? detail.effects.map((c) => (
+                <button key={c.id} className={styles.detailNode} onClick={() => openDetail(c)}>[[{c.title}]]</button>
+              ))
+              : <span className={styles.detailNone}>{t('graph.detail.none')}</span>}
+          </div>
+          <div className={styles.detailSection}>
+            <span className={styles.detailSectionTitle}>{t('graph.detail.links')}</span>
+            {detail.links.length > 0
+              ? detail.links.map((c) => (
+                <button key={c.id !== '' ? c.id : c.title} className={styles.detailNode} onClick={() => c.id !== '' && openDetail(c)}>
+                  [[{c.title}]]
+                </button>
+              ))
+              : <span className={styles.detailNone}>{t('graph.detail.none')}</span>}
           </div>
         </div>
       )}

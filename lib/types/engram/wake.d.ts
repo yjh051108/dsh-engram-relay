@@ -20,18 +20,20 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import { NgramHashAddressing } from './hash.js';
 import { CausalGraph } from './causal.js';
 import { EngramStore, type EngramNode } from './store.js';
-import type { EngramRelayConfig } from '../types.js';
+import type { EngramRelayConfig, VerifyMark } from '../types.js';
 export interface WakeHit {
     engrams: EngramNode[];
     reason: string;
     injectedTokens: number;
+    /** 融合：选中条目的灵枢白箱验证标注（id → 结果）；未启用验证时缺省。 */
+    verify?: Record<string, VerifyMark>;
 }
 /**
  * 查看者视角（分层准入依据）：
  *  - global：所有会话可唤醒；
- *  - project：仅 node.projectId === viewer.cwd 的会话。
- * 无 cwd 的视角（subagent 等）只看 global 层。
- * （v0.3：session 层删除；sessionId 字段仅保留来源记录，不再参与准入。）
+ *  - project：仅 node.projectId === viewer.cwd 的会话；
+ *  - session：仅 node.sessionId === viewer.sessionId 的本会话。
+ * 无 cwd/sessionId 的视角（subagent 等）只看 global 层。
  */
 export interface WakeViewer {
     sessionId?: string;
@@ -55,26 +57,36 @@ export declare class EngramWakeEngine {
     private prefilter;
     /** 类脑激活缓存（B=ln(Σt^-d)）：排序融合（阶段 3）；缺省 = 无激活加权。 */
     private activation;
+    /** 融合：灵枢白箱验证钩子（对选中的 engram 返回标注）；null = 关闭。 */
+    private verifier;
+    /** 融合：浅思维钩子（对查询+唤醒结果返回浅思维文本段）；null = 关闭。 */
+    private knowledgeSource;
     /** 最近一次唤醒结果（供 systemPrompt 渲染器读取）。 */
     private lastInjection;
+    /** 融合：最近一次查询的知识之书段（renderInjection 合并注入）。 */
+    private lastKnowledge;
     constructor(store: EngramStore, graph: CausalGraph, hasher: NgramHashAddressing, config: EngramRelayConfig, 
     /** 打分器（bge 语义精排 + 遗留门控）；缺省 = 纯哈希 + 重要度。 */
     scorers?: WakeScorers | null, 
     /** 候选预筛钩子（向量索引粗筛用）：返回候选 id 列表；null = 回退哈希 lookup。 */
     prefilter?: ((query: string) => Promise<string[] | null>) | null, 
     /** 类脑激活缓存（B=ln(Σt^-d)）：排序融合（阶段 3）；缺省 = 无激活加权。 */
-    activation?: import('./activation.js').ActivationCache | null);
+    activation?: import('./activation.js').ActivationCache | null, 
+    /** 融合：灵枢白箱验证钩子（对选中的 engram 返回标注）；null = 关闭。 */
+    verifier?: ((node: EngramNode) => Promise<VerifyMark | null>) | null, 
+    /** 融合：浅思维钩子（对查询+唤醒结果返回浅思维文本段）；null = 关闭。 */
+    knowledgeSource?: ((query: string, hit: {
+        engrams: EngramNode[];
+    }) => Promise<string | null>) | null);
     /** 每回合入口（自动唤醒，极克制）：哈希预筛 → 查询质量门 → 自动阈值 0.5 → top-1。 */
     maybeWake(sessionId: string, _options: GenerateOptions, viewer?: WakeViewer): Promise<WakeHit>;
+    /** 融合：拉取浅思维段（独立于记忆命中；失败降级为空）。 */
+    private pullKnowledge;
     /** 核心查询：向量/哈希粗筛 → 分层准入 → 语义精排（bge）→ 因果传播 → 分层稀疏选择。 */
     query(query: string, limit: number, viewer?: WakeViewer, opts?: {
         auto?: boolean;
     }): Promise<WakeHit>;
-    /** 唤醒采样落盘：storeDir/wake-samples.jsonl（轮转：>8MB 时归档为 .1）。 */
-    private appendSample;
-    /** 渲染记忆注入段（动态预算：按巩固状态分级——semantic 完整入口、episodic 标题+摘要、dormant 仅标题）。
-     *  教训类节点（tags 含「教训:」）用独立预算（lessonBudgetTokens）渲染 + ⚠️ 标记，
-     *  不挤占普通记忆预算（教训通道与主注入预算隔离）。 */
+    /** 渲染记忆注入段（动态预算：按相关度分级——高分完整入口、中分标题+摘要、低分仅标题）。 */
     renderInjection(budgetTokens: number): string;
     /** 供 status 工具读取。 */
     lastWake(): WakeHit;

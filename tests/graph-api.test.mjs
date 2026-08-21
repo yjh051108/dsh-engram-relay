@@ -35,10 +35,11 @@ function fakeRelay(dir) {
 function setupStore(store) {
   store.add({ kind: 'fact', layer: 'global', projectId: null, title: '全局偏好', summary: '喜欢简洁文档', content: '全局正文', links: [], sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8 })
   store.add({ kind: 'decision', layer: 'project', projectId: '/proj-a', title: '项目A决策', summary: 'A 用 pnpm', content: 'A 项目正文', links: ['全局偏好'], sessionId: null, turn: 2, causes: [], effects: [], importance: 0.9 })
+  store.add({ kind: 'event', layer: 'session', projectId: null, title: 'A临时', summary: '正在调试端口', content: '临时正文', links: [], sessionId: 'sess-a', turn: 3, causes: [], effects: [], importance: 0.6 })
 }
 
-/** 收集路由的 fake webServer（rc：httpServer 服务已改名 webServer）。 */
-function fakeHttpServer() {
+/** 收集路由的 fake webServer（graph-api 依赖 ctx.webServer.register）。 */
+function fakeWebServer() {
   const routes = []
   return {
     webServer: { register: (route) => { routes.push(route); return () => { routes.splice(routes.indexOf(route), 1) } } },
@@ -59,12 +60,12 @@ async function callRoute(route, method, url) {
   return { status: res.status, body: res.body === '' ? null : JSON.parse(res.body) }
 }
 
-test('graph: 全可见（v0.4 项目不隔离——任何视角看到全部记忆）', async () => {
+test('graph: 分层准入——session A 见 global+本project+本session，session B 见 global+本project 但无 A 的 session 层', async () => {
   const dir = tempDir()
   const store = makeStore(dir)
   setupStore(store)
   const relay = fakeRelay(dir)
-  const { webServer, routes } = fakeHttpServer()
+  const { webServer, routes } = fakeWebServer()
   const ctx = {
     get: (key) => key === 'agents'
       ? { get: (id) => ({ session: { header: { cwd: id === 'sess-a' ? '/proj-a' : '/proj-b' } } }) }
@@ -73,23 +74,25 @@ test('graph: 全可见（v0.4 项目不隔离——任何视角看到全部记�
   installGraphApi({ ...ctx, webServer }, relay)
   const route = routes[0]
 
-  // 会话 A（cwd=/proj-a）：全可见
+  // 会话 A（cwd=/proj-a）：全三层的节点可见
   const a = await callRoute(route, 'GET', '/engram-relay/api/graph?sessionId=sess-a')
   assert.equal(a.status, 200)
   const aTitles = a.body.nodes.map((n) => n.title)
   assert.ok(aTitles.includes('全局偏好'))
   assert.ok(aTitles.includes('项目A决策'))
+  assert.ok(aTitles.includes('A临时'))
 
-  // 会话 B（cwd=/proj-b）：同样全可见（融会贯通——不隔离）
+  // 会话 B（cwd=/proj-b）：global 可见；A 的 project/session 不可见
   const b = await callRoute(route, 'GET', '/engram-relay/api/graph?sessionId=sess-b')
   const bTitles = b.body.nodes.map((n) => n.title)
   assert.ok(bTitles.includes('全局偏好'))
-  assert.ok(bTitles.includes('项目A决策'), 'v0.4：跨项目全可见（项目即标签，关联即桥）')
+  assert.ok(!bTitles.includes('项目A决策'), '他人项目 project 层不可见')
+  assert.ok(!bTitles.includes('A临时'), '他人会话 session 层不可见')
 
-  // 无 sessionId：同样全可见
+  // 无 sessionId（无视角）：只看 global
   const anon = await callRoute(route, 'GET', '/engram-relay/api/graph')
   const anonTitles = anon.body.nodes.map((n) => n.title)
-  assert.ok(anonTitles.includes('项目A决策'), '无视角也全可见')
+  assert.deepEqual(anonTitles, ['全局偏好'])
   rmSync(dir, { recursive: true, force: true })
 })
 
@@ -99,7 +102,7 @@ test('graph: 边聚合（因果边 + 双向链接边）', async () => {
   const a = store.add({ kind: 'decision', layer: 'global', projectId: null, title: '根因', summary: '磁盘满了', content: '', links: ['故障'], sessionId: null, turn: 1, causes: [], effects: [], importance: 0.8 })
   const b = store.add({ kind: 'event', layer: 'global', projectId: null, title: '故障', summary: '服务挂了', content: '', links: ['根因'], sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.8 })
   const relay = fakeRelay(dir)
-  const { webServer, routes } = fakeHttpServer()
+  const { webServer, routes } = fakeWebServer()
   installGraphApi({ get: () => undefined, webServer }, relay)
   const route = routes[0]
   const g = await callRoute(route, 'GET', '/engram-relay/api/graph')
@@ -116,12 +119,12 @@ test('graph: 边聚合（因果边 + 双向链接边）', async () => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-test('node: 详情返回（全可见）+ 不存在 404', async () => {
+test('node: 详情返回 + 可见性 403 + 不存在 404', async () => {
   const dir = tempDir()
   const store = makeStore(dir)
   setupStore(store)
   const relay = fakeRelay(dir)
-  const { webServer, routes } = fakeHttpServer()
+  const { webServer, routes } = fakeWebServer()
   const ctx = {
     get: (key) => key === 'agents'
       ? { get: (id) => ({ session: { header: { cwd: id === 'sess-a' ? '/proj-a' : '/proj-b' } } }) }
@@ -136,9 +139,9 @@ test('node: 详情返回（全可见）+ 不存在 404', async () => {
   assert.equal(ok.body.content, 'A 项目正文')
   assert.equal(ok.body.layer, 'project')
 
-  // 会话 B 展开 A 的 project 节点：v0.4 全可见 → 200
-  const cross = await callRoute(route, 'GET', `/engram-relay/api/node/${encodeURIComponent('项目A决策')}?sessionId=sess-b`)
-  assert.equal(cross.status, 200, '跨项目全可见（融会贯通）')
+  // 会话 B 展开 A 的 project 节点：403 不可见
+  const forbidden = await callRoute(route, 'GET', `/engram-relay/api/node/${encodeURIComponent('项目A决策')}?sessionId=sess-b`)
+  assert.equal(forbidden.status, 403)
 
   // 不存在：404
   const missing = await callRoute(route, 'GET', `/engram-relay/api/node/${encodeURIComponent('不存在')}`)

@@ -23,7 +23,6 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
-import type CompactionEngine from '@deepseek-ai/dsh-compaction'
 
 import { EngramStore } from './engram/store.js'
 import { BruteForceIndex } from './engram/vector-index.js'
@@ -33,8 +32,8 @@ import { ActivationCache } from './engram/activation.js'
 import { EngramWakeEngine, type WakeViewer } from './engram/wake.js'
 import { RelayModel } from './model/relay-model.js'
 import { installGraphApi } from './graph-api.js'
-import { ENGRAM_LAYERS, isSuperseded, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
-import type { EngramRelayConfig } from './types.js'
+import { ENGRAM_LAYERS, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
+import type { EngramRelayConfig, VerifyMark } from './types.js'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -42,7 +41,7 @@ export interface EngramRelayDeps {
   llm: LlmService
   systemPrompt: SystemPrompt
   tools: ToolRegistry
-  compaction?: CompactionEngine
+  compact?: unknown
 }
 
 /** 唤醒结果：本次请求注入的记忆痕迹（哈希命中 + 因果激活，超稀疏）。 */
@@ -50,6 +49,8 @@ export interface WakeResult {
   engrams: import('./engram/store.js').EngramNode[]
   reason: string
   injectedTokens: number
+  /** 融合：条目的灵枢白箱验证标注（id → 结果）；未启用/无标注时缺省。 */
+  verify?: Record<string, VerifyMark>
 }
 
 export class EngramRelay {
@@ -62,15 +63,6 @@ export class EngramRelay {
   readonly activation: import('./engram/activation.js').ActivationCache
   /** 向量索引（int8 粗筛 + fp32 精筛双表；prefilter 候选来源）。 */
   readonly vectorIndex: import('./engram/vector-index.js').BruteForceIndex
-
-  /** τ 融合权重（v0.4：写入织网与检索召回共用同一加权——可逆可解释）。 */
-  get fusionTau(): { sem: number; time: number; cause: number } {
-    return {
-      sem: this.config.tauSem ?? 1,
-      time: this.config.tauTime ?? 0,
-      cause: this.config.tauCause ?? 0,
-    }
-  }
 
   private disposers: Array<() => void> = []
 
@@ -85,9 +77,209 @@ export class EngramRelay {
     this.wake = new EngramWakeEngine(this.store, this.graph, this.hasher, config, {
       embedder: (query, candidates) => this.model.embed(query, candidates),
       scorer: (query, candidates) => this.model.score(query, candidates),
-    }, async () => null, this.activation)
-    // v0.5：纯算法语义（SemanticScorer 词汇+图通道）已替换 embedding 精排；
-    // 向量 prefilter 停用（哈希粗筛兜底）——BM25 倒排索引替代待 P5 实施。
+    }, (query) => this.vectorPrefilter(query), this.activation, this.lingshuVerifier(), this.thinkLight())
+  }
+
+  /** 融合核心：灵枢 auto_verify HTTP 调用 → VerifyMark（服务不可用/超时 → error）。 */
+  private async lingshuAutoVerify(text: string): Promise<VerifyMark | null> {
+    const url = this.config.lingshuVerifyUrl?.trim()
+    if (!url) return null
+    try {
+      const res = await fetch(`${url}/dex/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          op: 'auto_verify',
+          params: { knowledge: text.slice(0, 500), limit: 3, threshold: 0.5 },
+        }),
+        signal: AbortSignal.timeout(2500),
+      })
+      if (!res.ok) return { status: 'error', note: `http ${res.status}` }
+      const data = (await res.json()) as { results?: { judgment?: string; best?: { name?: string }; D_norm?: number } }
+      const j = data.results?.judgment ?? ''
+      const bestName = data.results?.best?.name ?? '无'
+      const dnorm = (data.results?.D_norm ?? 0).toFixed(2)
+      // 白箱：无论裁决与否都给出依据（候选卡 + D_norm——可溯源不是口号）
+      if (j.startsWith('采纳')) return { status: 'anchored', note: `${bestName}（D_norm=${dnorm}）` }
+      return { status: 'unverified', note: `${j}（最近候选卡: ${bestName}，D_norm=${dnorm}）` }
+    } catch (e) {
+      return { status: 'error', note: String(e).slice(0, 80) }
+    }
+  }
+
+  /** 唤醒验证钩子（wake 用）：engram 节点 → 灵枢验证。 */
+  private lingshuVerifier(): ((node: EngramNode) => Promise<VerifyMark | null>) | null {
+    const url = this.config.lingshuVerifyUrl?.trim()
+    if (!url) return null
+    return (node: EngramNode) => this.lingshuAutoVerify(`${node.title}：${(node.summary ?? '').slice(0, 200)}`)
+  }
+
+  /**
+   * 浅思维钩子（每轮注入 · 统一大脑）：图上算子 + 灵枢校准器 → 3 行。
+   *  ① 条件算子：唤醒邻域的 kind 分布 → 条件空间（知识/决策/事件/情感）
+   *  ② 验证算子：灵枢 D_norm 外部校准锚（图网络敢想，灵枢把关）
+   *  ③ 边界算子：诚实边界种子词 + 教训邻域检测（规范性提醒）
+   * 纪律：只提示姿态（≤100 token），不替 agent 思考；深挖由 agent 主动。
+   */
+  private thinkLight(): ((query: string, hit: { engrams: import('./engram/store.js').EngramNode[] }) => Promise<string | null>) | null {
+    const url = this.config.lingshuVerifyUrl?.trim()
+    if (!url) return null
+    const BOUNDARY_SEEDS = ['保证', '绝对', '一定', '永远', '证明', '超光速', '不可能']
+    return async (query: string, hit: { engrams: import('./engram/store.js').EngramNode[] }): Promise<string | null> => {
+      const lines: string[] = []
+      // ① 条件算子：邻域 kind 分布（簇性质 = 条件空间，不预设类别）
+      const kinds = new Map<string, number>()
+      for (const e of hit.engrams) {
+        const k = e.kind ?? 'note'
+        kinds.set(k, (kinds.get(k) ?? 0) + 1)
+      }
+      if (kinds.size > 0) {
+        const top = [...kinds.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}${n > 1 ? `×${n}` : ''}`).join('/')
+        lines.push(`浅思维·条件：${top}`)
+      }
+      // ② 验证算子：灵枢校准器（外部锚，防自嗨）
+      let vMark: VerifyMark | null = null
+      try {
+        vMark = await this.lingshuAutoVerify(query.slice(0, 200))
+        if (vMark) {
+          lines.push(vMark.status === 'anchored' ? '浅思维·验证：✓图谱锚定' : '浅思维·验证：?图谱外——勿硬答（不裁决）')
+        }
+      } catch { /* 校准器不可用时不阻塞 */ }
+      // （补卡信号不在此——只有 agent 主动求助且无答案才记录，避免常识补卡）
+      // ③ 边界算子：诚实边界种子词 + 教训邻域
+      const hitBoundary = BOUNDARY_SEEDS.some((s) => query.includes(s))
+      const lessonNear = hit.engrams.some((e) => /教训|边界|不能|别|切忌|慎/.test(`${e.title}${e.summary ?? ''}`))
+      if (hitBoundary || lessonNear) {
+        lines.push('浅思维·边界：涉及边界词/教训记忆——回答需标注不确定性与证据边界')
+      }
+      if (lines.length === 0) return null
+      return lines.join('\n')
+    }
+  }
+
+  // ---- 自动补卡闭环（人类式：当场不会→当场学；每日上限节制） ----
+  private knowledgeGaps = new Map<string, { query: string; count: number; lastAt: number; handled: boolean }>()
+  private gapLlmInFlight = false
+  private gapAddedToday = 0
+
+  /** 记录知识缺口：agent 求助且无答案 = 双不会 → 当场补卡（人类查漏式）。 */
+  private recordKnowledgeGap(query: string): void {
+    const q = query.trim()
+    if (q.length < 8) return
+    const key = q.slice(0, 40)
+    const g = this.knowledgeGaps.get(key)
+    if (g) {
+      g.count += 1
+      g.lastAt = Date.now()
+    } else {
+      this.knowledgeGaps.set(key, { query: q, count: 1, lastAt: Date.now(), handled: false })
+    }
+    if (this.knowledgeGaps.size > 100) {
+      const oldest = [...this.knowledgeGaps.entries()].sort((a, b) => a[1].lastAt - b[1].lastAt)[0]
+      if (oldest) this.knowledgeGaps.delete(oldest[0])
+    }
+    // 当场补卡：不需要重复 3 次——查不到的那一刻就是学习时机
+    // （像人类：不会 → 查 → 没查到 → 当场记下/当场学）
+    if (g && !g.handled && !this.gapLlmInFlight) {
+      g.handled = true
+      if (this.gapAddedToday >= 5) {
+        this.ctx.logger?.info?.('[engram-relay] 补卡已达当日上限（5 张），跳过: %s', q.slice(0, 30))
+        return
+      }
+      this.gapAddedToday += 1
+      void this.autoAddCard(q).catch(() => { /* 静默：补卡失败不影响主链路 */ })
+    }
+  }
+
+  /** 自动补卡：查重（记忆）→ LLM 生成卡 → 灵枢 add_card 写入。 */
+  private async autoAddCard(query: string): Promise<void> {
+    const url = this.config.lingshuVerifyUrl?.trim()
+    if (!url || !this.lastLlmRoute) return
+    this.gapLlmInFlight = true
+    try {
+      // 查重①：记忆库已有该知识 → 不补卡（记忆管个性化，卡管通用，避免重复）
+      const head = query.slice(0, 6)
+      const memDup = this.store.all().some((n) => `${n.title}${n.summary}`.includes(head))
+      if (memDup) return
+      // LLM 生成卡（复用蒸馏通道，单次调用 ~600 token，成本最小化）
+      const prompt = `把下面的高频问题提炼成一张知识卡，只输出 JSON：\n{"name":"标题≤10字","domain":"学科域","claim":"核心知识≤100字","trigger":"触发词逗号分隔","action":"出招≤80字","level":2}\n高频问题：${query.slice(0, 200)}`
+      let text = ''
+      const stream = this.ctx.llm.stream({
+        provider: this.lastLlmRoute.provider,
+        model: this.lastLlmRoute.model,
+        system: '你是知识卡生成器。输出严格 JSON，不要多余文字。',
+        messages: [createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: prompt }] })],
+        temperature: 0.3,
+        reasoningEffort: ReasoningEffortId('off'),
+        maxTokens: 600,
+      })
+      for await (const chunk of stream) {
+        if (chunk.type === 'text-delta') text += chunk.text
+      }
+      this.debugLog(`auto-card llm outLen=${text.length}`)
+      let card = parseCardJson(text)
+      if (!card) {
+        // 保底卡：LLM 空返回时从查询启发式构造（占位可用，下次即命中）
+        const words = query.split(/[，。！？,.!?;；\s]+/).filter((w: string) => w.length >= 2)
+        // 标题：取前两个实义词段（避免整句截断成半句）
+        const nameParts = words.slice(0, 2).join('')
+        card = {
+          name: (nameParts || query.replace(/[，。！？,.!?;；]/g, ' ').trim().slice(0, 8) || '未知主题').slice(0, 10),
+          domain: '通用',
+          claim: `主题「${query.slice(0, 60)}」为图谱外高频问题（保底卡）`,
+          trigger: words.slice(0, 5).join(','),
+          action: '按未知主题处理：先声明条件空间，谨慎回答并标注不确定性',
+          level: 2,
+        }
+        this.debugLog(`auto-card fallback card: ${card.name}`)
+      }
+      // 查重②：灵枢 add_card 内部同名检查（existed）
+      const res = await fetch(`${url}/dex/query`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: 'add_card', params: { ...card, source: 'auto-gap' } }),
+        signal: AbortSignal.timeout(4000),
+      })
+      const data = (await res.json()) as { existed?: boolean; ok?: boolean }
+      this.ctx.logger?.info?.('[engram-relay] 自动补卡: %s → %s', card.name, data.existed ? '已存在' : '新增')
+    } catch (e) {
+      this.ctx.logger?.warn?.('[engram-relay] 自动补卡失败: %s', String(e).slice(0, 120))
+    } finally {
+      this.gapLlmInFlight = false
+    }
+  }
+
+  /** 供工具使用：验证任意知识主张（外置大脑 · 白箱闸门）。 */
+  async verifyClaim(claim: string): Promise<VerifyMark | null> {
+    const v = await this.lingshuAutoVerify(claim)
+    // 补卡信号：agent 主动求助验证 + 灵枢不裁决 = 双不会 → 记录缺口（高频补卡）
+    if (v && v.status !== 'anchored') {
+      this.recordKnowledgeGap(claim)
+    }
+    return v
+  }
+
+  /** 供工具使用：灵枢知识出招（外置大脑 · 知识之书）——条件 → 命中学科卡。 */
+  async lingshuRespond(condition: string, limit = 3): Promise<unknown> {
+    const url = this.config.lingshuVerifyUrl?.trim()
+    if (!url) return { error: 'lingshuVerifyUrl 未配置（灵枢融合未启用）' }
+    try {
+      const res = await fetch(`${url}/dex/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: 'respond', params: { condition, limit } }),
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!res.ok) return { error: `http ${res.status}` }
+      const data = (await res.json()) as { results?: Array<{ name?: string; score?: number }> }
+      // 补卡信号：agent 求助出招但图谱无命中 = 双不会 → 记录缺口
+      const rs = data.results ?? []
+      if (!rs.some((h) => h.name && (h.score ?? 0) >= 0.02)) {
+        this.recordKnowledgeGap(condition)
+      }
+      return data
+    } catch (e) {
+      return { error: String(e).slice(0, 80) }
+    }
   }
 
   /**
@@ -126,29 +318,36 @@ export class EngramRelay {
     void this.model.warmup()
 
     // 1. 请求前唤醒（llm/stream 旁路观察，不包装流）。
-    this.ctx.on('llm/stream', (options, next) => {
+    //    ⚠️ llm/stream 是 waterfall：监听器必须同步返回 AsyncIterable。
+    //    处理逻辑放进 async generator（其本身是 AsyncIterable，内部可 await），
+    //    先完成唤醒+注入，再逐块转发底层流——既满足契约又保留"唤醒后注入"。
+    this.disposers.push(this.ctx.on('llm/stream', (options, next) => {
       if (this.config.enabled) {
         // 捕获最近一次模型调用的路由（LLM 蒸馏复用同一 provider/model）
         this.lastLlmRoute = { provider: options.provider, model: options.model }
-        const sessionId = (options as { sessionId?: string }).sessionId
-        if (sessionId) {
-          // 分层准入需要查看者视角：sessionId + 当前工作目录（cwd 经
-          // turn-stopping 持续追踪）
-          void this.wake.maybeWake(sessionId, options, { cwd: this.currentCwd ?? undefined, turn: this.lastTurnAt }).catch((error) => {
-            this.ctx.logger?.warn?.('[engram-relay] wake failed: %s', String(error))
+        // 融合：每次 API 调度前都注入（不限于主对话轮）——sessionId 可缺省
+        // （后台/子任务/工具内推理），viewer 无会话时 isVisible 只放行 global 层。
+        const sessionId = (options as { sessionId?: string }).sessionId ?? ''
+        // 分层准入需要查看者视角：sessionId + 当前工作目录（cwd 经 turn-stopping 追踪）
+        const wakeP = this.wake.maybeWake(sessionId, options, { cwd: this.currentCwd ?? undefined, turn: this.lastTurnAt }).catch((error) => {
+          this.ctx.logger?.warn?.('[engram-relay] wake failed: %s', String(error))
+          return null
+        })
+        // 训练模型的原生回忆（异步，结果缓存供记忆段渲染）
+        const query = extractQueryText(options)
+        if (query) {
+          void this.maybeRecall(query).catch((error) => {
+            this.ctx.logger?.warn?.('[engram-relay] recall failed: %s', String(error))
           })
-          // 训练模型的原生回忆（异步，结果缓存供记忆段渲染）
-          const query = extractQueryText(options)
-          if (query) {
-            void this.maybeRecall(query).catch((error) => {
-              this.ctx.logger?.warn?.('[engram-relay] recall failed: %s', String(error))
-            })
-          }
-          // 记忆注入（缓存友好）：追加到消息流末尾而非 system——system 内
-          // 任何动态内容都会使其后 tools+历史缓存全失效；尾部注入变化只在
-          // 历史末端，system+tools+前缀历史保持命中。
+        }
+        // 限时等待唤醒完成（本地灵枢 respond 约 50ms；慢路径限时降级），
+        // 完成后渲染记忆并注入到本轮消息，再返回（转发）底层流。
+        const wakeReady = Promise.race([wakeP, new Promise((r) => setTimeout(r, 800))])
+        const self = this
+        return (async function* () {
+          await wakeReady
           try {
-            const injection = this.renderMemorySection()
+            const injection = self.renderMemorySection()
             if (injection) {
               const messages = (options as { messages?: unknown[] }).messages
               if (Array.isArray(messages)) {
@@ -156,29 +355,33 @@ export class EngramRelay {
               }
             }
           } catch (error) {
-            this.ctx.logger?.warn?.('[engram-relay] injection failed: %s', String(error))
+            self.ctx.logger?.warn?.('[engram-relay] injection failed: %s', String(error))
           }
-        }
+          yield* next()
+        })()
       }
       return next()
-    })
+    }))
 
-    // 2. 记忆能力说明（固定文本，零动态：静态到头——order 靠前，工具 schema
-    //    变更时静态段仍缓存命中；动态召回内容走消息尾注入（下方），永不进
-    //    system 头部）。
+    // 2. 记忆能力说明（固定文本，零动态：system 稳定 → 前缀缓存保持命中）。
+    //    动态召回内容走消息尾注入（上方），需要时也可用 engram_recall 工具。
     //    ⚠️ 必须挂 ctx.effect：裸注册在 fiber 重建（热重载/失败回滚）时不注销，
     //    残留导致下次 apply duplicate "engram:relay already registered"。
     this.ctx.effect(() => this.ctx.systemPrompt.context({
       name: 'engram:relay',
-      order: -85,
-      text: '本环境有 engram 记忆图谱（分层/因果/链接）。engram_recall 等 engram_* 工具直接可用；每轮请求会自动把相关记忆追加到消息末尾。',
+      order: 9997,
+      text: '本环境有统一大脑（跨会话记忆图谱 + 灵枢知识校准器）：\n' +
+        '· 每轮请求自动注入：相关记忆入口 + 浅思维三行（条件/验证/边界）。浅思维说「图谱外」= 灵枢无卡——可直接 engram_verify/engram_respond 求助；查不到会当场自动补卡（双不会→当场学会），下次就有。\n' +
+        '· 记忆工具：recall 检索往事 / store 写入（AI 自主分层 global/project/session）/ open 展开细节 / link 织因果网 / update 修订 / promote 转长期 / search 盘点。\n' +
+        '· 知识工具：verify 验证主张（✓锚定/?图谱外，证据不足不裁决——回答须标注边界）/ respond 知识出招（条件→学科卡）。\n' +
+        '· 原则：注入段给线索（浅层自动），细节用工具深挖（渐进披露）；不确定的主张先 verify 再下结论；灵枢不裁决时不硬答。',
     }), 'engram-relay: memory-context')
 
     // 3. 回合后蒸馏（agent/turn-stopping：回合关闭边界，serial 不 veto）。
     //    从 agent.session.deriveMessages() 提取最近回合文本 → <1B 模型
     //    蒸馏为 engram（实时留底——在官方 compact 折叠之前，细节已进
     //    外置记忆表，折叠后仍可唤醒找回）。
-    this.ctx.on('agent/turn-stopping', ({ agent, turn }) => {
+    this.disposers.push(this.ctx.on('agent/turn-stopping', ({ agent, turn }) => {
       if (!this.config.enabled) return
       this.lastTurnAt = turn
       this.currentSessionId = agent.session.id
@@ -187,27 +390,24 @@ export class EngramRelay {
       if (typeof cwd === 'string' && cwd !== '') this.currentCwd = cwd
       const messages = extractRecentTurn(agent.session.deriveMessages(), turn)
       this.lastConversationText = messages
-      // 工作快照（远景场景 6"继续昨天的工作"）：聚合最近写入的进行中状态
-      if (typeof cwd === 'string' && cwd !== '') {
-        try {
-          this.store.upsertSnapshot(cwd, turn, this.currentSessionId)
-        } catch (error) {
-          this.ctx.logger?.warn?.('[engram-relay] snapshot failed: %s', String(error))
-        }
-      }
-      // 硬上限（v0.5）：每回合惰性触发归档淘汰（不阻塞）
-      try {
-        const archived = this.store.enforceLimit(this.config.maxNodes ?? 10000)
-        if (archived > 0) {
-          this.ctx.logger?.info?.('[engram-relay] archive: %d nodes (max=%d, count=%d)', archived, this.config.maxNodes, this.store.count())
-        }
-      } catch { /* 淘汰失败不阻塞 */ }
       void this.maybeDistill().catch((error) => {
         this.ctx.logger?.warn?.('[engram-relay] distill failed: %s', String(error))
       })
-    })
+    }))
 
-    // 4. 图谱 Web API（web-only）：记忆图谱 Tab 的数据面（分层准入）。
+    // 4. 会话结束（分层生命周期）：只清该会话的 session 层临时记忆；
+    //    global/project 跨会话层持久保留——跨会话沉淀的核心转变。
+    this.disposers.push(this.ctx.on('agent/disposed', ({ agent }) => {
+      if (!this.config.enabled) return
+      const cleared = this.store.clearSession(agent.session.id)
+      if (cleared > 0) {
+        this.ctx.logger?.info?.('[engram-relay] session %s ended, cleared %d session-layer engrams (global/project kept)', agent.session.id, cleared)
+      }
+    }))
+
+    // 5. 图谱 Web API（web-only）：记忆图谱 Tab 的数据面（分层准入）。
+    //    DSH 的 webserver 服务名是 `webServer`（dsh-host-webserver），
+    //    旧名 httpServer 已不存在——等不到服务则图谱 API 永不挂载。
     this.ctx.inject(['webServer'], (webCtx) => {
       const disposeGraphApi = installGraphApi(webCtx as never, this)
       this.disposers.push(disposeGraphApi)
@@ -288,11 +488,18 @@ export class EngramRelay {
       this.debugLog(`distill llm FAILED: ${String(error)}`)
       return
     }
-    const parsed = parseDistillJson(text)
+    let parsed = parseDistillJson(text)
     if (!parsed || parsed.length === 0) {
-      this.ctx.logger?.warn?.('[engram-relay] distill output unparsable/empty: %s', text.slice(0, 160))
-      this.debugLog(`distill output unparsable/empty: ${text.slice(0, 160)}`)
-      return
+      // 保底蒸馏：LLM 空返回时启发式直接沉淀（自组织记忆不断流）
+      const fb = fallbackDistill(conversation)
+      if (fb.length > 0) {
+        this.debugLog(`distill fallback: ${fb.length} items (llm empty)`)
+        parsed = fb
+      } else {
+        this.ctx.logger?.warn?.('[engram-relay] distill output unparsable/empty: %s', text.slice(0, 160))
+        this.debugLog(`distill output unparsable/empty: ${text.slice(0, 160)}`)
+        return
+      }
     }
     this.debugLog(`distill parsed: ${parsed.length} items`)
     // 自动沉淀 → ⏳待确认（用户确认制合流：不擅自写入生效记忆）
@@ -303,6 +510,7 @@ export class EngramRelay {
       const layer = item.layer as EngramLayer
       if (!ENGRAM_LAYERS.includes(layer)) continue
       if (layer === 'project' && !cwd) continue
+      if (layer === 'session' && !sessionId) continue
       if (!item.title || !item.summary) continue
       // 自动因果：causesOf 引用的已有记忆标题 → 建因果边（前因 → 新节点）。
       const causeIds: string[] = []
@@ -318,7 +526,7 @@ export class EngramRelay {
         summary: item.summary,
         content: item.content ?? '',
         links: [],
-        sessionId,
+        sessionId: layer === 'session' ? sessionId : null,
         turn: this.lastTurnAt,
         causes: causeIds,
         effects: [],
@@ -377,48 +585,24 @@ export class EngramRelay {
       engrams,
       reason: hit.reason,
       injectedTokens: hit.injectedTokens,
+      verify: hit.verify,
     }
   }
 
   async status(): Promise<Record<string, unknown>> {
-    const count = this.store.count()
-    const archived = this.store.archivedCount()
-    const maxNodes = this.config.maxNodes ?? 10000
-    const slots = this.store.slotCount()
-    const budget = this.config.injectBudgetTokens
-    const states = this.store.stateCounts()
     return {
       enabled: this.config.enabled,
-      // 人话摘要（新 agent 实测驱动）：字段含义一行讲清
-      brief: `记忆图谱共 ${count} 条（已归档 ${archived}，硬上限 ${maxNodes}），`
-        + `分层：${JSON.stringify(this.store.layerCounts())}（global/project）；`
-        + '跨会话全可见；语义引擎为纯算法（词汇/图/共现，零外部模型）；'
-        + '写入自动查重修订+织网，检索用 engram_recall，展开用 engram_open。'
-        + ` 其余字段：slotCount=${slots}（哈希检索槽位总数，内部指标）；`
-        + `budgetTokens=${budget}（单次记忆注入预算，token）；stateCounts（巩固状态：`
-        + `episodic=新写 ${states.episodic} / semantic=已固化 ${states.semantic} / dormant=沉睡 ${states.dormant}）；`
-        + `pendingCount=${this.store.pending().length}（待确认节点数）；`
-        + `graphEdges=${this.graph.edgeCount()}（因果/链接边总数）；`
-        + `storeDir=数据目录（见上）；currentCwd=当前工作目录（可能为 null=无 cwd 上下文）；`
-        + `compactCoexist=与官方上下文压缩（compact）共存检测（布尔）。`,
+      semanticEngine: this.config.embedModel?.trim() ? `embedding(${this.config.embedModel})` : '纯算法 SemanticScorer（零模型，主路径）',
       storeDir: this.store.dir,
-      engramCount: count,
+      engramCount: this.store.count(),
       pendingCount: this.store.pending().length,
-      isolatedCount: this.store.all().filter((e) =>
-        !isSuperseded(e) && e.status !== 'pending'
-        && (e.causes?.length ?? 0) === 0 && (e.effects?.length ?? 0) === 0 && (e.links?.length ?? 0) === 0,
-      ).length,
       layerCounts: this.store.layerCounts(),
-      stateCounts: states,
-      archivedCount: archived,
-      maxNodes,
-      slotCount: slots,
+      slotCount: this.store.slotCount(),
       graphEdges: this.graph.edgeCount(),
-      // v0.5 语义引擎：纯算法三通道（词汇/图/共现），零外部模型——无需 python
-      semanticEngine: 'pure-algorithm (lexical + graph + co-occurrence), no external model',
-      budgetTokens: budget,
+      model: await this.model.describe(),
+      budgetTokens: this.config.injectBudgetTokens,
       currentCwd: this.currentCwd,
-      compactCoexist: this.ctx.get('compaction') !== undefined,
+      compactCoexist: this.ctx.get('compact') !== undefined,
     }
   }
 }
@@ -482,8 +666,8 @@ const KINDS = new Set(['fact', 'decision', 'event', 'note'])
 const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供的「最近对话回合」中提取值得长期记住的信息（事实/决策/事件/约定/踩坑），最多 3 条。只提取可复用、有长期价值的；寒暄、过程性、一次性内容一律不提取（返回空数组 []）。
 每条输出 JSON 对象：
 - kind: fact(事实/约定) / decision(决策/方案) / event(事件/进展) / note(笔记/其它)
-- layer: project(默认——归属当前项目) / global(通用知识——换个项目还有用：技术模式/平台坑/偏好)
-- title: 简短入口标题（12 字内，如「部署端口决策」）
+- layer: global(跨项目通用，如环境/工具/偏好) / project(仅当前项目相关，如架构/踩坑/约定) / session(仅本次会话，如临时进度)
+- title: 简短入口标题（10 字内，如「部署端口决策」）
 - summary: 一句话摘要（30 字内）
 - content: 完整细节（关键参数、上下文，200 字内）
 - causesOf: 导致这条记忆的**已有记忆标题**数组（从下方「已有记忆入口」列表精确引用，最多 2 个；没有因果关系的填 []）——例如本轮"修复了 X"是由之前的「Y 故障定位」导致的，则 causesOf: ["Y 故障定位"]
@@ -491,6 +675,33 @@ const DISTILL_SYSTEM_PROMPT = `你是 engram 记忆提取器。从用户提供�
 只输出 JSON 数组，不要任何其他文字。`
 
 /** 宽松解析蒸馏输出：剥代码围栏 → 取首个 JSON 数组。 */
+function fallbackDistill(conversation: string): Array<{ kind: string; layer: string; title: string; summary: string; content?: string }> {
+  const text = conversation.trim()
+  if (text.length < 40) return []
+  // 取末尾 200 字符（跨行，避免最后一行是短工具行）
+  const clean = text.slice(-200).replace(/^[用户助手AI]\s*[:：]?\s*/i, '').trim()
+  if (clean.length < 20) return []
+  let title = clean.replace(/[，。！？,.!?;；]/g, ' ').replace(/[\[\]()（）]/g, '').trim().slice(0, 10)
+  if (!title || /^(assistant|user|ai|助手|用户|对话)$/i.test(title)) title = '对话片段'
+  return [{ kind: 'note', layer: 'session', title, summary: clean.slice(0, 80), content: clean }]
+}
+
+function parseCardJson(text: string): { name?: string; domain?: string; claim?: string; trigger?: string; action?: string; level?: number } | null {
+  let t = text.trim()
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
+  if (fence) t = fence[1]
+  const start = t.indexOf('{')
+  const end = t.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  try {
+    const obj = JSON.parse(t.slice(start, end + 1))
+    if (obj && typeof obj === 'object' && obj.name) return obj
+    return null
+  } catch {
+    return null
+  }
+}
+
 function parseDistillJson(text: string): Array<{
   kind?: string
   layer?: string

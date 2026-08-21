@@ -20,24 +20,25 @@ import type { Context as CordisContext } from 'cordis';
 import type LlmService from '@deepseek-ai/dsh-llm';
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import type ToolRegistry from '@deepseek-ai/dsh-tools';
-import type CompactionEngine from '@deepseek-ai/dsh-compaction';
 import { EngramStore } from './engram/store.js';
 import { CausalGraph } from './engram/causal.js';
 import { NgramHashAddressing } from './engram/hash.js';
 import { EngramWakeEngine, type WakeViewer } from './engram/wake.js';
 import { RelayModel } from './model/relay-model.js';
-import type { EngramRelayConfig } from './types.js';
+import type { EngramRelayConfig, VerifyMark } from './types.js';
 export interface EngramRelayDeps {
     llm: LlmService;
     systemPrompt: SystemPrompt;
     tools: ToolRegistry;
-    compaction?: CompactionEngine;
+    compact?: unknown;
 }
 /** 唤醒结果：本次请求注入的记忆痕迹（哈希命中 + 因果激活，超稀疏）。 */
 export interface WakeResult {
     engrams: import('./engram/store.js').EngramNode[];
     reason: string;
     injectedTokens: number;
+    /** 融合：条目的灵枢白箱验证标注（id → 结果）；未启用/无标注时缺省。 */
+    verify?: Record<string, VerifyMark>;
 }
 export declare class EngramRelay {
     private ctx;
@@ -51,14 +52,31 @@ export declare class EngramRelay {
     readonly activation: import('./engram/activation.js').ActivationCache;
     /** 向量索引（int8 粗筛 + fp32 精筛双表；prefilter 候选来源）。 */
     readonly vectorIndex: import('./engram/vector-index.js').BruteForceIndex;
-    /** τ 融合权重（v0.4：写入织网与检索召回共用同一加权——可逆可解释）。 */
-    get fusionTau(): {
-        sem: number;
-        time: number;
-        cause: number;
-    };
     private disposers;
     constructor(ctx: CordisContext, config: EngramRelayConfig);
+    /** 融合核心：灵枢 auto_verify HTTP 调用 → VerifyMark（服务不可用/超时 → error）。 */
+    private lingshuAutoVerify;
+    /** 唤醒验证钩子（wake 用）：engram 节点 → 灵枢验证。 */
+    private lingshuVerifier;
+    /**
+     * 浅思维钩子（每轮注入 · 统一大脑）：图上算子 + 灵枢校准器 → 3 行。
+     *  ① 条件算子：唤醒邻域的 kind 分布 → 条件空间（知识/决策/事件/情感）
+     *  ② 验证算子：灵枢 D_norm 外部校准锚（图网络敢想，灵枢把关）
+     *  ③ 边界算子：诚实边界种子词 + 教训邻域检测（规范性提醒）
+     * 纪律：只提示姿态（≤100 token），不替 agent 思考；深挖由 agent 主动。
+     */
+    private thinkLight;
+    private knowledgeGaps;
+    private gapLlmInFlight;
+    private gapAddedToday;
+    /** 记录知识缺口：agent 求助且无答案 = 双不会 → 当场补卡（人类查漏式）。 */
+    private recordKnowledgeGap;
+    /** 自动补卡：查重（记忆）→ LLM 生成卡 → 灵枢 add_card 写入。 */
+    private autoAddCard;
+    /** 供工具使用：验证任意知识主张（外置大脑 · 白箱闸门）。 */
+    verifyClaim(claim: string): Promise<VerifyMark | null>;
+    /** 供工具使用：灵枢知识出招（外置大脑 · 知识之书）——条件 → 命中学科卡。 */
+    lingshuRespond(condition: string, limit?: number): Promise<unknown>;
     /**
      * 向量预筛（prefilter 钩子）：查询向量 → int8 全量内积 top-50 → 候选 id。
      * 含懒补 ensure：新记忆未入向量表时差量 embed 补入；embedder 不可用返回 null（哈希兜底）。

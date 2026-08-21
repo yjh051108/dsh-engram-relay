@@ -41,6 +41,8 @@ export declare class SemanticScorer {
      * α/β/γ 初始标定（0.5/0.25/0.25）；后续可经 fit-tau 数据驱动调整。
      */
     score(query: string, candidates: EngramNode[]): Map<string, SemanticScore>;
+    /** store 变化后调用（共现表懒重建——写入/蒸馏后）。 */
+    markDirty(): void;
     /** 图语义种子暴露（调试/测试）。 */
     hits(): Set<string>;
     /** 查询扩展词（粗筛用——共现邻居进 token 倒排，语义对齐）。 */

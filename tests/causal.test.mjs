@@ -24,6 +24,15 @@ const CONFIG = {
   enabled: true,
 }
 
+/** 桩 embedder：全部候选给高分（语义精排在测试环境不可用；本组测试验证
+ *  hash 截断与因果传播，不验证语义排序——宁缺毋滥语义下无 embedder 直接
+ *  零注入，所以必须提供桩）。 */
+function stubScorers() {
+  return {
+    embedder: async (_query, candidates) => new Map(candidates.map((e) => [e.id, 0.9])),
+  }
+}
+
 function makeEnv() {
   const dir = mkdtempSync(join(tmpdir(), 'engram-causal-'))
   const hasher = new NgramHashAddressing({ seed: 0 })
@@ -75,8 +84,7 @@ test('wake: hash hit then sparse truncation', async () => {
     }
     graph.rebuild()
 
-    const engine = new EngramWakeEngine(store, graph, hasher, { ...CONFIG, maxWakePerTurn: 3 })
-    // 无模型打分时降级为 importance 排序（种子 = importance）
+    const engine = new EngramWakeEngine(store, graph, hasher, { ...CONFIG, maxWakePerTurn: 3 }, stubScorers())
     const hit = await engine.query('项目部署端口是 8080', 3)
     assert.ok(hit.engrams.length <= 3, '唤醒条数受 maxWakePerTurn 限制')
     assert.ok(hit.injectedTokens <= 600, '注入 token 受预算限制')
@@ -96,8 +104,8 @@ test('wake: hash seed + causal propagation recalls dependents', async () => {
     const b = store.add({ kind: 'fact', title: 'B 依赖 A', summary: '防火墙白名单规则已按既定方案更新完成', sessionId: null, turn: 2, causes: [a.id], effects: [], importance: 0.8, scope: null })
     graph.rebuild()
 
-    // 无模型打分（重要度降级）：A/B 同为 0.1
-    const engine = new EngramWakeEngine(store, graph, hasher, CONFIG)
+    // 桩 embedder：A/B 同分，验证因果传播路径的召回（非语义排序）
+    const engine = new EngramWakeEngine(store, graph, hasher, CONFIG, stubScorers())
     const hit = await engine.query('项目部署端口是 8080 且使用 PostgreSQL', 3)
     const ids = hit.engrams.map((e) => e.id)
     assert.ok(ids.includes(a.id), '哈希种子命中 A')

@@ -2,7 +2,8 @@
  * 力导向布局（src/client/force.ts）测试。
  *
  * 覆盖：确定性（相同输入 → 相同输出）、单节点居中、空输入、边界约束
- * （坐标不越出画布）、节点在结果中一一对应。
+ * （坐标不越出画布）、节点在结果中一一对应、**碰撞分离（任意两节点不
+ * 重叠）**、**连通分量感知初始化（团内聚拢、团间分离）**、弹簧长度单调。
  * Node ≥22.6 直接 import TS（type stripping）。
  */
 import { test } from 'node:test'
@@ -41,26 +42,73 @@ test('force: 空输入返回空 Map', () => {
   assert.equal(out.size, 0)
 })
 
-test('force: 无限画布——无边界墙，坐标有限且无 NaN（力平衡决定位置）', () => {
+test('force: 坐标不越出画布（硬边界）', () => {
   const nodes = Array.from({ length: 24 }, (_, i) => ({ id: `n${i}` }))
   const edges = []
   for (let i = 1; i < 24; i += 1) edges.push({ from: `n${i - 1}`, to: `n${i}` })
   const out = layoutForce(nodes, edges, { width: W, height: H, iterations: 400 })
   assert.equal(out.size, 24)
   for (const [id, p] of out) {
-    assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y), `${id} 坐标有限 (${p.x}, ${p.y})`)
-    // 无硬边界：允许超出画布（软向心约束下不会无限远）
-    assert.ok(Math.abs(p.x) < W * 4 && Math.abs(p.y) < H * 4, `${id} 未被弹飞 (${p.x}, ${p.y})`)
+    assert.ok(p.x >= 0 && p.x <= W, `${id} x 在画布内 (${p.x})`)
+    assert.ok(p.y >= 0 && p.y <= H, `${id} y 在画布内 (${p.y})`)
   }
 })
 
-test('force: 弹簧生效——springLength 越大相邻节点间距越大', () => {
-  // 弹簧的真实语义是"边距可调"：连边节点对在斥力/弹簧三方平衡下，
-  // 平衡间距随 springLength 单调增大。双节点对称布局可直接量间距验证。
-  // 注意（d3-force 物理）：2 节点时斥力完全由弹簧对抗，平衡间距恒
-  // > springLength（charge=-300/spring=0.1 时 L=60 实测 ~92、L=140 实测
-  // ~159，理论平衡 300/d = 0.1·(d−L) 吻合）——断言只锁语义：
-  // 单调性、显著差距、不塌不飞。
+test('force: 碰撞分离——任意两节点圆心距 ≥ r₁+r₂+gap（零重叠）', () => {
+  // 30 个节点 + 若干边，紧凑参数（强斥力弱迭代）下仍必须零重叠
+  const nodes = Array.from({ length: 30 }, (_, i) => ({ id: `n${i}`, radius: i % 3 === 0 ? 16 : 9 }))
+  const edges = []
+  for (let i = 1; i < 30; i += 1) edges.push({ from: `n${i - 1}`, to: `n${i}` })
+  const out = layoutForce(nodes, edges, {
+    width: W, height: H, iterations: 60, collisionIterations: 120,
+    radius: 10, gap: 6, center: 0.001, repulsionScale: 0.5, springScale: 0.2, alphaDecay: 0.98,
+  })
+  assert.equal(out.size, 30)
+  const ids = nodes.map((n) => n.id)
+  for (let i = 0; i < ids.length; i += 1) {
+    for (let j = i + 1; j < ids.length; j += 1) {
+      const a = out.get(ids[i])
+      const b = out.get(ids[j])
+      const ra = nodes[i].radius
+      const rb = nodes[j].radius
+      const d = Math.hypot(a.x - b.x, a.y - b.y)
+      assert.ok(d >= ra + rb + 6 - 1e-6, `n${i}(${a.x},${a.y}) 与 n${j}(${b.x},${b.y}) 重叠: d=${d.toFixed(1)} < ${ra + rb + 6}`)
+    }
+  }
+})
+
+test('force: 连通分量感知——团内聚拢、团间分离', () => {
+  // 两个分量：A 链 (a0-a1-a2-a3) 与 B 链 (b0-b1-b2-b3)，分量质心相距应
+  // 显著大于各自团内最大跨度（初始即分环 + 质心引力聚团）。
+  const nodes = [
+    { id: 'a0' }, { id: 'a1' }, { id: 'a2' }, { id: 'a3' },
+    { id: 'b0' }, { id: 'b1' }, { id: 'b2' }, { id: 'b3' },
+  ]
+  const edges = [
+    { from: 'a0', to: 'a1' }, { from: 'a1', to: 'a2' }, { from: 'a2', to: 'a3' },
+    { from: 'b0', to: 'b1' }, { from: 'b1', to: 'b2' }, { from: 'b2', to: 'b3' },
+  ]
+  const out = layoutForce(nodes, edges, {
+    width: W, height: H, iterations: 250, collisionIterations: 120,
+    center: 0.02, repulsionScale: 0.25, springScale: 2.0, maxMove: 8,
+  })
+  const centroid = (ids) => {
+    let x = 0; let y = 0
+    for (const id of ids) { const p = out.get(id); x += p.x; y += p.y }
+    return { x: x / ids.length, y: y / ids.length }
+  }
+  const ca = centroid(['a0', 'a1', 'a2', 'a3'])
+  const cb = centroid(['b0', 'b1', 'b2', 'b3'])
+  const between = Math.hypot(ca.x - cb.x, ca.y - cb.y)
+  const spreadA = Math.max(...['a0', 'a1', 'a2', 'a3'].map((id) => Math.hypot(out.get(id).x - ca.x, out.get(id).y - ca.y)))
+  const spreadB = Math.max(...['b0', 'b1', 'b2', 'b3'].map((id) => Math.hypot(out.get(id).x - cb.x, out.get(id).y - cb.y)))
+  assert.ok(between > Math.max(spreadA, spreadB) * 1.5,
+    `团间质心距 ${between.toFixed(1)} 应显著大于团内跨度 A=${spreadA.toFixed(1)} B=${spreadB.toFixed(1)}`)
+})
+
+test('force: 弹簧生效——springFactor 越大相邻节点间距越大', () => {
+  // FR 弹簧把边距拉向 k·springFactor；k 由密度推导（双节点 → 钳到 kMax 110）。
+  // 只断言单调性与显著差距，不依赖精确平衡位置。
   const nodes = [{ id: 'a' }, { id: 'b' }]
   const edges = [{ from: 'a', to: 'b' }]
   const dist = (out) => {
@@ -68,15 +116,15 @@ test('force: 弹簧生效——springLength 越大相邻节点间距越大', () 
     const pb = out.get('b')
     return Math.hypot(pa.x - pb.x, pa.y - pb.y)
   }
-  const short = layoutForce(nodes, edges, { width: W, height: H, springLength: 60, iterations: 300, spring: 0.1 })
-  const long = layoutForce(nodes, edges, { width: W, height: H, springLength: 140, iterations: 300, spring: 0.1 })
+  const short = layoutForce(nodes, edges, { width: W, height: H, springFactor: 0.6, iterations: 250 })
+  const long = layoutForce(nodes, edges, { width: W, height: H, springFactor: 1.3, iterations: 250 })
   const shortD = dist(short)
   const longD = dist(long)
   // 1) 长弹簧 → 更大边距（单调性）
   assert.ok(shortD < longD, `短弹簧更紧凑 (${shortD} < ${longD})`)
   // 2) 差距显著（弹簧确实改变布局，而非噪声）
   assert.ok(longD - shortD > 30, `边距差距显著 (${longD} - ${shortD} > 30)`)
-  // 3) 边距在合理范围（未被斥力完全压塌 / 未被弹飞；2 节点平衡 > springLength）
-  assert.ok(shortD > 60 && shortD < 180, `短弹簧边距合理 (${shortD})`)
-  assert.ok(longD > 80 && longD < 250, `长弹簧边距合理 (${longD})`)
+  // 3) 边距在合理范围（未被斥力完全压塌 / 未弹飞）
+  assert.ok(shortD > 40 && shortD < 180, `短弹簧边距合理 (${shortD})`)
+  assert.ok(longD > 80 && longD < 300, `长弹簧边距合理 (${longD})`)
 })

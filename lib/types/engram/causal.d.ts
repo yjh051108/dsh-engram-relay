@@ -43,7 +43,5 @@ export declare class CausalGraph {
     causesOf(id: string): EngramNode[];
     /** 取某节点的直接后果（供召回结果展示因果链）。 */
     effectsOf(id: string): EngramNode[];
-    /** 取某节点的依赖/引用邻居（depends-on 与 references 边——open 邻接展示）。 */
-    depsOf(id: string): EngramNode[];
     edgeCount(): number;
 }

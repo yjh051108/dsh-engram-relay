@@ -18,7 +18,7 @@ import torch
 
 from engram_model.model import EngramQwen3
 
-MODEL_PATH = os.environ.get("ENGRAM_MODEL_PATH", "")
+MODEL_PATH = os.environ.get("ENGRAM_MODEL_PATH", r"F:/dsh/01-memory/engram-trial/qwen3-model")
 
 
 def main():

@@ -13,9 +13,9 @@ import math
 import os
 
 STORE = os.path.expanduser('~/.dsh/engram-relay/engrams.jsonl')
-QUERIES_FILE = os.environ.get('ENGRAM_STUDY_QUERIES', '')
-SESSION_FILE = os.environ.get('ENGRAM_STUDY_SESSION', '')
-EMBED_MODEL = os.environ.get('ENGRAM_EMBED_MODEL', '')
+QUERIES_FILE = 'F:/dsh/.zcode/real-queries.txt'
+SESSION_FILE = 'F:/dsh/.zcode/real-session2/session.jsonl'
+EMBED_MODEL = 'F:/dsh/01-memory/engram-trial/bge-small-zh'
 
 TOPIC_KW = {
     '热重载': ['热重载', '重载', 'pnpm', 'hmr', 'patch'],

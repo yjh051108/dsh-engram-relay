@@ -83,7 +83,14 @@ test('graph: 渐进披露渲染——入口列表不含 content', async () => {
   try {
     store.add({ kind: 'fact', title: '部署端口', summary: '项目用 8080', content: '超长的完整正文内容不应该出现在入口层', links: [], sessionId: 's1', turn: 1, causes: [], effects: [], importance: 0.9 })
     graph.rebuild()
-    const wake = new EngramWakeEngine(store, graph, hasher, CONFIG)
+    // 桩 embedder：精确标题命中给高分（本测试验证渐进披露，不验证语义引擎）
+    const wake = new EngramWakeEngine(store, graph, hasher, CONFIG, {
+      embedder: async (_q, candidates) => {
+        const scores = new Map()
+        for (const c of candidates) scores.set(c.id, c.title.includes('部署端口') ? 0.9 : 0.2)
+        return scores
+      },
+    })
     const hit = await wake.query('部署端口', 3)
     assert.ok(hit.engrams.length >= 1, '应命中入口')
     const section = wake.renderInjection(600)

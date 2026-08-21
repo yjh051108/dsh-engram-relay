@@ -1,5 +1,5 @@
 node_modules/
-
+lib/
 *.tsbuildinfo
 .cache/
 models/
@@ -10,5 +10,3 @@ __pycache__/
 python/engram_model/__pycache__/
 .qwen3-model/
 checkpoints/
-
-*.tgz

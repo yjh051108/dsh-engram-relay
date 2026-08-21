@@ -1,10 +1,10 @@
 /**
  * 混合检索测试：hash 粗筛 + bge 语义精排（stub embedder）+ 因果传播。
  *
- * 验证 wake 管线在 v3（0.6B 移除，bge 语义精排上位）下的行为：
- *  1. hash 粗筛候选永远保留（精确寻址保底）；
- *  2. embedding 分数决定主席位顺序（语义重排）；
- *  3. embedder 缺失/抛错时依次降级：遗留 scorer → 重要度。
+ * 验证 wake 管线（2026-08-12 起：语义阈值 0.42、embedder 不可用宁缺毋滥）：
+ *  1. hash 粗筛候选保留（精确寻址保底）；
+ *  2. embedding 分数决定主席位顺序（语义重排），低于阈值者不注入；
+ *  3. embedder 缺失/抛错 → 零注入（宁缺毋滥：无关记忆零注入优先）。
  */
 
 import { test } from 'node:test'
@@ -44,20 +44,21 @@ test('hybrid: hash 粗筛候选保留，embedding 精排决定主席位', async 
   try {
     seedPair(store, graph)
     const wake = new EngramWakeEngine(store, graph, hasher, CONFIG, {
+      // 分数团规则：次席 ≥ 首席×0.9 才同团注入（0.85 ≥ 0.9×0.9=0.81 ✓）
       embedder: async (_query, candidates) =>
-        new Map(candidates.map((e) => [e.id, e.title === '缓存上线' ? 0.9 : 0.4])),
+        new Map(candidates.map((e) => [e.id, e.title === '缓存上线' ? 0.9 : 0.85])),
     })
     const hit = await wake.query('缓存上线后性能如何', 3)
     const titles = hit.engrams.map((e) => e.title)
     assert.ok(titles.includes('缓存上线'), '语义命中者保留')
-    assert.ok(titles.includes('数据上线'), 'hash 粗筛候选不被精排丢弃（混合保底）')
+    assert.ok(titles.includes('数据上线'), 'hash 粗筛候选不被精排丢弃（混合保底，同分数团）')
     assert.equal(titles[0], '缓存上线', 'embedding 高分者占主席位')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('hybrid: embedder 缺失时降级重要度，哈希命中不丢', async () => {
+test('hybrid: embedder 缺失时宁缺毋滥——零注入（2026-08-12 语义门槛语义）', async () => {
   const { dir, store, graph, hasher } = makeEnv()
   try {
     seedPair(store, graph)
@@ -65,25 +66,23 @@ test('hybrid: embedder 缺失时降级重要度，哈希命中不丢', async () 
       embedder: async () => null,
     })
     const hit = await wake.query('缓存上线', 3)
-    assert.ok(hit.engrams.length >= 2, 'embedder 缺失时仍按重要度唤醒全部 hash 命中')
+    assert.equal(hit.engrams.length, 0, 'embedder 不可用 → 无法判断语义相关性 → 本轮不注入')
+    assert.equal(hit.reason, 'no-embedder')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('hybrid: embedder 抛错回退遗留 scorer', async () => {
+test('hybrid: embedder 抛错同样宁缺毋滥——零注入', async () => {
   const { dir, store, graph, hasher } = makeEnv()
   try {
     seedPair(store, graph)
     const wake = new EngramWakeEngine(store, graph, hasher, CONFIG, {
       embedder: async () => { throw new Error('embed service down') },
-      scorer: async (_q, candidates) =>
-        new Map(candidates.map((e) => [e.id, e.title === '缓存上线' ? 0.8 : 0.2])),
     })
     const hit = await wake.query('缓存上线', 3)
-    const titles = hit.engrams.map((e) => e.title)
-    assert.ok(titles.includes('缓存上线'), 'scorer 兜底仍可唤醒')
-    assert.equal(titles[0], '缓存上线', 'scorer 分数决定主席位')
+    assert.equal(hit.engrams.length, 0, 'embedder 抛错 → 零注入（不赌语义）')
+    assert.equal(hit.reason, 'no-embedder')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -21,8 +21,9 @@ import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { EngramRelay } from './relay.js'
-import { ENGRAM_LAYERS, isVisible, isSuperseded, type EngramKind, type EngramLayer, type EngramNode, type EngramStore } from './engram/store.js'
-import type { CausalEdgeKind, CausalGraph } from './engram/causal.js'
+import type { VerifyMark } from './types.js'
+import { ENGRAM_LAYERS, isVisible, type EngramKind, type EngramLayer, type EngramNode } from './engram/store.js'
+import type { CausalEdgeKind } from './engram/causal.js'
 
 type ToolsContext = CordisContext & { tools: ToolRegistry }
 
@@ -49,7 +50,7 @@ function resolveNode(relay: EngramRelay, ref: string): EngramNode | undefined {
 }
 
 /**
- * 织网推荐：纯算法语义（词汇 × 时序）加权，返回 top-3 关联候选（供 AI 决策）。
+ * 织网推荐：bge 语义余弦 × 时序归一化加权，返回 top-3 关联候选（供 AI 决策）。
  * 语义门槛 0.40（推荐可比自动唤醒略宽——决策权在 AI）；时序权重：近 20 回合
  * 内加权，远期收敛（1 / (1 + Δturn/20)）。
  */
@@ -70,133 +71,14 @@ async function recommendLinks(relay: EngramRelay, text: string, excludeId: strin
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
   return ranked
-    .map((x, i) => {
-      const proj = x.e.projectId ? `·${String(x.e.projectId).split(/[\\/]/).pop()}` : ''
-      return `${i + 1}. [[${x.e.title}]][${x.e.layer}${proj}]（语义 ${x.cosine.toFixed(2)} × 时序 ${x.score.toFixed(2)}）${x.e.summary.slice(0, 40)}`
-    })
+    .map((x, i) => `${i + 1}. [[${x.e.title}]]（语义 ${x.cosine.toFixed(2)} × 时序 ${x.score.toFixed(2)}）${x.e.summary.slice(0, 40)}`)
     .join('\n')
 }
 
-/**
- * 写前查重（P2 写入管线）：哈希候选（**跨项目**——同一真理不分项目，
- * 语义高置信同主题即修订，v0.4）→ 语义打分 → 最高分 ≥0.6 视为同主题
- * （返回旧节点，供自动修订）；打分器不可用时退化为标题精确匹配。高置信
- * 阈值防误判；版本链 superseded 可追溯 = 自动修订的天然回滚安全网。
- * 返回 { dup, detailed }——detailed（通道分解）复用给自动织网。
- */
-async function findDuplicate(relay: EngramRelay, text: string, _layer: EngramLayer): Promise<{ dup: EngramNode | null; detailed: Map<string, { score: number; lexical: number; graph: number; cooc: number }> | null }> {
-  // ⚠️ v0.6 粗筛语义对齐：候选 = 哈希/token 倒排 + **共现扩展词倒排**
-  // （查询词 → 共现邻居 → 倒排召回——「滚轮」↔「onwheel」这类共现桥
-  // 进粗筛，同主题不同表述不再被挡在候选外）
-  const candSet = new Map<string, EngramNode>()
-  for (const c of relay.store.lookup(text, 64)) candSet.set(c.id, c)
-  try {
-    const expanded = relay.model.scorer.expandQuery(text.slice(0, 300), 3)
-    if (expanded.length > 0) {
-      for (const c of relay.store.lookupTokens(expanded, 64)) candSet.set(c.id, c)
-    }
-  } catch { /* 扩展失败不阻塞（退化为基础粗筛） */ }
-  const cands = [...candSet.values()]
-  if (cands.length === 0) return { dup: null, detailed: null }
-  const detailed = relay.model.semanticScores(text.slice(0, 300), cands)
-  if (detailed && detailed.size > 0) {
-    let best: EngramNode | null = null
-    let bestScore = 0
-    for (const e of cands) {
-      const s = detailed.get(e.id)?.score ?? 0
-      if (s > bestScore) { bestScore = s; best = e }
-    }
-    if (best && bestScore >= 0.6) return { dup: best, detailed }
-    return { dup: null, detailed }
-  }
-  // 打分不可用：精确标题匹配（保守，防误修订）
-  const exact = relay.store.byTitle(text.split('：')[0] ?? text)
-  return { dup: exact ?? null, detailed: null }
-}
-
-/**
- * 自动织网（v0.4 核心原则：**怎么索引就怎么推荐，可逆才可解释**）：
- * 写入即织网——**融合分 ≥ 0.55 判同主题**（v0.6：同主题不同表述的
- * 词汇重叠低（lexical 0.05-0.09），纯词汇阈值织不上；融合分含共现语义
- * （候选内相对归一化）能抓住同主题），排序用融合分（与检索同款）。
- * 因果强关系仍由 AI/蒸馏提供（causes/effects），系统自动织的是弱关系
- * （link）——写入织的边 = 未来检索召回的理由（可逆）。
- */
-async function weaveLinks(relay: EngramRelay, node: EngramNode, detailed: Map<string, { score: number; lexical: number; graph: number; cooc: number }>): Promise<number> {
-  // ⚠️ 若 detailed 无候选（findDuplicate 的 lookup 候选可能漏掉共现语义
-  // 相关但 token 零共享的记忆）——用共现扩展词补一轮粗筛再打分
-  const ranked = [...detailed.entries()]
-    .filter(([id, s]) => {
-      const target = relay.store.get(id)
-      // ⚠️ 排除自身与废止节点（修订路径中旧版已被 supersede——给它织链接无意义）
-      return id !== node.id && target !== undefined && !isSuperseded(target) && s.score >= 0.55
-    })
-    .sort((a, b) => b[1].score - a[1].score)
-  let woven = 0
-  const newLinks: string[] = [...(node.links ?? [])]
-  for (const [id] of ranked.slice(0, 2)) {
-    const target = relay.store.get(id)
-    if (!target || target.id === node.id) continue
-    if (target.links.includes(node.title)) continue
-    relay.store.update(target.id, { links: [...target.links, node.title] })
-    if (!newLinks.includes(target.title)) newLinks.push(target.title)
-    woven++
-  }
-  if (woven > 0) relay.store.update(node.id, { links: newLinks })
-  return woven
-}
-
-/** 入口行渲染（[[标题]][层] 摘要 + **因果/链接邻接**——渐进披露入口层
- *  就给导航信息：↑因/↓果（因果链）→ 关联（双向链接），模型看到即可
- *  决定顺着哪条边探究（engram_open 展开正文），不用盲目逐个 open。 */
-function entryLine(e: EngramNode, store: EngramStore, graph?: CausalGraph): string {
+/** 入口行渲染（[[标题]][层] 摘要；待确认节点带 ⏳ 标记）。 */
+function entryLine(e: EngramNode): string {
   const pendingMark = e.status === 'pending' ? ' ⏳' : ''
-  // 状态标注（新 agent 判断可信度：semantic=被反复巩固的知识，episodic=新写事件）
-  const stateMark = e.state === 'semantic' ? '[语义]' : ''
-  // 废止标注（防御性：wake 已过滤，但传播路径可能带入）
-  const supersededMark = isSuperseded(e) ? '（已废止）' : ''
-  return `- [[${e.title}]][${e.layer}]${stateMark}${pendingMark}${supersededMark} ${e.summary}${neighborsOf(e, store, graph)}`
-}
-
-/** 邻接摘要：↑因/↓果/关联/依赖（id 解析标题 + 按重要度排序 + 截断——入口
- *  层只给导航线索，别让因果链淹没摘要；展开留给 engram_open）。
- *  ⚠️ 废止标注紧跟各自链接（第六轮新 agent 实测：行尾统一标注无法判断
- *  属于哪个链接）。graph 可选：传入时补「⇄依赖」段（depends-on 边）。 */
-function neighborsOf(e: EngramNode, store: EngramStore, graph?: CausalGraph): string {
-  const parts: string[] = []
-  const nodeOf = (id: string): EngramNode | undefined => store.get(id)
-  const titlesOf = (ids: string[], max: number): string[] => {
-    const withImp = ids
-      .map((id) => store.get(id))
-      .filter((n): n is EngramNode => !!n)
-      .sort((a, b) => b.importance - a.importance)
-      .map((n) => n.title)
-    return withImp.slice(0, max)
-  }
-  // 渲染链接时对废止目标紧跟标注（不是行尾）
-  const render = (titles: string[]): string => titles
-    .map((t) => {
-      const target = store.byTitle(t)
-      return `[[${t}]]${target && isSuperseded(target) ? '（已废止）' : ''}`
-    })
-    .join(' ')
-  const causes = titlesOf(e.causes ?? [], 4)
-  const effects = titlesOf(e.effects ?? [], 4)
-  const links = (e.links ?? []).slice(0, 3)
-    .map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim())
-  if (causes.length > 0) parts.push(`↑因:${render(causes)}${(e.causes?.length ?? 0) > 4 ? '…' : ''}`)
-  if (effects.length > 0) parts.push(`↓果:${render(effects)}${(e.effects?.length ?? 0) > 4 ? '…' : ''}`)
-  if (links.length > 0) parts.push(`→:${render(links)}`)
-  // 依赖/引用边（depends-on/references——graph 传入时展示；第九轮新 agent
-  // 建议：入口层也该看到，否则只靠 depends-on 织边的节点在 recall 里"无链接"）
-  if (graph) {
-    const deps = graph.depsOf(e.id)
-    if (deps.length > 0) {
-      const depTitles = deps.slice(0, 3).map((n) => `[[${n.title}]]`)
-      parts.push(`⇄:${depTitles.join(' ')}${deps.length > 3 ? '…' : ''}`)
-    }
-  }
-  return parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
+  return `- [[${e.title}]][${e.layer}]${pendingMark} ${e.summary}`
 }
 
 export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () => void {
@@ -205,7 +87,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_recall：按需唤醒检索（跨会话分层准入） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_recall',
-    description: '主动唤醒记忆图谱入口（跨会话全可见，项目即标签）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + **邻接**：↑因=前因/↓果=后果/→=双向链接/⇄=依赖引用）。**入口图例**：[[标题]][层]（[语义]=已固化知识）（已废止）摘要。看到 [[标题]] 后由你判断：需要详情就 engram_open 展开，顺着邻接可继续探究（递归导航），不需要就直接用摘要作答。',
+    description: '主动唤醒记忆图谱入口（跨会话分层）。按当前查询匹配入口节点（[[标题]] + 层 + 摘要 + 因果邻接）。缺省召回 global + 本目录 project + 本会话 session；标注含义：✓已锚定=灵枢确认 / ?图谱外=灵枢未锚定（诚实边界）。看到 [[标题]] 后由你判断——需要详情就 engram_open 展开，不需要就直接用摘要作答。',
     parameters: {
       query: {
         type: 'string',
@@ -224,52 +106,38 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
     execute: async (args, exec) => {
-      const query = String(args.query)
-      const hit = await relay.recall(query, Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
-      if (hit.engrams.length === 0) {
-        // 新 agent 实测：无命中时需区分"没有这条记忆" vs "检索没召回到"
-        const hint = hit.reason === 'no-hash-hit' || hit.reason === 'short-query'
-          ? '（图谱中没有与查询重叠的记忆——可能确实没记过，或用 engram_store 写入后重试）'
-          : `（未召回相关记忆，reason=${hit.reason}）`
-        return hint
+      const hit = await relay.recall(String(args.query), Number(args.limit ?? 3), viewerOf(exec), String(args.layer ?? ''))
+      if (hit.engrams.length === 0) return `（无命中，reason=${hit.reason}——诚实边界：图谱无相关记忆）`
+      // 诚实标注：精确命中（标题含查询词）vs 近似召回（纯语义/图命中）
+      const qk = String(args.query).replace(/[，。！？,.!?\s]/g, '')
+      hit.engrams.forEach((e) => {
+        const tag = e.title.includes(qk) || (qk.length >= 2 && e.title.includes(qk.slice(0, 2)))
+          ? '' : ' ~近似'
+        ;(e as unknown as { _tag?: string })._tag = tag
+      })
+      // 融合：灵枢白箱验证标注透出（✓已锚定 / ~部分 / ?图谱外）
+      const vmarks = (hit as { verify?: Record<string, VerifyMark> }).verify
+      const markOf = (e: { id: string }): string => {
+        const m = vmarks?.[e.id]
+        if (!m) return ''
+        if (m.status === 'anchored') return ' ✓已锚定'
+        if (m.status === 'partial') return ' ~部分锚定'
+        if (m.status === 'unverified') return ' ?图谱外'
+        return ''
       }
-      // 弱命中检测（第四轮新 agent 实测）：无相关记忆时 wake 仍可能返回
-      // 弱相关（词汇低重叠）条目——用语义打分判定 top 条目的置信度，
-      // 低置信则明示"未找到强相关记忆"，避免把噪声当命中。
-      let weakHint = ''
-      try {
-        const detailed = relay.model.semanticScores(query.slice(0, 300), hit.engrams)
-        const top = [...detailed.entries()].sort((a, b) => b[1].score - a[1].score)[0]
-        if (top && top[1].score < 0.3) {
-          weakHint = `\n（⚠️ 以上条目相关性较弱（最高 ${top[1].score.toFixed(2)}）——图谱中可能没有与查询强相关的记忆，可换关键词重试或 engram_store 写入）`
-        }
-      } catch { /* 弱命中检测失败不阻塞 */ }
-      // 同名提示（第九轮新 agent 建议）：recall 结果里同名节点并列时提示
-      // （open 已有同名提示，入口层补一致）
-      const dupTitles = hit.engrams
-        .map((e) => e.title)
-        .filter((t, i, arr) => arr.indexOf(t) !== i)
-      const dupHint = dupTitles.length > 0
-        ? `\n（⚠️ 结果含同名节点（${[...new Set(dupTitles)].join('、')}）——用 engram_open 展开可看到是哪个版本）`
-        : ''
-      return hit.engrams.map((e) => entryLine(e, relay.store, relay.graph)).join('\n') + weakHint + dupHint
+      return hit.engrams.map((e) => entryLine(e) + markOf(e) + ((e as unknown as { _tag?: string })._tag ?? '')).join('\n')
     },
   })))
 
   // ---- engram_store：写入记忆（AI 自主决策分层 + 因果前因/后果） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_store',
-    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **因果必织（关键）**：写前先想『什么导致了这条记忆』（causes 前因）与『这条记忆会导致什么』（effects 后果）——**已知的因果链必须写入**（causes/effects 填 [[标题]] 或 id，标题自动解析）；因果边是唤醒因果传播（补盲召回）的路径，只写 links 会漏掉因果维度。确实没有已知因果时留空，系统会推荐关联候选供你采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增（**系统也会自动查重**：语义高置信同主题写入时自动修订——新增当前版 + 旧版废止可追溯，检索只命中当前版）；⑥ **价值门槛（判别——先问：这条值得写吗？）**：值得写——可复用知识/决策/踩坑/约定/规律（换个时间还有用）；**不值得写——寒暄/过程流水/一次性琐事/对话里已说清且不会再用的细节**（事件洪水会淹没可复用知识）。拿不准就写（宁多勿漏，系统有查重/归档兜底），但过程性流水账不要写；**layer 决策（v0.4 项目即标签，融会贯通）**：默认 **project**（归属当前工作目录项目）；**通用知识写 global**（开发者喜好/全局要求——换个项目还有用的）；**跨项目关联用 causes/links 织桥**（如"本项目的 X 方案引用 Y 项目的做法"→ links 填 [[Y 项目记忆标题]]，两项目自动关联）。**tags 自由分类（三类命名空间）**：`全局`（开发者喜好/全局要求）、`项目:xxx`（项目自由命名）、`教训:xxx`（教训自由子分类：代码/思想/流程…）——一节点可多标签（如 `["项目:dsh", "教训:代码"]`），自由创建不设枚举。',
+    description: '写入一个记忆节点（跨会话分层，**AI 自主决策层归属**）。大一统记忆图谱：title 入口锚点、summary 一句话摘要（入口层）、content 完整正文（展开层）、links 双向关联 [[标题]]、causes 因果前因、effects 因果后果。**撰写规范**：① title ≤12 字、具体可辨认（如「路由残留自愈方案」，忌泛化如「更新」「总结」）；② summary ≤30 字、**不看正文也能判断相关性**（含关键实体/结论）；③ content ≤200 字、只写增量（关键参数/结论/上下文，不重复摘要）；④ **织边方法（可选，你自主决定）**：想关联已有记忆时直接写——links 填 [[标题]]（双向引用）、causes/effects 填 [[标题]] 或 id（因果前因/后果，标题自动解析）；想不起来或不确定就不写，系统会自动基于语义×时序推荐关联候选，届时你再决定采纳（engram_link 建边）/展开确认（engram_open）/跳过——选择权始终在你；⑤ 同主题多处小更新优先 engram_update 修订原节点而非新增。**layer 决策准则**：跨会话长期有价值（事实/偏好/通用约定）→ global；仅本项目相关（决策/踩坑/架构约定）→ project（自动绑定当前工作目录，跨会话持久）；仅本次会话相关（临时进度/过程）→ session（会话结束清理，重要事后 engram_promote 转长期）。',
     parameters: {
       layer: {
         type: 'string',
         required: true,
         description: `记忆分层（AI 自主决策）：${ENGRAM_LAYERS.join('/')}（见 description 决策准则）`,
-      },
-      tags: {
-        type: 'array',
-        items: { type: 'string' },
-        description: '可选：**自由多标签**（一节点多标签，自由分类，命名空间约定）——「全局」（开发者喜好/全局要求）、「项目:xxx」（项目自由命名，如 项目:engram）、「教训:xxx」（教训自由子分类，如 教训:代码 / 教训:思想）。缺省自动生成（project→项目:<当前目录名>，global→全局）。',
       },
       kind: {
         type: 'string',
@@ -321,13 +189,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const title = String(args.title)
       const summary = String(args.summary)
       const content = String(args.content ?? '')
-      // ⚠️ 归一化链接格式（第八轮新 agent 实测：links 混存 [[标题]] 与裸标题
-      // 导致邻接标注双标/误标）——统一存裸标题
-      const links = Array.isArray(args.links)
-        ? args.links.map(String).map((l) => l.replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
-        : []
-      // v0.4 自由多标签（命名空间约定：全局/项目:xxx/教训:xxx）
-      const tags = Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : []
+      const links = Array.isArray(args.links) ? args.links.map(String) : []
       // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
       const resolveRef = (ref: string): string | null => {
         const clean = ref.replace(/^\[\[|\]\]$/g, '').trim()
@@ -339,14 +201,13 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         .map(resolveRef).filter((x): x is string => x !== null)
       const effects = (Array.isArray(args.effects) ? args.effects.map(String) : [])
         .map(resolveRef).filter((x): x is string => x !== null)
-      // 分层归属校验：project 层需要当前工作目录
+      // 分层归属校验：project 层需要当前工作目录；session 层需要会话 id
       if (layer === 'project' && !viewer.cwd) {
-        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global）`
+        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
       }
-      // P2 写入管线统一：写前查重（语义高置信 ≥0.6 同主题）→ 自动修订
-      // （新增当前版 + 旧版 superseded + 因果/链接迁移），不重复堆节点。
-      // detailed 复用于自动织网（不重复打分）。
-      const { dup: dedupe, detailed } = await findDuplicate(relay, `${title}：${summary}`, layer)
+      if (layer === 'session' && !viewer.sessionId) {
+        return `错误：session 层需要会话上下文（无会话视角——建议改用 global）`
+      }
       const e = relay.store.add({
         kind: kind as EngramKind,
         layer,
@@ -355,45 +216,12 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         summary,
         content,
         links,
-        tags,
         sessionId: viewer.sessionId ?? relay.currentSessionId,
         turn: relay.lastTurnAt,
         causes,
         effects,
         importance: 1,
       })
-      // 修订路径：旧版因果/链接继承 + 邻居指针迁移 + 版本链（旧版废止可追溯）
-      let revisedOld: string | null = null
-      let conflictNote = ''
-      if (dedupe && dedupe.id !== e.id) {
-        revisedOld = dedupe.title
-        const old = dedupe
-        const mergedCauses = [...new Set([...(e.causes ?? []), ...(old.causes ?? [])])]
-        const mergedEffects = [...new Set([...(e.effects ?? []), ...(old.effects ?? [])])]
-        // ⚠️ 反向矛盾边（第七轮新 agent 实测）：继承边与本次显式 causes
-        // 指向同一节点时，同一节点会同时出现在 causes 和 effects（双向
-        // 矛盾）——causes 优先，从 effects 移除重叠，回执提示
-        const overlap = mergedCauses.filter((id) => mergedEffects.includes(id))
-        if (overlap.length > 0) {
-          conflictNote = `（合并时检测到 ${overlap.length} 条反向矛盾边，已按 causes 优先保留）`
-        }
-        const cleanEffects = mergedEffects.filter((id) => !mergedCauses.includes(id))
-        relay.store.update(e.id, {
-          causes: mergedCauses,
-          effects: cleanEffects,
-          links: [...new Set([...(e.links ?? []), ...(old.links ?? [])])],
-        })
-        for (const c of old.causes ?? []) {
-          const n = relay.store.get(c)
-          if (n) relay.store.update(c, { effects: [...n.effects.filter((x) => x !== old.id), e.id] })
-        }
-        for (const ef of old.effects ?? []) {
-          const n = relay.store.get(ef)
-          if (n) relay.store.update(ef, { causes: [...n.causes.filter((x) => x !== old.id), e.id] })
-        }
-        relay.graph.rebuild()
-        relay.store.supersede(old.id, e.id)
-      }
       // 因果边：causes（前因 → 本节点）/ effects（本节点 → 后果）
       for (const causeId of causes) {
         const c = relay.store.get(causeId)
@@ -410,35 +238,24 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         }
       }
       // 双向链接：为每个 [[标题]] 建关联（Obsidian 风格）
-      // ⚠️ 用 update 持久化（add 会重新生成 id → 制造重复节点——隐藏 bug）
       for (const t of links) {
         const target = relay.store.byTitle(t)
         if (target && target.id !== e.id && !target.links.includes(title)) {
-          relay.store.update(target.id, { links: [...target.links, title] })
+          target.links.push(title)
+          relay.store.add({ ...target, links: target.links }) // 持久化更新
         }
       }
-      // 自动织网（v0.4：边是一开始就该有的——写入即织网，不依赖 AI 自觉）：
-      // 用检索同款三维度加权（τ_sem·cos + τ_time·z(激活) + τ_cause·因果可达）
-      // 选高置信邻居建双向链接——怎么索引就怎么推荐，可逆可解释。
-      let woven = 0
-      if (detailed && detailed.size > 0) {
-        woven = await weaveLinks(relay, e, detailed)
-      }
-      const linkNote = woven > 0 ? `，自动织网 ${woven} 条（三维度加权）` : ''
-      if (revisedOld !== null) {
-        return `已修订记忆 [[${e.title}]]（${layer}·${kind}）：同主题旧版 [[${revisedOld}]] 已废止（版本链可追溯），因果/链接已继承——检索只命中当前版${conflictNote}${linkNote}`
-      }
-      // 织网推荐（因果边仍由 AI 决策：自动织网只做弱关系 link，因果是强语义）
-      // ⚠️ 条件只查 causes/effects：links 已带但漏因果（常见偷懒）也必须推荐。
-      if (causes.length === 0 && effects.length === 0) {
+      // 织网推荐：AI 没带任何边时，触发一次「bge 语义 + 时序」推荐（不自动建边，
+      // 由 AI 决策——认识的直接选，不认识的展开正文再定或跳过）。
+      if (causes.length === 0 && effects.length === 0 && links.length === 0) {
         const rec = await recommendLinks(relay, `${title}：${summary}`, e.id)
-        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已进入检索索引，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
+        const base = `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，无因果/链接）`
         if (rec) {
-          return `${base}\n\n📎 推荐因果候选（纯算法语义 × 时序加权，未自动建边——可作 causes/effects）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可。`
+          return `${base}\n\n📎 推荐关联（bge 语义 × 时序加权，未自动建边）：\n${rec}\n\n处理建议：① 标题熟悉且相关 → engram_link 直接采纳（建因果/引用边）；② 标题陌生但想确认 → 先 engram_open 展开正文再定；③ 不相关 → 跳过即可，不影响本条记忆。`
         }
-        return base + '\n（当前无显著因果候选）'
+        return base + '\n（当前无显著关联候选）'
       }
-      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，已进入检索索引，链接 ${links.length}${linkNote ? `+${woven}` : ''} 条，因果 ↑${causes.length} ↓${effects.length}）${linkNote}`
+      return `已写入记忆节点 [[${e.title}]]（${layer}·${kind}，哈希槽位 ${e.slots.length} 个，链接 ${links.length} 条，因果 ↑${causes.length} ↓${effects.length}）`
     },
   })))
 
@@ -451,11 +268,6 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         type: 'string',
         required: true,
         description: `记忆分层（AI 自主决策）：${ENGRAM_LAYERS.join('/')}（见 engram_store 描述）`,
-      },
-      tags: {
-        type: 'array',
-        items: { type: 'string' },
-        description: '可选：自由多标签（见 engram_store 描述：全局/项目:xxx/教训:xxx 命名空间约定）',
       },
       kind: {
         type: 'string',
@@ -507,13 +319,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const title = String(args.title)
       const summary = String(args.summary)
       const content = String(args.content ?? '')
-      // ⚠️ 归一化链接格式（第八轮新 agent 实测：links 混存 [[标题]] 与裸标题
-      // 导致邻接标注双标/误标）——统一存裸标题
-      const links = Array.isArray(args.links)
-        ? args.links.map(String).map((l) => l.replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
-        : []
-      // v0.4 自由多标签（命名空间约定：全局/项目:xxx/教训:xxx）
-      const tags = Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : []
+      const links = Array.isArray(args.links) ? args.links.map(String) : []
       // causes/effects 支持 id 或 [[标题]]（标题自动解析成 id，与蒸馏 causesOf 一致）
       const resolveRef = (ref: string): string | null => {
         const clean = ref.replace(/^\[\[|\]\]$/g, '').trim()
@@ -526,7 +332,10 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const effects = (Array.isArray(args.effects) ? args.effects.map(String) : [])
         .map(resolveRef).filter((x): x is string => x !== null)
       if (layer === 'project' && !viewer.cwd) {
-        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global）`
+        return `错误：project 层需要当前工作目录（无 cwd 的会话不能写项目记忆——建议改用 global 或 session）`
+      }
+      if (layer === 'session' && !viewer.sessionId) {
+        return `错误：session 层需要会话上下文（无会话视角——建议改用 global）`
       }
       const e = relay.store.add({
         kind: kind as EngramKind,
@@ -536,7 +345,6 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         summary,
         content,
         links,
-        tags: Array.isArray(args.tags) ? args.tags.map(String).filter((t) => t.trim() !== '') : [],
         sessionId: viewer.sessionId ?? relay.currentSessionId,
         turn: relay.lastTurnAt,
         causes,
@@ -544,7 +352,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
         importance: 1,
         status: 'pending',
       })
-      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，已进入检索索引）——用户确认（engram_confirm）后才会参与检索/唤醒`
+      return `已提议记忆节点 [[${e.title}]]（${layer}·${kind}·⏳待确认，哈希槽位 ${e.slots.length} 个）——用户确认（engram_confirm）后才会参与检索/唤醒`
     },
   })))
 
@@ -566,7 +374,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.ref}]]`
       const viewer = viewerOf(exec)
       if (!isVisible(node, viewer)) {
-        return `错误：只能确认当前会话可见的节点（global + 本目录 project）`
+        return `错误：只能确认当前会话可见的节点（global + 本目录 project + 本会话 session）`
       }
       if (node.status !== 'pending') {
         return `[[${node.title}]] 不是待确认状态（当前 ${node.status ?? 'confirmed'}），无需确认`
@@ -594,7 +402,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.ref}]]`
       const viewer = viewerOf(exec)
       if (!isVisible(node, viewer)) {
-        return `错误：只能拒绝当前会话可见的节点（global + 本目录 project）`
+        return `错误：只能拒绝当前会话可见的节点（global + 本目录 project + 本会话 session）`
       }
       if (node.status !== 'pending') {
         return `[[${node.title}]] 不是待确认状态（当前 ${node.status ?? 'confirmed'}）——拒绝仅对 ⏳待确认 节点生效；已确认节点如需删除请用 engram_remove`
@@ -607,7 +415,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_open：展开入口（渐进披露第二层） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_open',
-    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + **前因/后果（因果）/关联（双向链接）/依赖引用（depends-on 与 references 边）**，空邻接显式（无）。当你看到 [[标题]] 入口需要详情时调用；展开后可顺着邻接的 [[标题]] 继续递归探究（记忆图谱导航）。',
+    description: '展开一个记忆节点（渐进披露第二层）：返回完整正文 + 层 + 双向链接 + 因果前因/后果。当你看到 [[标题]] 入口需要详情时调用。',
     parameters: {
       title: {
         type: 'string',
@@ -618,22 +426,8 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
     execute: async (args, exec) => {
-      const titleRef = String(args.title)
-      const node = resolveNode(relay, titleRef)
-      if (!node) return `未找到节点 [[${titleRef}]]（可 engram_search 检索）`
-      // 同名多版本提示（第五轮新 agent 实测：同名双节点 byTitle 取最近，
-      // open 与 recall 可能解析到不同实例 → 因果展示矛盾）
-      const allVersions = relay.store.byTitles(node.title)
-      const dupNote = allVersions.length > 1
-        ? `\n（⚠️ 标题「${node.title}」有 ${allVersions.length} 个节点——当前展开最近写入的（id ${node.id.slice(-6)}）；`
-        + '用 engram_search 可盘点全部，同主题可经 engram_store 写入触发自动修订合并）'
-        : ''
-      // 矛盾边提示（第八轮新 agent 实测：同一节点同时出现在 causes 与 effects
-      // ——继承边与显式边合并的历史残留，展示层告警）
-      const conflictIds = (node.causes ?? []).filter((id) => (node.effects ?? []).includes(id))
-      const conflictNote = conflictIds.length > 0
-        ? `\n（⚠️ 检测到 ${conflictIds.length} 个节点同时是前因与后果（${conflictIds.map((id) => `[[${relay.store.get(id)?.title ?? id}]]`).join('、')}）——数据矛盾，可能是修订合并的历史残留，可用 engram_update 修正）`
-        : ''
+      const node = resolveNode(relay, String(args.title))
+      if (!node) return `未找到节点 [[${args.title}]]（可 engram_search 检索）`
       // 可见性：只能展开自己可见层的节点
       if (!isVisible(node, viewerOf(exec))) return `无权展开 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
       // 展开 = 深度使用 → 强化（激活模型 B 增量）
@@ -645,30 +439,21 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const linked = relay.store.getMany(
         node.links.map((t) => relay.store.byTitle(t)?.id ?? '').filter(Boolean),
       )
-      // v0.5 第四轮新 agent 实测：depends-on/references 边织了看不见 →
-      // open 邻接补「依赖/引用」展示（graph 层查询）
-      const deps = relay.graph.depsOf(node.id)
       const parts: string[] = []
-      const supMark = isSuperseded(node) ? '（已废止）' : ''
-      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''} · ${node.state ?? 'episodic'})${supMark}`)
+      parts.push(`# [[${node.title}]] (${node.kind} · ${node.layer}${node.projectId ? ` · ${node.projectId}` : ''})`)
       parts.push(node.summary)
       if (node.content) parts.push(`\n${node.content}`)
-      // ⚠️ 邻接契约：无因果/链接时显式占位（新 agent 实测：段落缺席被误判为 bug）
       if (causes.length > 0) parts.push(`\n**前因**（因果 ↑）：${causes.map((c) => `[[${c.title}]]`).join('、')}`)
-      else parts.push('\n**前因**（因果 ↑）：（无）')
       if (effects.length > 0) parts.push(`**后果**（因果 ↓）：${effects.map((c) => `[[${c.title}]]`).join('、')}`)
-      else parts.push('**后果**（因果 ↓）：（无）')
       if (linked.length > 0) parts.push(`**关联**（双向链接）：${linked.map((c) => `[[${c.title}]]`).join('、')}`)
-      else parts.push('**关联**（双向链接）：（无）')
-      if (deps.length > 0) parts.push(`**依赖/引用**：${deps.map((c) => `[[${c.title}]]`).join('、')}`)
-      return parts.join('\n') + dupNote + conflictNote
+      return parts.join('\n')
     },
   })))
 
   // ---- engram_search：检索图谱（分层/项目/类型/关键词） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_search',
-    description: '盘点记忆图谱（回顾/维护）：**先按关键词/层/项目/类型过滤全库，再排序截断**（关键词子串匹配标题/摘要，大小写不敏感）。返回入口列表（[[标题]] + 摘要 + 邻接；同名多版本折叠为 ×N，废止标「已废止」）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
+    description: '检索记忆图谱（回顾/维护）：按层/项目/类型/关键词过滤，遵守跨会话可见性（global + 本目录 project + 本会话 session）。返回入口列表（[[标题]] + 摘要）。用于盘点已沉淀的记忆、找要 update/remove/promote/link 的目标。',
     parameters: {
       query: {
         type: 'string',
@@ -701,85 +486,22 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       const viewer = viewerOf(exec)
       const layer = String(args.layer ?? '')
       const kind = String(args.kind ?? '')
-      // ⚠️ 第六轮新 agent 实测：带 query 时 global 层被静默排除——projectId
-      // 默认取 cwd 会滤掉 global 节点（projectId=null）。修正：**仅显式传
-      // projectId 才过滤项目**——缺省全层全项目（与描述"缺省=全部"一致）
       const projectId = args.projectId !== undefined && String(args.projectId) !== ''
-        ? String(args.projectId)
-        : undefined
-      // ⚠️ P0 修复（第三轮新 agent 实测）：先过滤后截断——先 query 会截掉
-      // 匹配目标再子串过滤 → 精确子串搜不到（上轮误判为"盘点/检索不一致"，
-      // 实为 limit 顺序 bug）
+        ? String(args.projectId) : (viewer.cwd ?? undefined)
       let nodes = relay.store.query({
         layer: layer && ENGRAM_LAYERS.includes(layer as EngramLayer) ? layer as EngramLayer : undefined,
         projectId: projectId !== undefined ? projectId : undefined,
         kind: kind && KINDS.includes(kind as EngramKind) ? kind as EngramKind : undefined,
-        // 不过滤先取全量（过滤在下方子串/可见性后，limit 最后截断）
-        limit: 0,
+        limit: Number(args.limit ?? 20),
         recent: args.recent === true,
       })
-      // 可见性 + 关键词过滤（全库）
+      // 可见性：只返回当前会话可见的
       nodes = nodes.filter((e) => isVisible(e, viewer))
       const q = String(args.query ?? '').trim().toLowerCase()
       if (q) nodes = nodes.filter((e) => e.title.toLowerCase().includes(q) || e.summary.toLowerCase().includes(q))
-      const limit = Number(args.limit ?? 20)
-      // 排序（重要度优先，除非 recent）
-      nodes = [...nodes].sort((a, b) => (args.recent === true ? b.createdAt - a.createdAt : b.importance - a.importance))
-      nodes = nodes.slice(0, limit)
       if (nodes.length === 0) return '（无匹配记忆）'
-      // v0.5 盘点去重（新 agent 实测：同名多版本重复显示观感杂乱）：
-      // 同标题只显示当前版（未废止、重要度最高），重复折叠为 ×N 标注；
-      // 废止旧版在盘点中显式标「已废止」（盘点=全状态视图，检索只当前版）
-      const byTitle = new Map<string, EngramNode[]>()
-      for (const e of nodes) {
-        const arr = byTitle.get(e.title) ?? []
-        arr.push(e)
-        byTitle.set(e.title, arr)
-      }
-      const lines: string[] = []
-      let shown = 0
-      for (const [title, group] of byTitle) {
-        if (shown >= Number(args.limit ?? 20)) break
-        const active = group.filter((e) => !isSuperseded(e))
-        const current = (active.length > 0 ? active : group).sort((a, b) => b.importance - a.importance)[0]
-        const dupMark = group.length > 1 ? ` ×${group.length}` : ''
-        const supersededMark = isSuperseded(current) ? '（已废止）' : ''
-        // ⚠️ 完全内联渲染（第八轮：模块级 entryLine/neighborsOf 在工具进程
-        // 表现异常——byTitle 返回 active 却渲染（已废止）。这里用与 DBG 验证
-        // 一致的内联逻辑（byTitle + isSuperseded 直查），保证标注准确）
-        const stateMark = current.state === 'semantic' ? '[语义]' : ''
-        const pendingMark = current.status === 'pending' ? ' ⏳' : ''
-        const parts: string[] = []
-        const renderTitles = (ts: string[]): string => ts
-          .map((t) => {
-            const target = relay.store.byTitle(t)
-            return `[[${t}]]${target && isSuperseded(target) ? '（已废止）' : ''}`
-          })
-          .join(' ')
-        const titlesOf = (ids: string[], max: number): string[] => ids
-          .map((id) => relay.store.get(id))
-          .filter((n): n is EngramNode => !!n)
-          .sort((a, b) => b.importance - a.importance)
-          .slice(0, max)
-          .map((n) => n.title)
-        const causes = titlesOf(current.causes ?? [], 4)
-        const effects = titlesOf(current.effects ?? [], 4)
-        const links = (current.links ?? []).slice(0, 3)
-          .map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim())
-        if (causes.length > 0) parts.push(`↑因:${renderTitles(causes)}${(current.causes?.length ?? 0) > 4 ? '…' : ''}`)
-        if (effects.length > 0) parts.push(`↓果:${renderTitles(effects)}${(current.effects?.length ?? 0) > 4 ? '…' : ''}`)
-        if (links.length > 0) parts.push(`→:${renderTitles(links)}`)
-        // 依赖/引用段（与 recall 入口一致——depends-on 边在入口可见）
-        const deps = relay.graph.depsOf(current.id)
-        if (deps.length > 0) {
-          parts.push(`⇄:${deps.slice(0, 3).map((n) => `[[${n.title}]]`).join(' ')}${deps.length > 3 ? '…' : ''}`)
-        }
-        const nbr = parts.length > 0 ? `\n    ${parts.join(' | ')}` : ''
-        lines.push(`- [[${current.title}]][${current.layer}]${stateMark}${pendingMark}${supersededMark} ${current.summary}${nbr}${dupMark}`)
-        shown++
-      }
-      const total = nodes.length
-      return `记忆图谱（${byTitle.size} 个唯一标题 / 共 ${total} 节点）：\n${lines.join('\n')}`
+      const lines = nodes.map((e) => entryLine(e))
+      return `记忆图谱（${nodes.length} 条）：\n${lines.join('\n')}`
     },
   })))
 
@@ -817,7 +539,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (from.id === to.id) return '错误：不能连接节点自身'
       const viewer = viewerOf(exec)
       if (!isVisible(from, viewer) || !isVisible(to, viewer)) {
-        return '错误：只能连接当前会话可见的节点（global + 本目录 project）'
+        return '错误：只能连接当前会话可见的节点（global + 本目录 project + 本会话 session）'
       }
       const kind = (String(args.kind ?? 'causes') as CausalEdgeKind)
       relay.graph.addEdge(from.id, to.id, kind, 1)
@@ -848,7 +570,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
   // ---- engram_update：修正节点 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_update',
-    description: '修正一个记忆节点（摘要/正文/链接/因果/重要度/标题）。**就地修改，不走版本链**（旧版不保留）；如需保留历史版本，用 engram_store 写同主题（自动修订=旧版废止可追溯）。用于记忆过时或写错后订正。',
+    description: '修正一个记忆节点（摘要/正文/链接/因果/重要度/标题）。用于记忆过时或写错后订正。',
     parameters: {
       ref: {
         type: 'string',
@@ -890,9 +612,7 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (args.links !== undefined) patch.links = (args.links as string[]).map(String)
       if (args.importance !== undefined) patch.importance = Number(args.importance)
       const updated = relay.store.update(node.id, patch)
-      if (!updated) return '修正失败（节点不存在）'
-      const changed = Object.keys(patch).join('、')
-      return `已修正 [[${updated.title}]]（就地修改，不走版本链）：更新了 ${changed}`
+      return updated ? `已修正 [[${updated.title}]]` : '修正失败（节点不存在）'
     },
   })))
 
@@ -918,10 +638,10 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
     },
   })))
 
-  // ---- engram_promote：提升层（project→global） ----
+  // ---- engram_promote：提升层（session→project/global） ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_promote',
-    description: '提升记忆层：project→global（项目记忆升级为跨项目共享真理）。层只能升不能降。',
+    description: '提升记忆层：session→project/global（会话结束前把临时记忆转长期跨会话持久）或 project→global。层只能升不能降。',
     parameters: {
       ref: {
         type: 'string',
@@ -942,101 +662,90 @@ export function installEngramTools(ctx: ToolsContext, relay: EngramRelay): () =>
       if (!node) return `未找到节点 [[${args.ref}]]`
       if (!isVisible(node, viewer)) return `无权提升 [[${node.title}]]（${node.layer} 层对当前会话不可见）`
       const target = String(args.layer) as EngramLayer
-      if (!ENGRAM_LAYERS.includes(target)) {
-        return '错误：目标层必须是 project 或 global'
+      if (!ENGRAM_LAYERS.includes(target) || target === 'session') {
+        return '错误：目标层必须是 project 或 global（不能降级回 session）'
       }
-      // 只能升不能降：global 已是最高；此处 node 必为 project、target 必为 global
+      // 只能升不能降：global 已是最高
       if (node.layer === 'global') return `[[${node.title}]] 已是 global 层（最高），无需提升`
       if (node.layer === target) return `[[${node.title}]] 已在 ${target} 层`
-      const fromLayer = node.layer // ⚠️ promote 原地修改，先存旧层（否则显示 "global → global"）
+      if (target === 'project' && !viewer.cwd) {
+        return `错误：提升到 project 层需要当前工作目录（无 cwd——只能提升到 global）`
+      }
       const promoted = relay.store.promote(node.id, target, viewer.cwd ?? null)
       return promoted
-        ? `已提升 [[${promoted.title}]]：${fromLayer} → ${target}${promoted.projectId ? `（项目 ${promoted.projectId}）` : ''}，跨会话持久`
+        ? `已提升 [[${promoted.title}]]：${node.layer} → ${target}${promoted.projectId ? `（项目 ${promoted.projectId}）` : ''}，跨会话持久`
         : '提升失败'
-    },
-  })))
-
-  // ---- engram_weave：织网清洗（存量孤立节点批量补边） ----
-  // 背景（v0.6 用户提问"为什么那么多无边节点"）：早期记忆（自动织网
-  // 上线前）全靠 AI 自觉织边，42% 孤立——本工具对孤立节点做语义推荐 +
-  // 高置信（lexical ≥ 0.5，与写入织网同阈值）自动织双向链接。
-  disposers.push(ctx.tools.register(defineTool({
-    name: 'engram_weave',
-    description: '织网清洗：扫描**无任何边（孤立）**的记忆节点，用语义打分（词汇+共现）找高置信邻居自动织双向链接——把存量孤立节点织进图谱（用户实测 42% 孤立）。可重复跑（已织过的自动跳过）；阈值与写入织网一致（lexical ≥ 0.5）。',
-    parameters: {
-      limit: {
-        type: 'number',
-        description: '可选：最多处理多少个孤立节点（缺省全部）',
-      },
-    },
-    output: TEXT_OUTPUT,
-    isConcurrencySafe: () => true,
-    execute: async (args, exec) => {
-      const isIsolated = (e: EngramNode): boolean =>
-        !isSuperseded(e) && e.status !== 'pending'
-        && (e.causes?.length ?? 0) === 0 && (e.effects?.length ?? 0) === 0 && (e.links?.length ?? 0) === 0
-      const isolated = relay.store.all().filter(isIsolated)
-      if (isolated.length === 0) return '（没有孤立节点——图谱已全织）'
-      const limit = Math.max(0, Math.min(Number(args.limit ?? isolated.length) || isolated.length, isolated.length))
-      let woven = 0
-      const report: string[] = []
-      for (const node of isolated.slice(0, limit)) {
-        const text = `${node.title}：${node.summary}`
-        // 候选 = 哈希/token 倒排 + 共现扩展词倒排（粗筛语义对齐）
-        const candMap = new Map<string, EngramNode>()
-        for (const c of relay.store.lookup(text, 64)) candMap.set(c.id, c)
-        try {
-          const expanded = relay.model.scorer.expandQuery(text.slice(0, 300), 3)
-          if (expanded.length > 0) {
-            for (const c of relay.store.lookupTokens(expanded, 64)) candMap.set(c.id, c)
-          }
-        } catch { /* 忽略 */ }
-        const cands = [...candMap.values()].filter((c) => c.id !== node.id)
-        if (cands.length === 0) continue
-        const detailed = relay.model.semanticScores(text.slice(0, 300), cands)
-        const ranked = [...detailed.entries()]
-          .filter(([id, s]) => {
-            const t = relay.store.get(id)
-            // ⚠️ 织网阈值用**融合分**（v0.6：同主题不同表述的词汇重叠低
-            // （lexical 0.05-0.09），lexical ≥ 0.5 永远织不上；融合分含
-            // 共现语义（候选内相对归一化后）能抓住同主题）
-            return s.score >= 0.55 && t !== undefined && !isSuperseded(t)
-          })
-          .sort((a, b) => b[1].score - a[1].score)
-        let added = 0
-        for (const [id] of ranked.slice(0, 2)) {
-          const target = relay.store.get(id)
-          if (!target || target.id === node.id) continue
-          if (target.links.includes(node.title)) continue
-          relay.store.update(target.id, { links: [...target.links, node.title] })
-          if (!node.links.includes(target.title)) {
-            relay.store.update(node.id, { links: [...node.links, target.title] })
-          }
-          added++
-        }
-        if (added > 0) {
-          woven += added
-          report.push(`  [[${node.title}]] ⇄ ${ranked.slice(0, 2).map(([id]) => `[[${relay.store.get(id)?.title}]]`).join('、')}`)
-        }
-      }
-      const remain = relay.store.all().filter(isIsolated).length
-      const head = woven > 0
-        ? `织网清洗完成：检查 ${Math.min(limit, isolated.length)} 个孤立节点，织入 ${woven} 条双向链接`
-        : `织网清洗：检查 ${Math.min(limit, isolated.length)} 个孤立节点，无高置信邻居（可放宽阈值或写入更多相关记忆）`
-      return `${head}。剩余孤立节点：${remain}\n${report.slice(0, 40).join('\n')}${report.length > 40 ? `\n  …（共 ${report.length} 条织入）` : ''}`
     },
   })))
 
   // ---- engram_status：服务状态 ----
   disposers.push(ctx.tools.register(defineTool({
     name: 'engram_status',
-    description: '查看 engram 记忆服务状态：分层统计（global/project）、巩固状态（episodic/semantic/dormant）、归档数/硬上限、哈希槽位、因果图边数、语义引擎状态、注入预算、孤立节点数。',
-    parameters: {},
+    description: '查看 engram 记忆服务状态：分层统计（global/project/session 条数）、哈希槽位、因果图边数、模型状态、注入预算。',
+    parameters: {
+      verbose: {
+        type: 'boolean',
+        description: '可选：是否输出详细信息（默认 false）',
+      },
+    },
     output: TEXT_OUTPUT,
     isConcurrencySafe: () => true,
-    execute: async () => {
+    execute: async (args: { verbose?: boolean } = {}) => {
       const s = await relay.status()
       return JSON.stringify(s, null, 2)
+    },
+  })))
+
+  // ---- engram_verify：灵枢白箱验证（外置大脑 · 验证闸门） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_verify',
+    description: '灵枢（Lingshu）白箱验证一个知识主张：图谱锚定判定——✓已锚定（可溯源）/ ?图谱外（证据不足不裁决，诚实边界，附最近候选卡与 D_norm）。回答前对拿不准的陈述调用；**验证不通过会自动补卡（异步 ~15s 生效，稍后即有）**。避免把错误知识当事实。',
+    parameters: {
+      claim: {
+        type: 'string',
+        required: true,
+        description: '要验证的知识主张（如：量子纠缠不能用来超光速通信）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args) => {
+      const claim = String(args.claim).trim()
+      if (!claim) return '（空主张）'
+      const m = await relay.verifyClaim(claim)
+      if (!m) return '（灵枢融合未启用：lingshuVerifyUrl 未配置）'
+      if (m.status === 'error') return `（灵枢验证不可用：${m.note ?? ''}）`
+      if (m.status === 'anchored') return `✓已锚定（${m.note ?? '图谱确认'}）：该主张与灵枢知识图谱一致，可溯源`
+      if (m.status === 'partial') return `~部分锚定：${m.note ?? '部分主张命中图谱'}`
+      return `?图谱外：${m.note ?? '灵枢无法确认该主张（不裁决，诚实边界）'}`
+    },
+  })))
+
+  // ---- engram_respond：灵枢知识出招（外置大脑 · 知识之书） ----
+  disposers.push(ctx.tools.register(defineTool({
+    name: 'engram_respond',
+    description: '向灵枢（Lingshu）知识之书出招查询：条件/问题 → 命中的学科卡（名称 + 出招动作 + 层级）。用于知识问答、学科归属、跨学科分析；**无命中会自动补卡（当场学习）**。',
+    parameters: {
+      condition: {
+        type: 'string',
+        required: true,
+        description: '条件/问题（如：铁门放外面久了为什么生锈）',
+      },
+      limit: {
+        type: 'number',
+        description: '最多返回条数（默认 3）',
+      },
+    },
+    output: TEXT_OUTPUT,
+    isConcurrencySafe: () => true,
+    execute: async (args) => {
+      const condition = String(args.condition).trim()
+      if (!condition) return '（空条件）'
+      const r = (await relay.lingshuRespond(condition, Number(args.limit ?? 3))) as { results?: Array<{ name?: string; score?: number; action?: string; level?: number; status?: string }>; error?: string }
+      if (r.error) return `（灵枢出招不可用：${r.error}）`
+      const results = r.results ?? []
+      if (results.length === 0) return '（图谱无命中——灵枢诚实边界：不知道就说不知道）'
+      return results.map((h, i) => `${i + 1}. ${h.name ?? '?'}（score=${(h.score ?? 0).toFixed(2)}, L${h.level ?? '?'}, ${h.status ?? '?'}）：${h.action ?? ''}`.slice(0, 300)).join('\n')
     },
   })))
 

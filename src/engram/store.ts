@@ -15,7 +15,7 @@
  * 因果双向追溯；会话结束即弃（clearSession），不做跨会话沉淀。
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync, appendFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, copyFileSync, readdirSync } from 'node:fs'
 import { basename } from 'node:path'
 /** 进程内写锁（同步标志位）：persist 是同步函数，JS 单线程下同步代码天然不交错；tmp 每实例唯一已防跨实例冲突。 */
 let fileLockHeld = false
@@ -73,95 +73,49 @@ import { dirname, join, resolve } from 'node:path'
 import { NgramHashAddressing, type HashResult } from './hash.js'
 
 /** 记忆节点类型（统一，不预分轨；kind 仅作展示标签，非分层）。 */
-export type EngramKind = 'fact' | 'decision' | 'event' | 'note' | 'snapshot'
+export type EngramKind = 'fact' | 'decision' | 'event' | 'note'
 
 /**
- * 记忆归属（v0.4：不做分层分化——项目即标签，融会贯通）：
- *  - global：通用知识项目（原"全局层"降为平级标签：技术模式/平台坑/偏好）
- *  - project：具体项目（projectId = 工作目录）
- * 可见性：**全可见**（单用户本地系统，无多租户隐私需求；项目间通过
- * 记忆关联（link/causes 桥）自然融会贯通——"套娃"）。
+ * 记忆分层（预设骨架，归属由 AI 自主决策）——分层的本质 = 生命周期 × 可见范围：
+ *  - global：全局持久，所有会话可见（长期事实/用户偏好）
+ *  - project：项目持久，仅同工作目录（cwd）会话可见（项目约定/决策）
+ *  - session：会话临时，仅本会话（会话结束清理）
+ * 层是**节点属性**（大一统图谱，不分家），不是物理分库。
  */
-export type EngramLayer = 'global' | 'project'
+export type EngramLayer = 'global' | 'project' | 'session'
 
 /** 分层常量（工具 description 引用）。 */
-export const ENGRAM_LAYERS: EngramLayer[] = ['global', 'project']
+export const ENGRAM_LAYERS: EngramLayer[] = ['global', 'project', 'session']
 
 /**
- * 可见性判定（v0.4：全可见——项目不隔离，关联即桥）。
- * 保留函数签名（wake/tools/图谱 API 调用点不动），恒返回 true。
+ * 分层可见性判定（跨会话准入的单源逻辑，wake/tools/图谱 API 共用）。
+ *  - global：所有会话可见；
+ *  - project：仅 node.projectId === viewer.cwd 的会话；
+ *  - session：仅 node.sessionId === viewer.sessionId 的本会话。
+ * 空 viewer（无 sessionId 且无 cwd）向后兼容全可见（生产路径总传 viewer，
+ * 缺省仅测试/直接调用）。
  */
-export function isVisible(_e: EngramNode, _viewer: { sessionId?: string; cwd?: string }): boolean {
-  return true
-}
-
-/** 默认标签（v0.4 迁移/兜底）：layer + projectId → 命名空间标签。 */
-export function defaultTags(layer: EngramLayer, projectId: string | null): string[] {
-  if (layer === 'global' || projectId === null || projectId === '') return ['全局']
-  const parts = String(projectId).split(/[\\/]/)
-  const name = parts[parts.length - 1] || '项目'
-  return [`项目:${name}`]
-}
-
-/**
- * 沉睡判定（派生状态，实时计算）：最后强化 > 30 天前 且 hits < 3。
- * 被命中（touch）的节点刚强化，永不处于沉睡；沉默 >30 天的节点在
- * 渲染时降级为仅标题（不占注入预算），图谱仍可检索、命中即复苏。
- */
-export function dormantOf(e: EngramNode, now: number = Date.now()): boolean {
-  if (e.hits >= 3 && e.kind !== 'event') return false
-  const last = e.reinforces && e.reinforces.length > 0 ? e.reinforces[e.reinforces.length - 1] : e.createdAt
-  // ⚠️ event（过程性记忆）客观过时：创建超过 30 天直接沉睡——事件发生即
-  // 结束，被检索命中（hits≥3）不改变"已过时"（用户实测：'重载失败'这类
-  // 已解决的过程记录不该永久新鲜）；非 event 按最后强化判定（活的记忆
-  // 靠使用保鲜）
-  const anchor = e.kind === 'event' ? e.createdAt : last
-  return (now - anchor) / 86400000 >= 30
-}
-
-/** 废止判定（版本链）：被新版本取代，退出检索/注入，可追溯。 */
-export function isSuperseded(e: EngramNode): boolean {
-  return e.supersededBy !== undefined && e.supersededBy !== ''
-}
-
-/** 教训判定（教训通道）：tags 含「教训:」前缀（命名空间约定，如 教训:代码）。
- * 教训类记忆在唤醒时走独立低阈值席位（见 wake.ts lesson channel）。 */
-export function isLesson(e: EngramNode | undefined | null): boolean {
-  if (!e) return false
-  return (e.tags ?? []).some((t) => typeof t === 'string' && t.startsWith('教训:'))
+export function isVisible(e: EngramNode, viewer: { sessionId?: string; cwd?: string }): boolean {
+  if (viewer.sessionId === undefined && viewer.cwd === undefined) return true
+  switch (e.layer) {
+    case 'global':
+      return true
+    case 'project':
+      return e.projectId !== null && e.projectId === viewer.cwd
+    case 'session':
+      return e.sessionId !== null && e.sessionId === viewer.sessionId
+    default:
+      return false
+  }
 }
 
 /** 渐进披露层级。 */
 export interface EngramNode {
   id: string
   kind: EngramKind
-  /** 分层归属（AI 自主决策）：global=全局持久 / project=项目持久。 */
+  /** 分层归属（AI 自主决策）：global=全局持久 / project=项目持久 / session=会话临时。 */
   layer: EngramLayer
-  /**
-   * 自由标签（v0.4：一节点多标签，自由分类——不建枚举 schema）：
-   * 分类靠命名空间约定，如 '全局'（开发者喜好/全局要求）、
-   * '项目:xxx'（项目自由命名）、'教训:代码' / '教训:思想'（教训自由子分类）。
-   * layer/projectId 保留为系统内部字段（写入绑定/快照聚合），
-   * tags 是用户可见的分类维度。
-   */
-  tags?: string[]
-  /**
-   * 巩固状态（双维度：可见性×巩固度，v0.3 引入）：
-   *  - episodic：刚写入，事件性，细节丰富（情景记忆）
-   *  - semantic：强化 ≥3 次，被归纳，去情景化（语义记忆）
-   *  - dormant ：30 天无强化，低激活，退出注入入口层（沉睡）
-   * 惰性迁移（touch/reinforce 时评估，无定时扫描）。
-   */
-  state?: 'episodic' | 'semantic' | 'dormant'
-  /**
-   * 版本链（v0.3，治理缺口①真理维护）：被哪个节点取代（id）。
-   * 被取代 = 废止（superseded）：退出检索/注入（只注入"当前有效"），
-   * 但 engram_open/byTitle 仍可追溯旧版（版本链可回溯，不删数据）。
-   */
-  supersededBy?: string
-  /** 版本链：取代了哪些节点（id 列表，反向追溯）。 */
-  supersedes?: string[]
-  /** project 层标识（会话工作目录；global 层为 null）。 */
+  /** project 层标识（会话工作目录；global/session 层为 null）。 */
   projectId: string | null
   /** 入口锚点（唤醒列表展示；如 Obsidian 的页面标题）。 */
   title: string
@@ -221,15 +175,8 @@ export class EngramStore {
   private byId = new Map<string, EngramNode>()
   /** 槽位索引：slotKey -> Set<nodeId>（派生索引，写入/加载时构建）。 */
   private slotIndex = new Map<string, Set<string>>()
-  /**
-   * token 倒排索引（v0.5 纯算法语义关键修复）：token -> Set<nodeId>——
-   * **词袋召回**（与 PCA 语义对齐）。哈希 n-gram 要求词组连续匹配，查询
-   * 「pnpm 装包报错 EPERM」vs 记忆「pnpm EPERM 修复」词袋共享但窗口不
-   * 连续 → 槽位交集 0 → 粗筛漏掉（实测根因）。倒排补上词袋维度。
-   */
-  private tokenIndex = new Map<string, Set<string>>()
-  /** 标题索引：title -> id[]（多值——跨项目同标题合法存在；解析时消歧）。 */
-  private titleIndex = new Map<string, string[]>()
+  /** 标题索引：title -> nodeId（双向链接解析用）。 */
+  private titleIndex = new Map<string, string>()
 
   constructor(storeDir: string, private hasher: NgramHashAddressing = new NgramHashAddressing()) {
     this.dir = storeDir === '' ? join(homedir(), '.dsh', 'engram-relay') : resolve(storeDir)
@@ -254,38 +201,32 @@ export class EngramStore {
       } catch {
         continue
       }
-      const cleaned = raw.replace(/\0+/g, '')
+      const hadNul = raw.includes('\0')
+      const cleaned = hadNul ? raw.replace(/\0+/g, '') : raw
       let loaded = 0
-      let corrupt = 0
+      let parseErrors = 0
       for (const line of cleaned.split('\n')) {
         if (line.trim() === '') continue
         try {
           const e = JSON.parse(line) as EngramNode
           // —— 旧数据迁移兜底（v0.2.0 跨会话分层前持久化的节点缺字段）——
-          // v0.3：session 层删除——旧 session 节点归一化为 project（保留不丢）
-          e.layer = (e as { layer: string }).layer === 'session' ? 'project' : (e.layer ?? 'project')
+          e.layer = e.layer ?? 'session'
           e.projectId = e.projectId ?? null
           e.slots = Array.isArray(e.slots) ? e.slots : []
-          e.links = Array.isArray(e.links) ? e.links.map((l) => String(l).replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean) : []
+          e.links = Array.isArray(e.links) ? e.links : []
           e.causes = Array.isArray(e.causes) ? e.causes : []
           e.effects = Array.isArray(e.effects) ? e.effects : []
           e.importance = typeof e.importance === 'number' ? e.importance : 0
           e.hits = typeof e.hits === 'number' ? e.hits : 0
           e.createdAt = typeof e.createdAt === 'number' ? e.createdAt : 0
           e.reinforces = Array.isArray(e.reinforces) ? e.reinforces : [e.createdAt || Date.now()]
-          // v0.3 巩固状态归一化：旧数据默认 episodic（不丢、可迁移）
-          e.state = (e.state === 'semantic' || e.state === 'dormant') ? e.state : 'episodic'
-          // v0.4 标签迁移：旧数据无 tags → 从 layer/projectId 生成默认标签
-          if (!Array.isArray(e.tags) || e.tags.length === 0) {
-            e.tags = defaultTags(e.layer, e.projectId)
-          }
           this.byId.set(e.id, e)
           for (const s of e.slots) this.indexSlot(s, e.id)
-          this.indexTokens(this.textOfNode(e), e.id)
-          if (e.title) this.indexTitle(e.title, e.id)
+          if (e.title) this.titleIndex.set(e.title, e.id)
           loaded++
         } catch {
-          corrupt++
+          // 单条损坏跳过，不拖垮整个存储
+          parseErrors++
         }
       }
       if (loaded > 0) {
@@ -297,13 +238,10 @@ export class EngramStore {
         }
         return
       }
-      // ⚠️ 主文件无节点但全部可解析 = 合法空库（如 clearSession 清空后），
-      // 不是损坏——绝不回退备份（否则会把已删除的会话记忆恢复回来，
-      // 实测「清空后重载残留」bug 的根因）。但含 NUL 的原始内容（写坏
-      // 的文件）仍是损坏，必须回退备份恢复。
-      if (src === this.file && corrupt === 0 && !raw.includes('\0')) {
-        return
-      }
+      // 主文件存在、无 NUL 且完全可解析（含合法空库）→ 权威来源，不查
+      // 备份——否则 clearSession/remove 清空后重载会从旧备份"复活"已删
+      // 记忆。NUL 损坏（曾真实发生）不在此列：继续走备份恢复链。
+      if (src === this.file && parseErrors === 0 && !hadNul) return
       // 该来源全坏 → 下一个（更旧的备份）
     }
     if (recoveredFrom) {
@@ -328,33 +266,6 @@ export class EngramStore {
       this.slotIndex.set(slot, set)
     }
     set.add(id)
-  }
-
-  /** token 倒排索引登记（词袋召回维度——与 PCA 语义对齐）。 */
-  private indexTokens(text: string, id: string): void {
-    for (const tok of this.hasher.normalize(text)) {
-      let set = this.tokenIndex.get(tok)
-      if (!set) {
-        set = new Set()
-        this.tokenIndex.set(tok, set)
-      }
-      set.add(id)
-    }
-  }
-
-  /** token 倒排移除。 */
-  private unindexTokens(text: string, id: string): void {
-    for (const tok of this.hasher.normalize(text)) {
-      const set = this.tokenIndex.get(tok)
-      if (!set) continue
-      set.delete(id)
-      if (set.size === 0) this.tokenIndex.delete(tok)
-    }
-  }
-
-  /** 节点检索文本（title + summary + content 的前部——token 倒排用）。 */
-  private textOfNode(e: EngramNode): string {
-    return `${e.title}：${e.summary} ${(e.content ?? '').slice(0, 100)}`
   }
 
   /**
@@ -408,22 +319,17 @@ export class EngramStore {
   /**
    * 写入/更新一个记忆节点：按 title+summary 哈希寻址，挂到命中槽位。
    * 渐进披露：title/summary 是入口层，content 是展开层。
-   * v0.4：支持 tags 多标签（缺省从 layer/projectId 生成默认标签）。
+   * layer 缺省 'session'（向后兼容：旧调用语义 = 会话级即弃）。
    */
   add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots' | 'layer' | 'projectId'>
-    & { layer?: EngramLayer; projectId?: string | null; tags?: string[] }): EngramNode {
+    & { layer?: EngramLayer; projectId?: string | null }): EngramNode {
     const keyText = `${input.title} ${input.summary}`
     const result = this.hasher.hash(keyText)
     const slots = this.hasher.slotKeys(result)
-    const layer = input.layer ?? 'project'
-    const projectId = input.projectId ?? null
     const node: EngramNode = {
       ...input,
-      layer,
-      projectId,
-      tags: Array.isArray(input.tags) && input.tags.length > 0
-        ? [...new Set(input.tags)]
-        : defaultTags(layer, projectId),
+      layer: input.layer ?? 'session',
+      projectId: input.projectId ?? null,
       id: createEngramId(),
       createdAt: Date.now(),
       hits: 0,
@@ -431,174 +337,40 @@ export class EngramStore {
       slots,
       // 写入即第一次强化（类脑：刚记住时最容易被想起）
       reinforces: input.reinforces ?? [Date.now()],
-      // v0.3 巩固状态：写入即 episodic（刚记住，事件性最强）
-      state: 'episodic',
     }
     this.byId.set(node.id, node)
     for (const s of slots) this.indexSlot(s, node.id)
-    this.indexTokens(this.textOfNode(node), node.id)
-    if (node.title) this.indexTitle(node.title, node.id)
+    if (node.title) this.titleIndex.set(node.title, node.id)
     this.persist()
     return node
   }
 
-  /** 标题索引登记（多值聚合，去重）。 */
-  private indexTitle(title: string, id: string): void {
-    const arr = this.titleIndex.get(title)
-    if (arr) {
-      if (!arr.includes(id)) arr.push(id)
-    } else {
-      this.titleIndex.set(title, [id])
-    }
-  }
-
-  /** 标题索引移除（只摘该项，不影响同名其他节点）。 */
-  private unindexTitle(title: string, id: string): void {
-    const arr = this.titleIndex.get(title)
-    if (!arr) return
-    const i = arr.indexOf(id)
-    if (i >= 0) arr.splice(i, 1)
-    if (arr.length === 0) this.titleIndex.delete(title)
-  }
-
-  /** 按标题取节点（双向链接 [[title]] 解析）。同名消歧：**未废止（active）优先**，
-   *  其次最近写入——否则链接解析会取到废止旧版（第七轮新 agent 实测：
-   *  邻接标注错乱根因）。⚠️ 曾有 Map<title,单id> 覆盖 bug——多值后不再丢。 */
+  /** 按标题取节点（双向链接 [[title]] 解析）。 */
   byTitle(title: string): EngramNode | undefined {
-    const arr = this.titleIndex.get(title)
-    if (!arr || arr.length === 0) return undefined
-    // active 优先：从后往前找第一个未废止的
-    for (let i = arr.length - 1; i >= 0; i--) {
-      const e = this.byId.get(arr[i])
-      if (e && !isSuperseded(e)) return e
-    }
-    return this.byId.get(arr[arr.length - 1])
+    const id = this.titleIndex.get(title)
+    return id ? this.byId.get(id) : undefined
   }
 
-  /** 按标题取全部同名节点（消歧/盘点用：跨项目同标题、版本链同主题）。 */
-  byTitles(title: string): EngramNode[] {
-    return (this.titleIndex.get(title) ?? [])
-      .map((id) => this.byId.get(id))
-      .filter((e): e is EngramNode => !!e)
-  }
-
-  /**
-   * 工作快照（远景场景 6"继续昨天的工作"）：聚合 cwd 最近写入的进行中
-   * 状态 → 快照节点（kind=snapshot，episodic 起步，每次更新即强化保持活跃）。
-   * 幂等：同 cwd 已有快照且内容未变 → 不写盘；内容变化 → 原地更新 + 强化。
-   * 快照是"当前状态"不是"事实"——原地更新，不建版本链。
-   */
-  upsertSnapshot(cwd: string, turn: number, sessionId: string | null = null): EngramNode | null {
-    if (!cwd) return null
-    const latest = this.query({ projectId: cwd, recent: true, limit: 6 })
-      .filter((e) => e.kind !== 'snapshot' && !isSuperseded(e))
-    if (latest.length === 0) return null
-    const body = latest.map((e) => `- [[${e.title}]]：${e.summary.slice(0, 60)}`).join('\n')
-    const summary = `进行中：${latest[0].title}${latest.length > 1 ? ` 等 ${latest.length} 项` : ''}`
-    const existing = this.query({ kind: 'snapshot', projectId: cwd })
-    if (existing.length > 0) {
-      const snap = existing[existing.length - 1]
-      if (snap.content !== body) {
-        this.update(snap.id, {
-          summary,
-          content: body,
-          // ⚠️ 修复（2026-08 用户反馈"中间一个大圆形"）：links 曾**累积追加**
-          // （旧 links ∪ 最新 6 条）——快照每轮 +6 条涨到 172 条，把所有
-          // 近期节点串成巨型连通分量（89%）→ 改为**替换**为当前最近 6 条
-          // （快照 = 此刻工作状态，links = 此刻相关节点）
-          links: latest.map((e) => e.title),
-        })
-        this.reinforce(snap.id) // 每次更新 = 强化（快照不沉睡）
-      }
-      return snap
-    }
-    const base = String(cwd).split(/[\\/]/).pop() || '项目'
-    return this.add({
-      kind: 'snapshot',
-      layer: 'project',
-      projectId: cwd,
-      title: `工作快照·${base}`,
-      summary,
-      content: body,
-      links: latest.map((e) => e.title),
-      sessionId,
-      turn,
-      causes: [],
-      effects: [],
-      importance: 0.9,
-    })
-  }
-
-  /** 按文本哈希寻址 + token 倒排词袋召回（去重，按关联度降序；不含废止节点）。 */
+  /** 按文本哈希寻址，返回命中槽位的候选节点（去重，按关联度降序）。 */
   lookup(text: string, limit = 8): EngramNode[] {
     const result = this.hasher.hash(text)
-    return this.lookupHash(result, text, limit)
+    return this.lookupHash(result, limit)
   }
 
-  /** token 倒排查询（v0.6 共现扩展粗筛用）：含任一 token 的记忆并集
-   *  ——与词袋语义对齐，支持"查询词共现邻居"召回。 */
-  lookupTokens(tokens: string[], limit = 16): EngramNode[] {
-    const ids = new Set<string>()
-    for (const t of tokens) {
-      const s = this.tokenIndex.get(t)
-      if (s) for (const id of s) ids.add(id)
-    }
-    const out: EngramNode[] = []
-    for (const id of ids) {
-      const e = this.byId.get(id)
-      if (e && e.status !== 'pending' && !isSuperseded(e)) out.push(e)
-    }
-    out.sort((a, b) => b.importance - a.importance)
-    return out.slice(0, limit)
-  }
-
-  /** 按已计算的哈希结果寻址（避免重复哈希）；text 供 token 倒排词袋召回。 */
-  lookupHash(result: HashResult, text = '', limit = 8): EngramNode[] {
+  /** 按已计算的哈希结果寻址（避免重复哈希）。 */
+  lookupHash(result: HashResult, limit = 8): EngramNode[] {
     const keys = this.hasher.slotKeys(result)
     const seen = new Set<string>()
     const hits: EngramNode[] = []
-    // ⚠️ 规模化（10 万级 benchmark）：高频词槽候选可爆炸到全库（max 10 万）——
-    // 必须提前截断，不能全量收集再排序（O(N) 遍历）。
-    // **双来源均衡采样**（v0.5 修复）：
-    //  ① 哈希槽位（精确短语——词组连续匹配）
-    //  ② token 倒排（词袋召回——与 PCA 语义对齐；查询「pnpm 装包报错
-    //     EPERM」vs 记忆「pnpm EPERM 修复」词袋共享但 n-gram 窗口不连续
-    //     → 哈希槽交集 0，靠倒排兜住——实测"查不到刚写的记忆"根因）
-    // 每来源每轮取 1 个轮转，防止高频来源独占预算。
-    const iters: Array<Iterator<string>> = []
     for (const k of keys) {
-      const s = this.slotIndex.get(k)
-      if (s) iters.push(s.values())
-    }
-    // token 倒排：查询 token 的并集迭代器（先收集 id 集合再取迭代器）
-    const tokenIds = new Set<string>()
-    for (const tok of this.hasher.normalize(text)) {
-      const s = this.tokenIndex.get(tok)
-      if (s) for (const id of s) tokenIds.add(id)
-    }
-    if (tokenIds.size > 0) iters.push(tokenIds.values())
-    const budget = Math.max(limit, 64)
-    let round = 0
-    outer:
-    while (hits.length < budget && round < 64) {
-      let allDone = true
-      for (const it of iters) {
-        if (hits.length >= budget) break outer
-        const step = it.next()
-        if (step.done) continue
-        allDone = false
-        const id = step.value
+      const ids = this.slotIndex.get(k)
+      if (!ids) continue
+      for (const id of ids) {
         if (seen.has(id)) continue
         seen.add(id)
         const e = this.byId.get(id)
-        // ⚠️ 版本链：废止节点不参与检索（只注入"当前有效"；追溯走 byTitle/open）
-        if (e && e.status !== 'pending' && !isSuperseded(e)) {
-          hits.push(e)
-        }
+        if (e && e.status !== 'pending') hits.push(e)
       }
-      round++
-      // ⚠️ 终止条件：所有迭代器耗尽才算完——不能按"本轮无新增"退出
-      if (allDone) break
     }
     hits.sort((a, b) => b.importance - a.importance)
     return hits.slice(0, limit)
@@ -726,6 +498,7 @@ export class EngramStore {
   query(filter: {
     layer?: EngramLayer
     projectId?: string | null
+    sessionId?: string
     kind?: EngramKind
     since?: number
     until?: number
@@ -734,7 +507,9 @@ export class EngramStore {
   } = {}): EngramNode[] {
     let list = this.all()
     if (filter.layer !== undefined) list = list.filter((e) => e.layer === filter.layer)
-    if (filter.projectId !== undefined) list = list.filter((e) => e.projectId === filter.projectId)
+    // projectId 只过滤 project 层——global/session 节点（projectId=null）不受影响
+    if (filter.projectId !== undefined) list = list.filter((e) => e.layer !== 'project' || e.projectId === filter.projectId)
+    if (filter.sessionId !== undefined) list = list.filter((e) => e.sessionId === filter.sessionId)
     if (filter.kind !== undefined) list = list.filter((e) => e.kind === filter.kind)
     if (filter.since !== undefined) list = list.filter((e) => e.createdAt >= filter.since!)
     if (filter.until !== undefined) list = list.filter((e) => e.createdAt <= filter.until!)
@@ -747,23 +522,14 @@ export class EngramStore {
 
   /** 分层统计（status 工具用）。 */
   layerCounts(): Record<EngramLayer, number> {
-    const counts: Record<EngramLayer, number> = { global: 0, project: 0 }
+    const counts: Record<EngramLayer, number> = { global: 0, project: 0, session: 0 }
     for (const e of this.byId.values()) counts[e.layer] += 1
-    return counts
-  }
-
-  /** 巩固状态统计（status 工具用；旧数据默认 episodic；dormant 派生）。 */
-  stateCounts(): Record<'episodic' | 'semantic' | 'dormant', number> {
-    const counts: Record<'episodic' | 'semantic' | 'dormant', number> = { episodic: 0, semantic: 0, dormant: 0 }
-    for (const e of this.byId.values()) {
-      counts[dormantOf(e) ? 'dormant' : (e.state === 'semantic' ? 'semantic' : 'episodic')] += 1
-    }
     return counts
   }
 
   /**
    * 提升/转层：改 layer 与 projectId（保留 id/因果/链接——引用不失效）。
-   * project → global（跨项目共享真理）；global 不可降级。
+   * 会话结束前把 session 临时记忆提升为 project/global 跨会话持久。
    */
   promote(id: string, layer: EngramLayer, projectId: string | null = null): EngramNode | undefined {
     const e = this.byId.get(id)
@@ -774,30 +540,14 @@ export class EngramStore {
     return e
   }
 
-  /**
-   * 版本链（真理维护核心）：newId 取代 oldId——
-   *  - old.supersededBy = newId（退出检索/注入，只注入"当前有效"）
-   *  - new.supersedes += oldId（反向追溯版本链）
-   * 数据不删（可追溯），因果/链接继承由调用方迁移。
-   */
-  supersede(oldId: string, newId: string): boolean {
-    const old = this.byId.get(oldId)
-    const neu = this.byId.get(newId)
-    if (!old || !neu) return false
-    old.supersededBy = newId
-    neu.supersedes = [...(neu.supersedes ?? []), oldId]
-    this.persist()
-    return true
-  }
-
-  /** 修正节点字段（title 变更会同步标题索引；层变更用 promote；tags 覆盖设置）。 */
-  update(id: string, patch: Partial<Pick<EngramNode, 'title' | 'summary' | 'content' | 'links' | 'causes' | 'effects' | 'importance' | 'tags'>>): EngramNode | undefined {
+  /** 修正节点字段（title 变更会同步标题索引；层变更用 promote）。 */
+  update(id: string, patch: Partial<Pick<EngramNode, 'title' | 'summary' | 'content' | 'links' | 'causes' | 'effects' | 'importance'>>): EngramNode | undefined {
     const e = this.byId.get(id)
     if (!e) return undefined
     if (patch.title !== undefined && patch.title !== e.title) {
-      this.unindexTitle(e.title, e.id)
+      this.titleIndex.delete(e.title)
       e.title = patch.title
-      if (e.title) this.indexTitle(e.title, e.id)
+      if (e.title) this.titleIndex.set(e.title, e.id)
     }
     if (patch.summary !== undefined) e.summary = patch.summary
     if (patch.content !== undefined) e.content = patch.content
@@ -805,7 +555,6 @@ export class EngramStore {
     if (patch.causes !== undefined) e.causes = patch.causes
     if (patch.effects !== undefined) e.effects = patch.effects
     if (patch.importance !== undefined) e.importance = patch.importance
-    if (patch.tags !== undefined) e.tags = [...new Set(patch.tags)]
     this.persist()
     return e
   }
@@ -824,7 +573,6 @@ export class EngramStore {
     e.hits += 1
     e.lastHitAt = Date.now()
     if (e.reinforces) e.reinforces.push(Date.now())
-    this.evolveState(e)
     this.persist()
   }
 
@@ -834,19 +582,7 @@ export class EngramStore {
     if (!e) return
     e.reinforces = e.reinforces ?? [e.createdAt || Date.now()]
     e.reinforces.push(Date.now())
-    this.evolveState(e)
     this.persist()
-  }
-
-  /**
-   * 惰性状态迁移（命中/强化时评估，无定时扫描）：
-   *  - hits ≥ 3 → semantic（强化历史充足，去情景化，持久固化）
-   *  - dormant 是**派生状态**（见 isDormant）：由强化历史实时计算——
-   *    被 touch 的节点刚强化，永不处于沉睡；沉默 >30 天的节点在
-   *    渲染/候选时降级为仅标题，不占注入预算。
-   */
-  private evolveState(e: EngramNode): void {
-    if (e.hits >= 3) e.state = 'semantic'
   }
 
   /** 全部待确认节点（用户确认制管理面）。 */
@@ -876,8 +612,7 @@ export class EngramStore {
     const e = this.byId.get(id)
     if (!e) return false
     this.byId.delete(id)
-    if (e.title) this.unindexTitle(e.title, e.id)
-    this.unindexTokens(this.textOfNode(e), e.id)
+    if (e.title) this.titleIndex.delete(e.title)
     for (const s of e.slots) {
       const set = this.slotIndex.get(s)
       if (set) {
@@ -889,61 +624,14 @@ export class EngramStore {
     return true
   }
 
-  /** 归档文件（被淘汰节点保留可恢复，不删数据）。 */
-  private archiveFile(): string {
-    return join(this.dir, 'archived.jsonl')
-  }
-
   /**
-   * 归档一个节点：JSON 追加到 archived.jsonl（带 archivedAt），然后从主库移除。
-   * 归档 = 完全退出检索/注入/图谱，但可手动恢复（读回 archived.jsonl）。
+   * 会话隔离（分层生命周期）：只清该会话的 **session 层** 临时记忆；
+   * global/project 跨会话层保留——跨会话沉淀的核心转变。
+   * 复用 remove() 统一清理索引（byId/titleIndex/slotIndex）。
    */
-  archiveNode(id: string): boolean {
-    const e = this.byId.get(id)
-    if (!e) return false
-    const record = { ...e, archivedAt: Date.now() }
-    try {
-      appendFileSync(this.archiveFile(), `${JSON.stringify(record)}\n`, 'utf8')
-    } catch { /* 归档写失败不阻塞主库操作 */ }
-    return this.remove(id)
-  }
-
-  /**
-   * 硬上限（v0.5）：count > maxNodes 时按「留着最没用」顺序淘汰归档：
-   *  ① superseded（已废止——真理已由当前版承载）
-   *  ② dormant（沉睡——长期未用，不占注入预算仍占存储）
-   *  ③ 低激活 episodic（强化少 + 创建久）
-   * 返回淘汰数。惰性触发（写入后调用），不阻塞。
-   */
-  enforceLimit(maxNodes: number): number {
-    if (maxNodes <= 0) return 0
-    const excess = this.count() - maxNodes
-    if (excess <= 0) return 0
-    const now = Date.now()
-    const valueKey = (e: EngramNode): number => {
-      if (isSuperseded(e)) return 0
-      if (dormantOf(e, now)) return 1
-      // 低激活：强化次数少 + 久未用
-      const last = e.reinforces && e.reinforces.length > 0 ? e.reinforces[e.reinforces.length - 1] : e.createdAt
-      return 2 + (e.reinforces?.length ?? 0) / 10 + (now - last) / 1e12
-    }
-    const doomed = this.all()
-      .sort((a, b) => valueKey(a) - valueKey(b))
-      .slice(0, excess)
-    let archived = 0
-    for (const e of doomed) {
-      if (this.archiveNode(e.id)) archived++
-    }
-    return archived
-  }
-
-  /** 归档节点数（status 显示）。 */
-  archivedCount(): number {
-    try {
-      return readFileSync(this.archiveFile(), 'utf8').split('\n').filter((l) => l.trim() !== '').length
-    } catch {
-      return 0
-    }
+  clearSession(sessionId: string): number {
+    const doomed = this.all().filter((e) => e.sessionId === sessionId && e.layer === 'session')
+    for (const e of doomed) this.remove(e.id)
+    return doomed.length
   }
 }
-

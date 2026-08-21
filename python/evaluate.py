@@ -33,7 +33,7 @@ Q_PROMPTS = {
 
 
 def load_model(checkpoint: str | None, device: str = "cuda"):
-    eng = EngramQwen3(model_id=os.environ.get("ENGRAM_MODEL_PATH", ""),
+    eng = EngramQwen3(model_id=os.environ.get("ENGRAM_MODEL_PATH", r"F:/dsh/engram-trial/qwen3-model"),
                       device=device, dtype=torch.bfloat16)
     if checkpoint and os.path.exists(checkpoint):
         ckpt = torch.load(checkpoint, map_location=device, weights_only=False)

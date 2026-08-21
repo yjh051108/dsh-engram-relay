@@ -13,11 +13,8 @@
  */
 
 import type { Context as CordisContext } from 'cordis'
-import { appendFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 
-import { isVisible, isSuperseded, type EngramNode } from './engram/store.js'
+import { isVisible, type EngramNode } from './engram/store.js'
 import type { EngramRelay } from './relay.js'
 
 type HttpCtx = CordisContext & {
@@ -71,7 +68,6 @@ function nodeView(n: EngramNode) {
     importance: n.importance,
     hits: n.hits,
     createdAt: n.createdAt,
-    state: n.state ?? 'episodic',
   }
 }
 
@@ -79,18 +75,47 @@ function nodeView(n: EngramNode) {
 interface EdgeView { from: string; to: string; kind: 'causes' | 'link' }
 
 export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
-  return ctx.webServer.register({
+  // 融合：真实检索端点（staging/外部工具用）——走 relay.wake 完整唤醒管线
+  const disposers: Array<() => void> = []
+  disposers.push(ctx.webServer.register({
+    kind: 'get',
+    path: '/engram-relay/api/search',
+    handler: async (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+      const q = url.searchParams.get('q') ?? ''
+      const limit = Math.min(10, Number(url.searchParams.get('limit') ?? 5))
+      try {
+        const hit = await relay.wake.query(q, limit, {
+          sessionId: relay.currentSessionId ?? undefined,
+          cwd: relay.currentCwd ?? undefined,
+        })
+        const items = hit.engrams.map((e) => ({
+          id: e.id, title: e.title, summary: e.summary, kind: e.kind,
+          layer: e.layer, importance: e.importance, hits: e.hits,
+          verify: hit.verify?.[e.id] ?? null,
+        }))
+        sendJson(res, 200, { query: q, reason: hit.reason, items, total: items.length })
+      } catch (error) {
+        sendJson(res, 500, { error: String(error).slice(0, 200) })
+      }
+    },
+  }))
+  disposers.push(ctx.webServer.register({
     kind: 'prefix',
     path: '/engram-relay/api',
     handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
       const viewer = resolveViewer(ctx, url, relay)
 
-      // GET /graph：当前有效节点 + 边（v0.6：**过滤废止旧版、待确认与
-      // 工作快照**——快照是过程性工作状态（非知识），其 links 曾制造巨型
-      // 连通分量（89% 节点串成一个大圆）；知识图谱只显示知识节点）
+      // GET /graph：可见节点 + 边（分层准入）
       if (req.method === 'GET' && url.pathname === '/engram-relay/api/graph') {
-        const visible = relay.store.all().filter((n) => isVisible(n, viewer) && !isSuperseded(n) && n.status !== 'pending' && n.kind !== 'snapshot')
+        // 无会话视角（未传 sessionId）→ 只暴露 global 层——浏览器端是用户
+        // 可见界面，必须保守：不泄露他人项目/会话记忆（isVisible 的空
+        // viewer 宽容分支只用于 wake/tools 的向后兼容）。
+        const visible = relay.store.all().filter((n) =>
+          viewer.sessionId === undefined && viewer.cwd === undefined
+            ? n.layer === 'global'
+            : isVisible(n, viewer))
         const ids = new Set(visible.map((n) => n.id))
         const edges: EdgeView[] = []
         const seen = new Set<string>()
@@ -120,18 +145,6 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
         return
       }
 
-      // POST /graph-log：浏览器运行时自检日志（项目圆重叠等——宿主可读，
-      // 不再靠用户描述猜）
-      if (req.method === 'POST' && url.pathname === '/engram-relay/api/graph-log') {
-        let body = ''
-        for await (const chunk of req) body += String(chunk)
-        try {
-          appendFileSync(join(homedir(), '.dsh', 'super-injector', 'engram-graph.log'), body)
-        } catch { /* 日志写失败不阻塞 */ }
-        sendJson(res, 200, { ok: true })
-        return
-      }
-
       // GET /node/<title>：节点详情（渐进披露第二层）
       const match = /^\/engram-relay\/api\/node\/(.+)$/.exec(url.pathname)
       if (req.method === 'GET' && match !== null) {
@@ -141,7 +154,14 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
           sendJson(res, 404, { error: `node not found: ${title}` })
           return
         }
-        // v0.4：全可见（项目不隔离）——无 403 分支
+        // 无会话视角 → 只看 global 层（隐私边界，同上）
+        const visible = viewer.sessionId === undefined && viewer.cwd === undefined
+          ? node.layer === 'global'
+          : isVisible(node, viewer)
+        if (!visible) {
+          sendJson(res, 403, { error: `node ${title} is not visible to this session` })
+          return
+        }
         relay.store.touch(node.id)
         sendJson(res, 200, {
           ...nodeView(node),
@@ -150,7 +170,7 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
           effects: relay.store.getMany(node.effects).map((e) => nodeView(e)),
           links: node.links.map((t) => {
             const target = relay.store.byTitle(t)
-            return target ? nodeView(target) : { id: '', title: t, summary: '', kind: 'note', layer: 'global', projectId: null, importance: 0, hits: 0, createdAt: 0, state: 'episodic' }
+            return target ? nodeView(target) : { id: '', title: t, summary: '', kind: 'note', layer: 'global', projectId: null, importance: 0, hits: 0, createdAt: 0 }
           }),
         })
         return
@@ -158,5 +178,6 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
 
       sendJson(res, 404, { error: 'not found' })
     },
-  })
+  }))
+  return () => disposers.forEach((d) => d())
 }

@@ -12,7 +12,7 @@
  *    双向传播（前因/后果）→ 只注入极少数超稀疏痕迹（预算默认 600
  *    token），渐进披露（入口 = [[标题]] + 摘要，按需展开全文）；
  *  - 写入：模型经 engram_store 工具落节点（分层/标题/摘要/正文/链接/
- *    因果），记忆跨会话持久（global/project 两层，session 层已删除）；
+ *    因果），session 层在会话结束清理，global/project 跨会话持久；
  *  - 维护：engram_search（盘点）/ link（织图谱）/ update / remove /
  *    promote（session→project/global 转长期）——类 LSP 的能力声明 +
  *    按需请求-响应；
@@ -54,14 +54,7 @@ export interface Config {
   embedModel: string
   distillRequireConfirm: boolean
   semanticMinScore: number
-  recencyWeight: number
-  wakeSampleLog: boolean
-  tauSem: number
-  tauTime: number
-  tauCause: number
-  maxNodes: number
-  lessonMinScore: number
-  lessonBudgetTokens: number
+  lingshuVerifyUrl: string
 }
 
 export const Config: z<Config> = z.object({
@@ -86,41 +79,20 @@ export const Config: z<Config> = z.object({
   checkpoint: z.string().default('')
     .description('遗留：训练好的原生 engram checkpoint 路径（0.6B 已移除）'),
   embedModel: z.string().default('')
-    .description('可选增强：bge 嵌入模型目录（向量缓存补分；本地路径。空 = 核心三通道纯算法语义引擎（零模型，默认推荐）；可选依次：包内 model/bge-small-zh（int8 ONNX）→ 服务端 ENGRAM_EMBED_MODEL 环境变量）'),
+    .description('bge 嵌入模型目录（本地路径；空 = 优先包内 model/bge-small-zh（仓库自带 int8），再空则服务端 ENGRAM_EMBED_MODEL 环境变量）'),
   distillRequireConfirm: z.boolean().default(false)
     .description('蒸馏产物是否需确认才生效：true=写 ⏳pending（确认后才参与检索），false=无确认模式，蒸馏直接 confirmed 立即生效（Obsidian 式开箱即用）'),
   semanticMinScore: z.number().min(0).max(1).default(0.42)
     .description('唤醒语义阈值：bge 余弦相似度下限（低于此值不注入；无关记忆零注入）'),
-  recencyWeight: z.number().min(-2).max(2).default(0.25)
-    .description('时序 recency 加权强度（1+w·e^(-Δturn/20)；仿真标定显示方向需数据驱动：0=关闭，负=旧记忆优先，默认 0.25 保守）'),
-  wakeSampleLog: z.boolean().default(true)
-    .description('唤醒采样日志（storeDir/wake-samples.jsonl）：记录查询/候选分数/注入选择，供融合权重离线拟合'),
-  tauSem: z.number().min(0).max(10).default(1)
-    .description('τ 融合：语义通道权重（z-score 语义分）'),
-  tauTime: z.number().min(-5).max(5).default(0)
-    .description('τ 融合：时序通道权重（z-score 激活；默认 0=纯语义，fit-tau 拟合后更新）'),
-  tauCause: z.number().min(0).max(5).default(0)
-    .description('τ 融合：因果通道权重（因果 1 跳可达 0/1）'),
-  maxNodes: z.number().min(0).max(1000000).default(10000)
-    .description('主库硬上限：超过触发归档淘汰（superseded→dormant→低激活，归档可恢复）；0=无限'),
-  lessonMinScore: z.number().min(0).max(1).default(0.42)
-    .description('教训通道阈值（v0.6）：tags 含 教训: 的节点在自动唤醒时用更低阈值独立占席——同类操作时踩坑提醒必达（主阈值 ≈0.50 会漏掉 0.42-0.50 的教训）；0=关闭教训通道'),
-  lessonBudgetTokens: z.number().min(0).max(1024).default(60)
-    .description('教训通道注入预算（独立于主预算：教训提醒不挤占普通记忆）'),
+  lingshuVerifyUrl: z.string().default('http://127.0.0.1:18766')
+    .description('融合（Lingshu 白箱验证）：灵枢 wisdom_cloud 服务地址。非空时知识之书注入 + 验证标注 + 写入闸门；空 = 关闭融合。默认开启（热装/装配均生效——注入器不读 patch，默认值即配置）'),
 })
 
-/** 可选向量缓存模型解析：空配置 → 仓库自带 model/bge-small-zh（int8）；解析失败 → 空串（走 Python 服务 ENGRAM_EMBED_MODEL / 纯算法引擎）。 */
+/** 包内模型解析：空配置 → 仓库自带 model/bge-small-zh（int8 免下载）；旧 engram-trial 路径存在则沿用。 */
 function resolveEmbedModel(configured: string): string {
-  if (configured.trim() !== '') return configured
-  try {
-    const bundled = new URL('../model/bge-small-zh/', import.meta.url).pathname
-    // Windows 路径修复（file:// URL 的 /C:/ 前缀 + 非 ASCII 目录百分号编码解码）
-    const bundledPath = process.platform === 'win32'
-      ? decodeURIComponent(bundled).replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\')
-      : decodeURIComponent(bundled)
-    if (bundledPath) return bundledPath
-  } catch { /* 解析失败回退 */ }
-  return ''
+  // 空配置 = 纯算法主路径（SemanticScorer，零模型）——不回退包内模型；
+  // ONNX bge 仅在显式配置 embedModel 时启用（对比验证用）
+  return configured.trim()
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -135,19 +107,12 @@ export function apply(ctx: Context, config: Config): void {
     pythonPath: config.pythonPath,
     pythonTimeoutMs: config.pythonTimeoutMs,
     checkpoint: config.checkpoint ?? '',
-    // 包内模型优先：空配置时用仓库自带 model/bge-small-zh（int8，免下载）；
-    // 显式配置（本地 fp32 目录）时沿用配置。
+    // 包内模型优先：空配置时用仓库自带 model/bge-small-zh（int8，免下载），
+    // 兼容旧配置的 engram-trial 路径（若存在则沿用）。
     embedModel: resolveEmbedModel(config.embedModel),
     distillRequireConfirm: config.distillRequireConfirm,
     semanticMinScore: config.semanticMinScore,
-    recencyWeight: config.recencyWeight,
-    wakeSampleLog: config.wakeSampleLog,
-    tauSem: config.tauSem,
-    tauTime: config.tauTime,
-    tauCause: config.tauCause,
-    maxNodes: config.maxNodes,
-    lessonMinScore: config.lessonMinScore,
-    lessonBudgetTokens: config.lessonBudgetTokens,
+    lingshuVerifyUrl: config.lingshuVerifyUrl,
   })
 
   // 转接核心：llm/stream waterfall 拦截 + systemPrompt 记忆注入
