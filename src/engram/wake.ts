@@ -171,6 +171,7 @@ export class EngramWakeEngine {
     // 这是「跨会话记忆」的可见性边界——看不到的记忆不会被唤醒注入。
     candidates = candidates.filter((e) => isVisible(e, viewer))
     if (candidates.length === 0) {
+      await this.pullKnowledge(query, { engrams: [] })
       const h: WakeHit = { engrams: [], reason: 'no-hash-hit', injectedTokens: 0 }
       this.lastInjection = h
       return h
@@ -197,6 +198,7 @@ export class EngramWakeEngine {
       raw = await this.scorers.scorer(query, candidates).catch(() => null)
     }
     if (!raw || raw.size === 0) {
+      await this.pullKnowledge(query, { engrams: [] })
       const h: WakeHit = { engrams: [], reason: 'no-embedder', injectedTokens: 0 }
       this.lastInjection = h
       return h
@@ -206,6 +208,7 @@ export class EngramWakeEngine {
     // 因果席位从全候选的传播结果选取（见第 3 步），不受阈值限制。
     const relevant = candidates.filter((e) => (raw!.get(e.id) ?? 0) >= threshold)
     if (relevant.length === 0) {
+      await this.pullKnowledge(query, { engrams: [] })
       const h: WakeHit = { engrams: [], reason: 'below-threshold', injectedTokens: 0 }
       this.lastInjection = h
       return h
