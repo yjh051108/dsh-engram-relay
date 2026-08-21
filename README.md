@@ -49,8 +49,8 @@
 ```bash
 git clone https://github.com/yjh051108/dsh-engram-relay.git fengshi
 cd fengshi
-npm install --omit=peer   # 依赖从 DSH 闭包解析（见 INSTALL-new-machine.md）
-npm run build:all         # 构建 lib/（host + client）
+npm install --legacy-peer-deps   # 依赖精确锁定（package-lock.json 已入库）
+npm run build            # 构建 lib/（tsc host + tsdown client）
 ```
 
 ### 2. 装配到 DSH
@@ -67,7 +67,6 @@ dsh plugin --profile web add .
 
 ```bash
 python lingshu/start_lingshu.py    # 自愈 watchdog：崩溃 1s 自动重启
-# 或由插件托管：配置 lingshuVerifyUrl 指向 18766 后，插件启动时自动拉起
 ```
 
 ### 4. 配置（cordis.patch.yml 或 schema 默认值）
@@ -93,7 +92,7 @@ npm run verify    # 运行自检：服务健康 + 卡库 + 记忆库 + 浅思维
 
 ## 与本地一致的说明
 
-发布包包含：插件完整源码 + 构建产物 + 灵枢运行集（`lingshu/`）+ 卡库种子 + 装配脚本。
+发布包包含：插件完整源码 + 灵枢运行集（`lingshu/`）+ 卡库种子 + 装配脚本（git clone 后需 `npm run build` 产出 lib/）。
 本地与大家装配的差异仅剩：DSH 版本与 node_modules 解析（README 与 INSTALL 已覆盖）。
 
 ## 架构文档
@@ -104,4 +103,4 @@ npm run verify    # 运行自检：服务健康 + 卡库 + 记忆库 + 浅思维
 
 ## 许可证
 
-MIT（工程代码）。协议概念（智能论/信息差）权利归协议方。
+BSD-3-Clause（工程代码）。协议概念（智能论/信息差）权利归协议方。
