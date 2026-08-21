@@ -184,7 +184,13 @@ def algo_rerank(dex, query, results):
         # 展示分 = 融合分（保留原分在 raw_score 供对比）
         r["raw_score"] = r.get("score")
         r["score"] = r["fused_score"]
-    results.sort(key=lambda r: -(r.get("fused_score") if r.get("fused_score") is not None else -1))
+    # 排序 + tie-break：同 fused 分 → algo 分 → 原分 → 卡名（稳定排序防抖动）
+    results.sort(key=lambda r: (
+        -(r.get("fused_score") if r.get("fused_score") is not None else -1),
+        -(float(r.get("algo_score") or 0)),
+        -(float(r.get("score") or 0)),
+        str(r.get("name") or ""),
+    ))
     return results
 
 
