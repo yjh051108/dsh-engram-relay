@@ -11,6 +11,7 @@ export interface EngramRelayConfig {
     injectBudgetTokens: number;
     maxWakePerTurn: number;
     distillEveryTurns: number;
+    gapDailyLimit: number;
     enabled: boolean;
     /** Python 解释器路径（spawn 转接服务用）。 */
     pythonPath: string;

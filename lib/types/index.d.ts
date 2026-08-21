@@ -40,6 +40,7 @@ export interface Config {
     injectBudgetTokens: number;
     maxWakePerTurn: number;
     distillEveryTurns: number;
+    gapDailyLimit: number;
     enabled: boolean;
     pythonPath: string;
     pythonTimeoutMs: number;
