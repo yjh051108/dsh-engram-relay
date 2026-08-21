@@ -63,6 +63,8 @@ export declare class EngramWakeEngine {
     private knowledgeSource;
     /** 最近一次唤醒结果（供 systemPrompt 渲染器读取）。 */
     private lastInjection;
+    /** v2.2 压力阀：会话内查询历史（环形 8）——重复主题 = 深推压力信号 */
+    private queryHistory;
     /** 融合：最近一次查询的知识之书段（renderInjection 合并注入）。 */
     private lastKnowledge;
     constructor(store: EngramStore, graph: CausalGraph, hasher: NgramHashAddressing, config: EngramRelayConfig, 

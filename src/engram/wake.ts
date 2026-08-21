@@ -54,6 +54,8 @@ export interface WakeScorers {
 export class EngramWakeEngine {
   /** 最近一次唤醒结果（供 systemPrompt 渲染器读取）。 */
   private lastInjection: WakeHit = { engrams: [], reason: 'idle', injectedTokens: 0 }
+  /** v2.2 压力阀：会话内查询历史（环形 8）——重复主题 = 深推压力信号 */
+  private queryHistory: string[] = []
   /** 融合：最近一次查询的知识之书段（renderInjection 合并注入）。 */
   private lastKnowledge: string | null = null
 
@@ -111,7 +113,29 @@ export class EngramWakeEngine {
       return emptyHit('short-query')
     }
     // ③④ 自动模式：阈值 +0.08（≈0.50，明显相关才注入）+ top-1（唯一入口，干扰最小）。
-    const hit = await this.query(query, 1, { sessionId, ...viewer }, { auto: true })
+    // v2.2 压力阀：与历史查询重叠 ≥0.5 → 深推压力 → 加强召回（limit 2）
+    const _qg = new Set<string>()
+    for (const _seg of (query.match(/[\u4e00-\u9fff]+/g) ?? [])) {
+      for (let _i = 0; _i < _seg.length - 1; _i++) _qg.add(_seg.slice(_i, _i + 2))
+    }
+    let pressure = false
+    if (_qg.size > 0) {
+      for (const _h of this.queryHistory) {
+        const _hg = new Set<string>()
+        for (const _seg of (_h.match(/[\u4e00-\u9fff]+/g) ?? [])) {
+          for (let _i = 0; _i < _seg.length - 1; _i++) _hg.add(_seg.slice(_i, _i + 2))
+        }
+        const _ov = [..._qg].filter((g) => _hg.has(g)).length / _qg.size
+        if (_ov >= 0.5) { pressure = true; break }
+      }
+    }
+    this.queryHistory.push(query)
+    if (this.queryHistory.length > 8) this.queryHistory.shift()
+    const hit = await this.query(query, pressure ? 2 : 1, { sessionId, ...viewer }, { auto: true })
+    if (pressure && hit.engrams.length > 0) {
+      // 压力阀标记（可观测）
+      ;(hit as { pressure?: boolean }).pressure = true
+    }
     this.lastInjection = hit
     return hit
   }
