@@ -161,8 +161,11 @@ class SemanticScorer:
 
 
 def algo_rerank(dex, query, results):
-    """respond 结果算法重排：附加 algo_score + 按算法分重排（保留原分可对比）。"""
-    import math as _m
+    """respond 结果算法融合：附加 algo_score + 融合分重排。
+
+    融合分 = 原分 + β·算法分（β=2.0）——算法词汇通道不受翻译表限制，
+    弱触发查询（翻译表未覆盖的词面）由算法通道兜底。
+    """
     global _scorer_cache
     if _scorer_cache is None or _scorer_cache[0] is not dex:
         _scorer_cache = (dex, SemanticScorer(dex))
@@ -175,7 +178,13 @@ def algo_rerank(dex, query, results):
         if a:
             r["algo_lexical"] = a["lexical"]
             r["algo_cooc"] = a["cooc"]
-    results.sort(key=lambda r: -(r.get("algo_score") if r.get("algo_score") is not None else -1))
+        base = float(r.get("score") or 0)
+        algo = float(r.get("algo_score") or 0)
+        r["fused_score"] = round(base + 2.0 * algo, 4)
+        # 展示分 = 融合分（保留原分在 raw_score 供对比）
+        r["raw_score"] = r.get("score")
+        r["score"] = r["fused_score"]
+    results.sort(key=lambda r: -(r.get("fused_score") if r.get("fused_score") is not None else -1))
     return results
 
 

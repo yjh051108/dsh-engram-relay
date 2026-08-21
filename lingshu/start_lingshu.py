@@ -38,8 +38,9 @@ def seed_cards(dex):
     """播种：识别卡 md（26 张）→ 卡库；加 18 张实用卡种子。"""
     import glob
     from aeis.core import ConditionSpace
-    card_dir = os.path.join(HERE, "knowledge", "识别卡")
-    for f in sorted(glob.glob(os.path.join(card_dir, "*.md"))):
+    card_dir = os.path.join(HERE, "knowledge")
+    # 遍历 knowledge/ 下所有子目录（识别卡 + 补卡）
+    for f in sorted(glob.glob(os.path.join(card_dir, "**", "*.md"), recursive=True)):
         try:
             text = open(f, encoding="utf-8").read()
         except Exception:

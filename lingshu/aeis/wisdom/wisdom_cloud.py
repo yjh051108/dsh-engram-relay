@@ -110,6 +110,72 @@ class DexHandler(BaseHTTPRequestHandler):
 
     # ---------------- 实现 ----------------
 
+    # 自动补词网状态（模块级：服务进程内持续统计）
+    _WEAK_HITS = {}  # 查询→{count, top_card, last_at}
+
+    def _auto_cluster(self, condition, results):
+        """弱命中统计与自动建簇：
+        同一查询多次弱命中（top<0.5）→ 从查询提取俗语词，
+        建簇映射到已命中卡（规范词=卡名）→ 写 clusters_ext.json + 动态更新翻译表。
+        """
+        import time as _t
+        q = (condition or "").strip()
+        if len(q) < 4 or not results:
+            return None
+        top = results[0] if results else {}
+        top_score = top.get("score") or top.get("algo_score") or 0
+        top_name = top.get("name")
+        if not top_name or float(top_score) >= 0.5:
+            return None  # 强命中无需补
+        key = q[:30]
+        rec = self._WEAK_HITS.get(key)
+        if rec is None:
+            self._WEAK_HITS[key] = {"count": 1, "top_card": top_name, "last_at": _t.time()}
+            return None
+        rec["count"] += 1
+        rec["last_at"] = _t.time()
+        if rec["count"] < 3:
+            return None
+        # 触发建簇：提取查询词（≥2 字/ASCII≥3），排除已在翻译表的
+        import semantic_translate as _st
+        import json as _json, os as _os
+        existing = set()
+        for _cls in (_st.SYNONYM_CLUSTERS.values(), _st.DOMAIN_SYNONYM_CLUSTERS.values()):
+            for _words in _cls:
+                existing.update(_words)
+        import re as _re
+        words = set()
+        for m in _re.finditer(r"[a-z][a-z0-9_]{2,}", q.lower()):
+            words.add(m.group())
+        for m in _re.finditer(r"[\u4e00-\u9fff]{2,}", q):
+            s = m.group()
+            if len(s) == 2:
+                words.add(s)
+            else:
+                words.add(s[:2]); words.add(s[-2:])
+        _QW = set("怎么 什么 如何 为啥 为什么 哪些 哪个 多少 哪里 何时 是否 有没有 能不能 会不会 怎么样 怎样 这样 那样 一个 一种 一下 起来 以后 内容 东西".split())
+        new_words = [w for w in words if w not in existing and w not in top_name and w not in _QW]
+        if not new_words:
+            rec["count"] = 0  # 无新词可补，重置计数
+            return None
+        # 建簇：规范词=已命中卡名
+        ext_path = _os.path.join(_os.path.dirname(_os.path.abspath(_st.__file__)), "clusters_ext.json")
+        try:
+            with open(ext_path, encoding="utf-8") as _f:
+                ext = _json.load(_f)
+        except Exception:
+            ext = {}
+        if top_name not in ext:
+            ext[top_name] = []
+        merged = list(dict.fromkeys(ext[top_name] + new_words))
+        ext[top_name] = merged
+        with open(ext_path, "w", encoding="utf-8") as _f:
+            _json.dump(ext, _f, ensure_ascii=False, indent=1)
+        # 动态更新翻译表（本进程立即生效）
+        _st.DOMAIN_SYNONYM_CLUSTERS[top_name] = merged
+        rec["count"] = 0
+        return {"added": top_name, "words": new_words}
+
     def _query(self, body):
         op = body.get("op", "")
         params = body.get("params") or {}
@@ -165,7 +231,12 @@ class DexHandler(BaseHTTPRequestHandler):
                         results = algo_rerank(d, params.get("condition", ""), results)
                     except Exception:
                         pass
-                return {"op": op, "results": results}
+                # 自动补词网：弱命中（top<0.5）高频（≥3）→ 自动生成俗语簇（零 LLM）
+                try:
+                    cluster_hint = _auto_cluster(params.get("condition", ""), results)
+                except Exception:
+                    cluster_hint = None
+                return {"op": op, "results": results, "cluster": cluster_hint}
             if op == "status_node":
                 return {"op": op, "results": d.dex_status(params.get("node_id", ""))}
             if op == "cs":
