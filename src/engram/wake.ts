@@ -232,9 +232,12 @@ export class EngramWakeEngine {
 
     // 因果席位：activated 中未进主席位的节点（含被截断的哈希命中邻居）
     // 按「因果传播增益」排序——激活分数高于自身重要性者优先
+    // v0.3.30：加传播激活门槛（threshold×0.5）——纯噪声激活（哈希碰撞远邻居
+    // 弱传播，如「分布式训练」→铁门记忆）不进席位；真因果邻居激活通常 ≥0.3
     const baseScores = scores
+    const causalMin = threshold * 0.5
     const causalCandidates = [...activated.entries()]
-      .filter(([id]) => !mainIds.has(id))
+      .filter(([id]) => !mainIds.has(id) && (activated.get(id) ?? 0) >= causalMin)
       .sort((a, b) => {
         const gainA = a[1] - (baseScores.get(a[0]) ?? 0)
         const gainB = b[1] - (baseScores.get(b[0]) ?? 0)
