@@ -215,9 +215,16 @@ class DexHandler(BaseHTTPRequestHandler):
                 # 学习统计：auto-gap 来源计数（补卡仪表盘）
                 if str(params.get("source", "")) == "auto-gap":
                     self._LEARN_STATS["cards"] += 1
-                # 同名查重（灵枢 _by_name upsert——重复写入会覆盖，先查）
-                if hasattr(d, "_by_name") and name in d._by_name:
-                    return {"op": op, "ok": True, "existed": True, "name": name}
+                # 同名查重（v0.3.112 修复：fresh=False 加载时 _by_name 为空——
+                # 改用卡库级扫描——重复卡真实防写入）
+                try:
+                    from aeis.core import MemoryLayer as _ML2
+                    _dup = [n for n in d.store.query_nodes(layer=_ML2.KNOWLEDGE, limit=2000)
+                            if (n.state_attributes or {}).get("name") == name]
+                    if _dup:
+                        return {"op": op, "ok": True, "existed": True, "name": name}
+                except Exception:
+                    pass
                 from aeis.core import ConditionSpace
                 cs = ConditionSpace(
                     observation_position=params.get("obs_pos", "自动补卡"),
