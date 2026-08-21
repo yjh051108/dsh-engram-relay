@@ -820,6 +820,7 @@ class ConditionDex:
                 matched = []
                 edu_w = edu_w_map.get(sa.get("edu_level"), 1.0)
                 # 1) 语义指纹命中
+                _bigram_hit_v = self._bigram_hit(condition, trig + sa.get("name", ""))
                 for term, w in fp.items():
                     if term and (term in trig or term in sa.get("name", "")):
                         score += w * 2.0 * edu_w
@@ -829,6 +830,13 @@ class ConditionDex:
                         score += w * 1.0 * edu_w
                         if term not in matched:
                             matched.append(term)
+                    elif _bigram_hit_v >= 0.2:
+                        # 俗语直配：fp 规范词与 trigger 词不同层（如「缓存」→「内存管理」），
+                        # 查询原词与 trigger 的词面重叠兜底加分
+                        score += w * 1.0 * edu_w
+                        if "词面" not in matched:
+                            matched.append("词面")
+                        break
                 # 2) 学科路由（教育层级加权；域分按查询原词×trigger 相关加权——
                 #    同域多卡时 trigger 词面相关的卡拿满域分，避免域内并列噪声）
                 _trig_rel = self._bigram_hit(condition, trig + sa.get("name", ""))
@@ -872,8 +880,10 @@ class ConditionDex:
                 if _sp is not None and q_sc and fp:
                     n_sc = getattr(n, 'semantic_coordinates', {}) or {}
                     cos = _sp.similarity_coordinates(q_sc, n_sc)
-                    if cos > 0.05:
-                        score += cos * 1.5 * edu_w
+                    # 权重 1.5→0.8 + 阈值 0.05→0.12（噪声实测：短查询共现桥乱抬分，
+                    # 如「缓存是什么」→编程基础；真语义相似仍保留）
+                    if cos > 0.12:
+                        score += cos * 0.8 * edu_w
                         if "语义" not in matched:
                             matched.append("语义")
                 if score <= 0:
