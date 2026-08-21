@@ -884,9 +884,10 @@ class ConditionDex:
                 if _sp is not None and q_sc and fp:
                     n_sc = getattr(n, 'semantic_coordinates', {}) or {}
                     cos = _sp.similarity_coordinates(q_sc, n_sc)
-                    # 权重 1.5→0.8 + 阈值 0.05→0.12（噪声实测：短查询共现桥乱抬分，
-                    # 如「缓存是什么」→编程基础；真语义相似仍保留）
-                    if cos > 0.12:
+                    # 权重 1.5→0.8 + 阈值 0.12 + 词面证据门槛（v0.3.44：
+                    # 语义坐标加分需词面有证据——通胀/焦虑类生僻词无词面重叠时
+                    # 坐标噪声（部首投影）不再抬分——与 graph 自身命中同哲学）
+                    if cos > 0.12 and self._bigram_hit(condition, trig + sa.get("name", "")) > 0.02:
                         score += cos * 0.8 * edu_w
                         if "语义" not in matched:
                             matched.append("语义")
