@@ -158,8 +158,12 @@ class DexHandler(BaseHTTPRequestHandler):
             s = m.group()
             if len(s) == 2:
                 words.add(s)
+            elif len(s) == 3:
+                words.add(s[:2]); words.add(s[1:3])
             else:
-                words.add(s[:2]); words.add(s[-2:])
+                # 首+中+尾 2-gram（中间片段承载核心语义——「代码可读性」→ 代码/可读/读性；奇数长取中后段）
+                _mid = (len(s) - 1) // 2
+                words.add(s[:2]); words.add(s[_mid:_mid + 2]); words.add(s[-2:])
         _QW = set("怎么 什么 如何 为啥 为什么 哪些 哪个 多少 哪里 何时 是否 有没有 能不能 会不会 怎么样 怎样 这样 那样 一个 一种 一下 起来 以后 内容 东西".split())
         # 已覆盖词：翻译表 + 目标卡 trigger（从卡库查——避免建无用簇）
         from aeis.core import MemoryLayer as _ML
