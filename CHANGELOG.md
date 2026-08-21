@@ -1,23 +1,45 @@
-# Changelog
+# 风识 FengShi · CHANGELOG
 
-本项目版本与仓库提交对应，格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
+## v0.3.7（2026-08-21）
+- 补簇词提取过滤：翻译表 ∪ 目标卡 trigger ∪ 疑问词 ∪ 卡名——杜绝无用簇
 
-## 未发布（2026-08-15 更新）
+## v0.3.6（2026-08-21）
+- 补卡当日上限可配置（gapDailyLimit，默认 5）
+- 补卡全链路可观测日志（上限拦截/落库/卡名治理均入 distill-debug.log）
 
-### 图谱可视化 Obsidian 化（两阶段布局 + 交互）
+## v0.3.5（2026-08-21）
+- 排序 tie-break：同 fused 分按 algo/原分/卡名稳定排序
+- README 补自动补簇/占位卡治理机制说明
 
-- **布局引擎重写**（`src/client/force.ts`）：连通分量两阶段递归布局——阶段 1 组件级排布（虚拟空间按组件尺寸放大，组件从结构上不可能互相穿插），阶段 2 成员级 FR 力导向展开（k²/d 斥力 + d²/k 弹簧 + 温度冷却 alpha 衰减），碰撞分离后处理兜底零重叠；布局保持自然尺度，缩放交给视图 fitTransform
-- **交互**（`src/client/GraphView.tsx`）：滚轮缩放（以光标为锚）、拖拽平移、双击复位、fit-to-content；悬停高亮邻接网络（其余淡化）+ 原生 tooltip；过滤切换节点平滑过渡（CSS transform）；标签贪心防重叠 + 缩放足够深才批量显示（悬停常显）；边随距离淡出；半径随 importance（7–16）
-- **质量回归**：`tests/layout-quality.mjs`（95 节点/21 分量压力图：重叠对 0、聚团比 4.9、边距≈115）；`tests/force.test.mjs` 补零重叠/组件聚类断言
+## v0.3.4（2026-08-21）
+- 占位卡 pending 化：respond/verify 双端过滤，防弱分污染
 
-### 云仓库首装不再丢 WebUI 注入（安装链路修复）
+## v0.3.3（2026-08-21）
+- 自动补簇修通：self 引用修复 + 相关性质量门（algo≥0.05 防噪声建簇）
+- 垃圾卡治理：卡名质量门（长度/疑问词过滤）+ 存量清理
+- 翻译簇单字别名（搜/找/查——日常问法盲区）
 
-- **`scripts/build.sh` 全量构建**：一次 `npm run build` = host tsc + client tsdown + 产物自检（lib/index.js + lib/client.js 缺失即失败）——此前只编译 host，`lib/client.js` 缺失会让 client-modules 的整个 `__DSH_BOOT__` 注入失败（WebUI 所有插件面丢失）
-- **双布局依赖解析**：插件自身 node_modules 优先，DSH 源码 checkout（DSH_CHECKOUT）/ npm 全局包（dsh on PATH / npm root -g / Windows 全局目录扫描）回退链接，缺 tsc/tsdown 给明确指引
-- **`package.json` 加 `prepare`**：`dsh plugin add <git|file>` 安装时 pnpm 自动构建（git 依赖需按提示加 allowBuilds）
-- **docs/INSTALL-new-machine.md 更新**：单命令全量构建 + 云仓库直接安装流程
+## v0.3.2（2026-08-21）
+- 清理运行时产物（pyc/db 移除）+ gitignore
 
-### 修复
+## v0.3.1（2026-08-21）
+- 自动补词网闭环：弱命中≥3 次 → 提取俗语词自动建簇（零 LLM）
+- 认知域翻译簇（记住→记忆/检索→搜索/存储/验证/知识）
+- 发布包补卡播种（26 识别卡 + 18 补卡）
+- 隔离环境验证：发布包与本地响应一致
+
+## v0.3.0（2026-08-20）
+- 风识发布：DSH 统一大脑增强套装
+- 统一大脑：记忆图（agent 自组织）+ 浅思维三算子（条件/验证/边界）+ 自动补卡
+- 灵枢校准器：D_norm 白箱验证 + 诚实边界 + add_card 端点 + 自愈 watchdog 托管
+- 纯算法语义匹配（SemanticScorer 三通道，零 embedding）；ONNX 仅对比验证
+- 蒸馏保底：LLM 空返回启发式沉淀（记忆不断流）
+- 14 工具面 + 三层引导提示词（系统/HEADER/工具描述）
+- lingshu/ 自包含运行集 + scripts/verify.mjs 套装自检
+- 发布前验收：subagent 实战五轮 → 8 项修复（status 绑定/白箱证据/search 过滤/去重/补卡保底等）
+
+--- 历史版本（v0.1.x-0.2.x 见 git log）---
+
 
 - **store 清空复活**：`load()` 对"主文件存在且完全可解析（含合法空库）"不再回退备份——此前 clearSession/remove 清空后重载会从旧 .bak 复活已删记忆；NUL 损坏（有真实事故）仍走备份恢复链（`tests/session.test.mjs` + `store-recovery.test.mjs` 双绿）
 - **测试对齐 2026-08-12 语义门槛改造**：wake 测试补桩 embedder（无 embedder 时宁缺毋滥=零注入是新有意语义）；graph-api 测试的 fake server 键名 httpServer→webServer（改名后测试未跟上）；hybrid 测试对齐阈值/分数团规则——全量 61/61 通过
@@ -56,4 +78,3 @@
 - engram_status compact 探测改 ctx.get + 记忆段 order 9997 尾部化（`d18bfa4`）
 - 存储原子写 + 损坏自愈备份（engrams.jsonl 曾全 NUL 损坏，双实例非原子并发写）
 - 蒸馏 reasoningEffort off（max 思考会吃光 800 token 预算导致输出为空）
-
