@@ -560,6 +560,28 @@ export class EngramRelay {
       if (layer === 'project' && !cwd) continue
       if (layer === 'session' && !sessionId) continue
       if (!item.title || !item.summary) continue
+      // 蒸馏冗余去重（v0.3.46）：与已有记忆 2-gram 重叠 ≥0.55 则跳过——
+      // 汇报/状态片段反复蒸馏（版本线/回归行）不再堆积重复记忆
+      {
+        const _tgrams = new Set<string>()
+        for (const _seg of (String(item.title).match(/[\u4e00-\u9fff]+/g) ?? [])) {
+          for (let _i = 0; _i < _seg.length - 1; _i++) _tgrams.add(_seg.slice(_i, _i + 2))
+        }
+        let _dup = false
+        if (_tgrams.size > 0) {
+          for (const _e of this.store.all()) {
+            const _eg = new Set<string>()
+            for (const _seg of ((_e.title ?? '').match(/[\u4e00-\u9fff]+/g) ?? [])) {
+              for (let _i = 0; _i < _seg.length - 1; _i++) _eg.add(_seg.slice(_i, _i + 2))
+            }
+            if ([..._tgrams].filter((g) => _eg.has(g)).length / _tgrams.size >= 0.55) { _dup = true; break }
+          }
+        }
+        if (_dup) {
+          this.debugLog(`distill dedup skip: ${String(item.title).slice(0, 20)}`)
+          continue
+        }
+      }
       // 自动因果：causesOf 引用的已有记忆标题 → 建因果边（前因 → 新节点）。
       const causeIds: string[] = []
       for (const causeTitle of (Array.isArray(item.causesOf) ? item.causesOf : [])) {
