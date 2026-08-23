@@ -232,7 +232,7 @@ export class EngramStore {
   private titleIndex = new Map<string, string[]>()
 
   constructor(storeDir: string, private hasher: NgramHashAddressing = new NgramHashAddressing()) {
-    this.dir = storeDir === '' ? join(homedir(), '.dsh', 'engram-relay') : resolve(storeDir)
+    this.dir = storeDir === '' ? join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'engram-relay') : resolve(storeDir)
     this.file = join(this.dir, 'engrams.jsonl')
     if (existsSync(this.file)) {
       this.load()

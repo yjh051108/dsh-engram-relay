@@ -126,7 +126,7 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
         let body = ''
         for await (const chunk of req) body += String(chunk)
         try {
-          appendFileSync(join(homedir(), '.dsh', 'super-injector', 'engram-graph.log'), body)
+          appendFileSync(join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'super-injector', 'engram-graph.log'), body)
         } catch { /* 日志写失败不阻塞 */ }
         sendJson(res, 200, { ok: true })
         return
