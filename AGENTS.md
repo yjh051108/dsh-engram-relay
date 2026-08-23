@@ -147,6 +147,11 @@ dsh --profile web --dump-config
 - **与官方 compact 共存**：不阻止、不替代 `dsh-compact-basic`（它负责腾 KV）；
   engram 在 `agent/turn-stopping` 实时留底（细节保真，可唤醒找回）。
 - 工具 contributes 声明（dsh.plugin.json / dshx.contributes）必须与注册一致（契约校验）。
+- **⚠️ llm/stream 注入必须用块数组**（2026-08-23 实战踩坑）：向 `options.messages`
+  push 的消息 `content` 必须是 `ContentBlock[]`（`[{ type: 'text', text }]` 或
+  `createUserMessage`），**绝不能用字符串**——字符串 content 会让 pi-ai 等适配器
+  `flattenText` 崩溃，报错 `message.content.filter is not a function`，曾致某会话
+  compact 连续 3 次失败。改 relay 注入逻辑后必须同步 `lib/` 并热重载（dev_reload_package）。
 - 测试：`npm test`（Node 单测，含 hybrid.test.mjs 混合检索 + python-client.test.mjs
   真实 bge embed）+ `npm run test:python`（需 `PYTHONIOENCODING=utf-8`，Windows 控制台
   GBK 打不了 ✓）+ `npm run sim:1m` / `sim:causal`；
