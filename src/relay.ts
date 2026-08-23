@@ -152,7 +152,10 @@ export class EngramRelay {
             if (injection) {
               const messages = (options as { messages?: unknown[] }).messages
               if (Array.isArray(messages)) {
-                ;(messages as unknown[]).push({ role: 'system', content: injection } as never)
+                // 消息契约要求 content 为块数组（ContentBlock[]）：字符串 content 会让
+                // 适配器（如 dsh-llm-pi-ai 的 flattenText）崩溃——
+                // "message.content.filter is not a function"（compact 失败根因）。
+                ;(messages as unknown[]).push({ role: 'system', content: [{ type: 'text', text: injection }] } as never)
               }
             }
           } catch (error) {
