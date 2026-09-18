@@ -12,7 +12,7 @@
  * 可见性边界与唤醒/工具一致：global 所有会话 / project 同 cwd / session 本会话。
  */
 
-import type { Context as CordisContext } from 'cordis'
+import type { Context as CordisContext } from '@deepseek-ai/cordis'
 
 import { isVisible, type EngramNode } from './engram/store.js'
 import type { EngramRelay } from './relay.js'
