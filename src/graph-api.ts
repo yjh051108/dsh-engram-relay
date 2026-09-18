@@ -68,6 +68,7 @@ function nodeView(n: EngramNode) {
     importance: n.importance,
     hits: n.hits,
     createdAt: n.createdAt,
+    status: n.status ?? 'confirmed',
   }
 }
 
@@ -142,9 +143,11 @@ export function installGraphApi(ctx: HttpCtx, relay: EngramRelay): () => void {
         // 可见界面，必须保守：不泄露他人项目/会话记忆（isVisible 的空
         // viewer 宽容分支只用于 wake/tools 的向后兼容）。
         const visible = relay.store.all().filter((n) =>
-          viewer.sessionId === undefined && viewer.cwd === undefined
+          (viewer.sessionId === undefined && viewer.cwd === undefined
             ? n.layer === 'global'
             : isVisible(n, viewer))
+          // v0.4.0：退役节点不进图谱主视图（治理可见性交给 search/status）
+          && n.status !== 'retired')
         const ids = new Set(visible.map((n) => n.id))
         const edges: EdgeView[] = []
         const seen = new Set<string>()
