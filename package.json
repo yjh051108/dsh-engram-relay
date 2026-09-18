@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-engram-relay",
-  "version": "0.3.74",
+  "version": "0.4.1",
   "description": "大 engram 小 KV：外置 engram 转接层（跨会话分层记忆：global/project/session，AI 自主决策归属 + 因果链接索引 + 渐进披露 + 主动唤醒），为 DSH 实现超长上下文记忆稀疏路由，与官方 compact 共存（官方腾 KV，engram 保细节）",
   "private": true,
   "type": "module",
@@ -20,9 +20,18 @@
   "files": [
     "lib",
     "cordis.patch.yml",
-    "model"
+    "lingshu/start_lingshu.py",
+    "lingshu/knowledge",
+    "lingshu/whitebox_kb/wisdom",
+    "lingshu/whitebox_kb/knowledge",
+    "lingshu/whitebox_kb/seed_knowledge",
+    "lingshu/whitebox_kb/aeis_core",
+    "!**/__pycache__",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/*.pyo"
   ],
-  "license": "BSD-3-Clause",
+  "license": "Apache-2.0",
   "engines": {
     "dsh": ">=0.0.1-rc"
   },
@@ -58,7 +67,8 @@
         "engram_promote",
         "engram_status",
         "engram_verify",
-        "engram_respond"
+        "engram_respond",
+        "engram_retire"
       ],
       "skills": []
     }
