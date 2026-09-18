@@ -25,7 +25,7 @@ import type { Context as CordisContext } from 'cordis';
 import type LlmService from '@deepseek-ai/dsh-llm';
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import type ToolRegistry from '@deepseek-ai/dsh-tools';
-import z from 'schemastery';
+import z from '@deepseek-ai/schemastery';
 type Context = CordisContext & {
     llm: LlmService;
     systemPrompt: SystemPrompt;
