@@ -18,6 +18,7 @@
  */
 import type { Context as CordisContext } from 'cordis';
 import type LlmService from '@deepseek-ai/dsh-llm';
+import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt';
 import type ToolRegistry from '@deepseek-ai/dsh-tools';
 import { EngramStore } from './engram/store.js';
@@ -25,7 +26,19 @@ import { CausalGraph } from './engram/causal.js';
 import { NgramHashAddressing } from './engram/hash.js';
 import { EngramWakeEngine, type WakeViewer } from './engram/wake.js';
 import { RelayModel } from './model/relay-model.js';
+import { LingshuSupervisor } from './lingshu-supervisor.js';
 import type { EngramRelayConfig, VerifyMark } from './types.js';
+/**
+ * 构造 pre-step 唤醒注入的那条 durable user 消息（导出供回归测试钉住形态）。
+ *
+ * 案底 2026-09-10：只给 `{role, content}` 的裸对象时，**同一轮里上游的** pre-step
+ * 处理器会当场炸——它们逐条读 `message.source.kind` 判来源（`dsh-time-context`
+ * 判浏览器时区、`dsh-repeat-tool-reminder` 判真人帧）。缺 source 的报错是
+ * `Cannot read properties of undefined (reading 'kind')`，被 agent-loop 折成
+ * `turn/end` 的 UNKNOWN 失败 ⇒ **此后每个回合都在模型开工前就死**（注入文本永不
+ * 落盘，去重也就永远拦不住它）。`createUserMessage` 一次补齐 id 与 source。
+ */
+export declare function renderWakeMessage(text: string): ReturnType<typeof createUserMessage>;
 export interface EngramRelayDeps {
     llm: LlmService;
     systemPrompt: SystemPrompt;
@@ -52,9 +65,15 @@ export declare class EngramRelay {
     readonly activation: import('./engram/activation.js').ActivationCache;
     /** 向量索引（int8 粗筛 + fp32 精筛双表；prefilter 候选来源）。 */
     readonly vectorIndex: import('./engram/vector-index.js').BruteForceIndex;
+    /** 灵枢服务托管（v0.4.0 融合自愈）：探测 → 自动拉起 → 按需重启 → 只 kill 自拉起进程。 */
+    readonly supervisor: LingshuSupervisor;
+    /** 灵枢验证结果 LRU 缓存（v0.4.0 性能）：同主题重复轮次零 HTTP；error 不缓存。 */
+    private verifyCache;
     private disposers;
     constructor(ctx: CordisContext, config: EngramRelayConfig);
-    /** 融合核心：灵枢 auto_verify HTTP 调用 → VerifyMark（服务不可用/超时 → error）。 */
+    /** 融合核心：灵枢 auto_verify HTTP 调用 → VerifyMark（服务不可用/超时 → error）。
+     *  v0.4.0：LRU 缓存命中零 HTTP；未命中先 ensure（自愈拉起），服务未就绪
+     *  返回友好 error（不抛裸 TypeError）；error 不缓存（恢复后立即重试）。 */
     private lingshuAutoVerify;
     /** 唤醒验证钩子（wake 用）：engram 节点 → 灵枢验证。 */
     private lingshuVerifier;
@@ -82,8 +101,19 @@ export declare class EngramRelay {
      * 含懒补 ensure：新记忆未入向量表时差量 embed 补入；embedder 不可用返回 null（哈希兜底）。
      */
     private vectorPrefilter;
+    /** 注入静音开关（运行时、免重载）：store 目录下存在 `inject-off` 文件 = 停「塞进模型上下文」的那一半。
+     *  为什么是文件而不是 config：super-injector 创建 entry 时 config 恒为 `{}`（「默认值即配置」），
+     *  配置层改不动运行实例；标记文件可即时翻转（用户「先关闭一下」的诉求）。
+     *  只管注入：唤醒计算/蒸馏/会话清理/工具/图谱 API 全不受影响。恢复＝删掉该文件。 */
+    private injectionMuted;
     /** 挂载所有 seam。 */
     install(): () => void;
+    /** 注入被跳过：首次显式留痕——issue #14 最贵的部分是「静默」，不是崩溃。 */
+    private injectionSkipLogged;
+    private noteInjectionSkip;
+    /** 注入失败：首次升 error 并计数，之后按次数 warn——不再把异常降级成静默。 */
+    private injectionFailCount;
+    private noteInjectionFailure;
     private renderMemorySection;
     /** 异步触发训练模型的原生回忆（由 llm/stream 旁路调用，缓存结果）。 */
     maybeRecall(query: string): Promise<void>;
@@ -101,6 +131,20 @@ export declare class EngramRelay {
     lastTurnAt: number;
     /** 当前工作目录（分层准入：project 层按 cwd 过滤；turn-stopping 持续追踪）。 */
     currentCwd: string | null;
+    /**
+     * 解析查看者工作目录（分层准入中 project 层的边界）。
+     *
+     * 优先按会话解析：agents 服务 → 该会话 header.cwd（与图谱 API
+     * graph-api.ts:resolveViewer 同一口径）；再回退到最近一次 turn-stopping
+     * 捕获的 currentCwd；最后回退到 store 里最近写入的 project 层节点所属
+     * 项目（热重载后 currentCwd 尚未捕获时的兜底）。
+     *
+     * ⚠️ 不能只用 currentCwd：它是进程级单字段，任何会话的 turn-stopping
+     * 都会覆盖它（下方写入处），多会话并发时后写者赢——拿它当每个会话的
+     * viewer.cwd 会让另一会话的 project 层记忆被错误过滤（表现为 wake
+     * items=0）。
+     */
+    resolveViewerCwd(sessionId?: string): string | undefined;
     /**
      * 供工具使用的唤醒查询入口。
      * @param viewer - 查看者视角（分层准入：{ sessionId, cwd }）。
