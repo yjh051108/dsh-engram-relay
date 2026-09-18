@@ -49,6 +49,13 @@ export interface Config {
     distillRequireConfirm: boolean;
     semanticMinScore: number;
     lingshuVerifyUrl: string;
+    lingshuAutoStart: boolean;
+    lingshuPython: string;
+    retireEnabled: boolean;
+    retireAfterDays: number;
+    retireMaxImportance: number;
+    sessionSweepEnabled: boolean;
+    sessionOrphanHours: number;
 }
 export declare const Config: z<Config>;
 export declare function apply(ctx: Context, config: Config): void;
