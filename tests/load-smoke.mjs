@@ -13,7 +13,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const CHECKOUT = process.env.DSH_CHECKOUT ?? 'C:/Users/Eldwen/.dsh/source/staging-20260809T150526Z'
+const CHECKOUT = process.env.DSH_CHECKOUT ?? ''  // ★ 不写死本机路径（原来硬编码了某个账户下的 staging 目录）
 const toUrl = (p) => new URL(`file:///${p.replace(/\\/g, '/')}`).href
 
 async function main() {
