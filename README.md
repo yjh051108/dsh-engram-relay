@@ -8,12 +8,14 @@
 
 风识是一个 DSH 插件，把记忆与知识融合为**一张自组织语义图**：
 
+> **一体两器官（r60 定版，详见 AGENTS.md 同名节）**：知识=去情景可共享（学科卡），经验=带情景第一人称（节点/因果/确认制）；融合在接缝不在合并——verify 四态带 `📎 相关记忆`、respond 命中亦回头找经验、双不会共学一环、命名空间互不吞并（**合并是幻觉，互见才是融合**）。
+
 ```
 统一自适应语义图（agent 建边 · 强化遗忘 · 软簇）
  ├─ 存储层：节点=记忆/概念（蒸馏+agent 织网），跨会话分层 global/project/session
  ├─ 召回层：哈希+纯算法语义匹配（SemanticScorer 三通道，零模型）
  ├─ 浅思维：图上算子（条件/验证/边界）→ 每轮自动注入 3 行
- └─ 深挖层：14 个工具（recall/store/open/link/verify/respond…）渐进披露
+ └─ 深挖层：15 个工具（recall/store/open/link/verify/respond…）渐进披露
 
 灵枢（常驻校准器）：
   · D_norm 验证闸门——记忆敢想，灵枢把关敢不敢说对
@@ -41,7 +43,10 @@
 | 蒸馏保底 | 回合后 LLM 蒸馏；空返回时启发式直接沉淀（记忆不断流） |
 | 自动成族 | 语义图软簇（层次聚类，分辨率可调）——无硬分类 |
 | 跨域桥 | agent 跨域对话触发桥边——「融会贯通」的结构化形态 |
-| 工具面 | 14 个工具：recall/store/propose/confirm/reject/open/search/link/update/remove/promote/status/verify/respond |
+| **灵枢自愈**（v0.4.0） | 插件托管灵枢服务：未运行自动拉起 `start_lingshu.py`、崩溃按需重启（10s 冷却）、只 kill 自拉起进程（手动实例尊重）、不可用友好降级 |
+| **过时记忆淘汰**（v0.4.0） | 闲置 45 天 + 重要度门槛 → 自动退役（退出召回，search 可见 🗄，open/confirm 复活）；蒸馏同题刷新/旧题接替；同标题只留最新；工具 `engram_retire` 手动处置 |
+| **验证缓存**（v0.4.0） | 灵枢验证 LRU（TTL 10min）：同主题重复轮次零 HTTP；error 不缓存（恢复即重试） |
+| 工具面 | 15 个工具：recall/store/propose/confirm/reject/open/search/link/update/remove/promote/status/verify/respond/retire |
 
 ## 装配（与本地一致）
 
@@ -70,11 +75,19 @@ dsh plugin --profile web add .
 python lingshu/start_lingshu.py    # 自愈 watchdog：崩溃 1s 自动重启
 ```
 
+> v0.4.0 起可省略此步：插件（`lingshuAutoStart=true`）会在首次 verify/respond
+> 时自动拉起服务；`npm run verify` 同样自动拉起（用完即停）。
+
 ### 4. 配置（cordis.patch.yml 或 schema 默认值）
 
 ```yaml
 config:
   lingshuVerifyUrl: 'http://127.0.0.1:18766'   # 灵枢校准器（默认开启）
+  lingshuAutoStart: true                        # v0.4.0 融合自愈：未运行自动拉起
+  lingshuPython: ''                             # 灵枢服务的 Python（空 = 沿用 pythonPath）
+  retireEnabled: true                           # v0.4.0 过时记忆淘汰开关
+  retireAfterDays: 45                           # 闲置超过此天数 → 自动退役（可复活）
+  retireMaxImportance: 1                        # 仅重要度 ≤ 此值可自动退役（0 = 关）
   embedModel: ''                                # 空 = 纯算法语义匹配（默认）
   distillEveryTurns: 2                          # 回合蒸馏频率
   injectBudgetTokens: 200                       # 注入预算（token）
@@ -83,13 +96,15 @@ config:
 ## 验证（装配后 30 秒确认）
 
 ```bash
-npm run verify    # 运行自检：服务健康 + 卡库 + 记忆库 + 浅思维冒烟
+npm run verify    # 运行自检：服务健康（未运行自动拉起）+ 卡库 + 记忆库 + 浅思维冒烟
 ```
 
 新会话里问：
 - 「铁门放外面久了为什么生锈」→ 记忆/知识命中
 - 「量子纠缠能不能超光速通信」→ 浅思维验证行（?图谱外 或 ✓锚定）
 - 任意灵枢无卡的问题连续求助 → 自动补卡（~15s 生效）
+- 过时记忆治理：闲置记忆自动退役（`engram_status` 看 retiredCount）/
+  手动处置 `engram_retire` / 误伤复活 `engram_open` 或 `engram_confirm`
 
 ## 与本地一致的说明
 
