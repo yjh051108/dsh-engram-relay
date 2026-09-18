@@ -17,7 +17,7 @@
  *    保真（可检索、带因果），官方负责空间（surface 替换）。
  */
 
-import type { Context as CordisContext } from 'cordis'
+import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type LlmService from '@deepseek-ai/dsh-llm'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
