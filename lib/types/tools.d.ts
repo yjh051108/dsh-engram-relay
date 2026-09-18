@@ -15,7 +15,7 @@
  * 可见性边界（跨会话分层）：global 所有会话 / project 同工作目录 / session
  * 本会话。工具 execute 从 exec.agent 取 sessionId + cwd 作为查看者视角。
  */
-import type { Context as CordisContext } from 'cordis';
+import type { Context as CordisContext } from '@deepseek-ai/cordis';
 import type ToolRegistry from '@deepseek-ai/dsh-tools';
 import { EngramRelay } from './relay.js';
 type ToolsContext = CordisContext & {
