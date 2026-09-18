@@ -16,7 +16,7 @@
  * 本会话。工具 execute 从 exec.agent 取 sessionId + cwd 作为查看者视角。
  */
 
-import type { Context as CordisContext } from 'cordis'
+import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type ToolRegistry from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
