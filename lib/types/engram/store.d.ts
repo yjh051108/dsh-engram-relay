@@ -73,8 +73,11 @@ export interface EngramNode {
     lastHitAt: number | null;
     /** 该节点对应的哈希槽位（写入时固化，重哈希可重建）。 */
     slots: string[];
-    /** 确认状态：pending=待确认（不参与检索/唤醒命中），confirmed=已确认（缺省；旧数据视为 confirmed）。 */
-    status?: 'pending' | 'confirmed';
+    /** 确认状态：pending=待确认（不参与检索/唤醒命中），confirmed=已确认（缺省；旧数据视为 confirmed），
+     *  retired=已退役（v0.4.0 过时记忆治理：退出检索/唤醒，search 可见 🗄，open/confirm/update 复活，不删数据）。 */
+    status?: 'pending' | 'confirmed' | 'retired';
+    /** 退役时间（epoch ms；仅 status=retired 时有值）。 */
+    retiredAt?: number;
     /** 强化事件时间戳（写入/命中/展开/链接；类脑激活模型 B=ln(Σt^(-d)) 的输入）。旧数据缺省 [createdAt]。 */
     reinforces?: number[];
 }
@@ -119,9 +122,12 @@ export declare class EngramStore {
      * 渐进披露：title/summary 是入口层，content 是展开层。
      * layer 缺省 'session'（向后兼容：旧调用语义 = 会话级即弃）。
      */
-    add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots' | 'layer' | 'projectId'> & {
+    add(input: Omit<EngramNode, 'id' | 'createdAt' | 'hits' | 'lastHitAt' | 'slots' | 'layer' | 'projectId' | 'status'> & {
         layer?: EngramLayer;
         projectId?: string | null;
+        createdAt?: number;
+        lastHitAt?: number | null;
+        status?: 'pending' | 'confirmed' | 'retired';
     }): EngramNode;
     /** 按标题取节点（双向链接 [[title]] 解析）。 */
     byTitle(title: string): EngramNode | undefined;
@@ -183,11 +189,60 @@ export declare class EngramStore {
     confirmNode(id: string): EngramNode | undefined;
     /** 拒绝（删除）一个待确认节点。非 pending 节点不可拒绝（防误删已生效记忆）。 */
     rejectNode(id: string): boolean;
+    /**
+     * 退役候选：confirmed 且闲置超过 idleDays 且重要度 ≤ maxImportance。
+     * 闲置 = now - lastHitAt（旧数据无 lastHitAt 时按 createdAt 兜底——绝不
+     * 因字段缺失而误判为"新鲜"）。pending/retired 不参与。
+     * 算法是参谋：只标候选不删数据——退役可复活（unretire）。
+     */
+    retirementCandidates(opts: {
+        idleDays: number;
+        maxImportance: number;
+        now?: number;
+    }): EngramNode[];
+    /** 退役一个节点：退出召回/唤醒（lookup 已过滤），数据保留（search/open 可见）。 */
+    retire(id: string): EngramNode | undefined;
+    /** 复活一个退役节点（open/confirm/update 时自动调用）：重新参与检索/唤醒。 */
+    unretire(id: string): EngramNode | undefined;
+    /** 全部退役节点（治理盘点；search/status 用）。 */
+    retiredNodes(): EngramNode[];
+    /**
+     * 同标题去重治理（v0.4.0）：同 title 的节点只保留最新（按 createdAt），
+     * 旧者退役（数据保留可复活）。titleIndex 指向保留者——否则 byTitle 会
+     * 命中已退役节点（open 会误复活）。
+     * @returns 保留节点（无重复返回 null）。
+     */
+    dedupTitle(title: string): EngramNode | null;
     remove(id: string): boolean;
+    /**
+     * 反向链接（Obsidian 风格 [[标题]]）：把 fromTitle 记到 title 节点的 links 里。
+     * 返回 true=已存在/已写入，false=目标不存在或自指。
+     *
+     * ★ v0.5.1 修（重复记忆的真凶）：旧接线写的是 `store.add({ ...target, links })`——
+     *   而 `add()` 是**新建节点**（新 id、new 计数），不是更新：于是每建一条带 [[链接]] 的记忆，
+     *   就把被链接的那条**复制一份**（同标题、同 createdAt，只有 id 不同）。图谱里实测 27 组
+     *   「同标题同毫秒」的成对节点全是这么来的——它们不会自己消失，只会让每次召回多一份噪声。
+     *   正确做法是按 id 就地更新（update），节点数不变。
+     */
+    linkBack(title: string, fromTitle: string): boolean;
     /**
      * 会话隔离（分层生命周期）：只清该会话的 **session 层** 临时记忆；
      * global/project 跨会话层保留——跨会话沉淀的核心转变。
      * 复用 remove() 统一清理索引（byId/titleIndex/slotIndex）。
      */
     clearSession(sessionId: string): number;
+    /**
+     * 批量清除**指定会话集合**的 session 层节点（v0.5.1 孤儿清扫用）。返回被删节点的
+     * 原样 JSON 行，调用方负责归档——清扫可回灌。
+     *
+     * 为什么不复用 clearSession/remove：那两条每条都 persist() 一次（写 tmp + rename + 读回校验
+     * + 打快照）。孤儿实测 1671 条 × 10.9MB 全量重写 = 一万八千次文件重写，等于把记忆库锁死。
+     * 这里内存里删完只 persist 一次。
+     *
+     * `archive` 在**删除之前**拿到原样 JSON 行（顺序即承诺：先归档，再删）。
+     */
+    dropSessionNodes(sessionIds: Set<string>, archive?: (lines: string[]) => void): {
+        removed: number;
+        lines: string[];
+    };
 }
