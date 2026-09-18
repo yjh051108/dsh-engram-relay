@@ -78,7 +78,7 @@ NODE_EXE = shutil.which("node") or _first_existing([
 def _find_dsh_cli():
     """DSH CLI 探测：当前用户 npm 全局 → 已知真实安装用户。"""
     candidates = []
-    for root in (os.path.expanduser("~"), r"C:\Users\Eldwen"):
+    for root in (os.path.expanduser("~"),):  # ★ 只用当前用户家目录（原来写死了某个账户名）
         candidates.append(os.path.join(
             root, "AppData", "Roaming", "npm", "node_modules",
             "@deepseek-ai", "dsh", "lib", "bin.js"))
