@@ -82,7 +82,7 @@
     "cordis": ">=4.0.0-rc <5",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "schemastery": "^3.18.0"
+    "@deepseek-ai/schemastery": "^3.18.2"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
