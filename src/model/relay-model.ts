@@ -11,7 +11,7 @@
  *  蒸馏 → 跳过；打分 → 重要度；记忆写入 → 无操作。插件始终可用。
  */
 
-import type { Context as CordisContext } from 'cordis'
+import type { Context as CordisContext } from '@deepseek-ai/cordis'
 import type { EngramRelayConfig } from '../types.js'
 import { PythonEngramClient, type DistillEntry } from './python-client.js'
 import { embedWithOnnx } from './onnx-embedder.js'
