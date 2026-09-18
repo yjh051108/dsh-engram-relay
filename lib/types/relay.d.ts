@@ -16,7 +16,7 @@
  *    成熟的有损总结式压缩）。engram 的职责在官方折叠之前完成——细节
  *    保真（可检索、带因果），官方负责空间（surface 替换）。
  */
-import type { Context as CordisContext } from 'cordis';
+import type { Context as CordisContext } from '@deepseek-ai/cordis';
 import type LlmService from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type SystemPrompt from '@deepseek-ai/dsh-system-prompt';
