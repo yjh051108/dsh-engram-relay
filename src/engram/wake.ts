@@ -162,7 +162,8 @@ export class EngramWakeEngine {
     if (this.prefilter) {
       const ids = await this.prefilter(query).catch(() => null)
       candidates = ids
-        ? ids.map((id) => this.store.get(id)).filter((e): e is EngramNode => !!e)
+        // v0.4.0：退役/待确认节点即使仍在向量索引/图边中也不进候选
+        ? ids.map((id) => this.store.get(id)).filter((e): e is EngramNode => !!e && e.status !== 'pending' && e.status !== 'retired')
         : this.store.lookup(query, 256)
     } else {
       candidates = this.store.lookup(query, 256)
@@ -290,7 +291,8 @@ export class EngramWakeEngine {
       if (picked.length >= limit) break
       if (picked.length > 0 && score < topScore * 0.9) break
       const e = this.store.get(id)
-      if (!e) continue
+      // v0.4.0：因果传播可能经图边激活退役节点——选中时终审剔除
+      if (!e || e.status === 'pending' || e.status === 'retired') continue
       const cost = estimateTokens(e.title) + estimateTokens(e.summary)
       if (tokens + cost > this.config.injectBudgetTokens && picked.length > 0) break
       picked.push(e)
