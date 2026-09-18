@@ -33,4 +33,20 @@ export interface EngramRelayConfig {
     /** 融合：灵枢（Lingshu）白箱验证服务地址（如 http://127.0.0.1:18766）。
      *  非空时唤醒标注 ✓锚定/?图谱外 + 知识之书注入 + 写入闸门；空 = 关闭融合。 */
     lingshuVerifyUrl: string;
+    /** 融合自愈（v0.4.0）：服务未运行时自动拉起 lingshu/start_lingshu.py。
+     *  true = 托管（探测 /dex/status → spawn → 轮询就绪 → 崩溃重启）；
+     *  false = 仅探测降级，不拉起（用户自管服务）。 */
+    lingshuAutoStart: boolean;
+    /** 灵枢服务的 Python 解释器（空 = 沿用 pythonPath）。 */
+    lingshuPython: string;
+    /** 记忆退役开关（v0.4.0）：闲置过久 + 重要度 ≤ 门槛 → 自动退役（退出召回/唤醒；search 可见可复活）。 */
+    retireEnabled: boolean;
+    /** 退役闲置天数：距最后一次唤醒超过此天数（lastHitAt 缺省按 createdAt）且重要度 ≤ 门槛 → 退役。 */
+    retireAfterDays: number;
+    /** 退役重要度门槛：仅重要度 ≤ 此值的记忆可被自动退役（1 = 全部可退役；设 0 关闭自动退役）。 */
+    retireMaxImportance: number;
+    /** 孤儿会话清扫开关（v0.5.1）：清理「>sessionOrphanHours 无活动」的 session 层节点（先归档再删）。 */
+    sessionSweepEnabled: boolean;
+    /** 孤儿判定小时数：某会话最后活动早于「现在 − 此值」即视为孤儿（进程被杀/宿主重启留下的残渣）。 */
+    sessionOrphanHours: number;
 }
