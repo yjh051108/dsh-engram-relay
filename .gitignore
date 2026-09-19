@@ -1,5 +1,14 @@
 node_modules/
-lib/
+# ★★ `lib/` 【必须入 git】—— 它是【发布件】（`package.json` 的 `files` 里有 `lib`）
+# ```
+# 【缺陷（2026-09-19 · 已修）】这里原本有 `lib/` ⇒ 而 34 个 lib/ 文件是【早期就 add 进去的】
+#   ⇒ ★★★ **于是形成"部分跟踪"状态**：老文件在 git 里、而【后生成的新文件被 ignore 挡住】
+#     ⇒ 实证：`lib/model/` 3 个 + `lib/types/model/` 3 个 = **6 个文件从没进 git** ❌
+#       ⇒ 而 `lib/relay.js` 里有 `from './model/relay-model.js'` ⇒ **一 import 就 ERR_MODULE_NOT_FOUND**
+#     ⇒ ⚠️ 而 `install.sh` 会说"✓ 装了" ⇒ **隐蔽性极高**（第一个会话加载它才崩）
+#   ⇒ ★ 判据：**发布件【不能靠 .gitignore 的部分状态】** ——
+#     它让"缺文件"变成"静默的"（**因为 `git status` 干净、而文件就是不在**）
+# ```
 *.tsbuildinfo
 .cache/
 models/
